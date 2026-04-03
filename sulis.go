@@ -98,6 +98,9 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 	if err != nil {
 		return err
 	}
+	if user.PasswordHash == "" {
+		return ErrInvalidCredentials
+	}
 
 	ok, err := verifyPassword(oldPassword, user.PasswordHash)
 	if err != nil {
@@ -107,6 +110,22 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		return ErrInvalidCredentials
 	}
 
+	return s.setPassword(ctx, user, newPassword)
+}
+
+// SetInitialPassword sets the first password for a passwordless user.
+func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword string) error {
+	user, err := s.users.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user.PasswordHash != "" {
+		return ErrInvalidCredentials
+	}
+	return s.setPassword(ctx, user, newPassword)
+}
+
+func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string) error {
 	hash, err := hashPassword(newPassword, s.cfg.Argon2)
 	if err != nil {
 		return fmt.Errorf("sulis: hashing new password: %w", err)
@@ -131,19 +150,12 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 		return err
 	}
 
-	hash, err := hashPassword(newPassword, s.cfg.Argon2)
-	if err != nil {
-		return fmt.Errorf("sulis: hashing new password: %w", err)
-	}
-
 	user, err := s.users.GetUserByID(ctx, token.UserID)
 	if err != nil {
 		return err
 	}
 
-	user.PasswordHash = hash
-	user.UpdatedAt = time.Now()
-	if err := s.users.UpdateUser(ctx, user); err != nil {
+	if err := s.setPassword(ctx, user, newPassword); err != nil {
 		return err
 	}
 
@@ -153,22 +165,25 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 // ValidateSession validates a session token and returns the session and user.
 // Returns ErrSessionNotFound or ErrSessionExpired on failure.
 func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *User, error) {
-	session, err := s.sessions.GetSessionByToken(ctx, token)
+	tokenHash := hashSessionToken(token)
+	session, err := s.sessions.GetSessionByTokenHash(ctx, tokenHash)
 	if err != nil {
 		return nil, nil, err
 	}
+	validated := *session
+	validated.Token = token
 
-	if time.Now().After(session.ExpiresAt) {
-		_ = s.sessions.DeleteSession(ctx, session.ID)
+	if time.Now().After(validated.ExpiresAt) {
+		_ = s.sessions.DeleteSession(ctx, validated.ID)
 		return nil, nil, ErrSessionExpired
 	}
 
-	user, err := s.users.GetUserByID(ctx, session.UserID)
+	user, err := s.users.GetUserByID(ctx, validated.UserID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return session, user, nil
+	return &validated, user, nil
 }
 
 // RevokeSession deletes a single session.
@@ -193,11 +208,15 @@ func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, err
 		ID:        generateID(),
 		UserID:    userID,
 		Token:     token,
+		TokenHash: hashSessionToken(token),
 		ExpiresAt: now.Add(s.cfg.SessionDuration),
 		CreatedAt: now,
 	}
 
-	if err := s.sessions.CreateSession(ctx, session); err != nil {
+	persisted := *session
+	persisted.Token = ""
+
+	if err := s.sessions.CreateSession(ctx, &persisted); err != nil {
 		return nil, err
 	}
 
@@ -238,7 +257,10 @@ func (s *Sulis) validateToken(ctx context.Context, rawToken string, purpose Toke
 	hashed := hashToken(rawToken)
 	token, err := s.tokens.GetTokenByHash(ctx, hashed)
 	if err != nil {
-		return nil, ErrTokenInvalid
+		if errors.Is(err, ErrTokenNotFound) {
+			return nil, ErrTokenInvalid
+		}
+		return nil, err
 	}
 
 	if token.Purpose != purpose {

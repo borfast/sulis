@@ -15,7 +15,8 @@ var (
 	ErrSessionExpired  = errors.New("sulis: session expired")
 
 	// Token errors.
-	ErrTokenInvalid    = errors.New("sulis: invalid token")
-	ErrTokenExpired    = errors.New("sulis: token expired")
+	ErrTokenInvalid     = errors.New("sulis: invalid token")
+	ErrTokenNotFound    = errors.New("sulis: token not found")
+	ErrTokenExpired     = errors.New("sulis: token expired")
 	ErrTokenAlreadyUsed = errors.New("sulis: token already used")
 )

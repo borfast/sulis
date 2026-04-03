@@ -3,6 +3,7 @@ package sulis
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -12,7 +13,8 @@ import (
 type Session struct {
 	ID        string
 	UserID    string
-	Token     string // opaque, cryptographically random token
+	Token     string // raw token exposed to callers; stores should persist only TokenHash
+	TokenHash string // SHA-256 hash of the raw token; raw token is never persisted
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	Metadata  map[string]any
@@ -21,7 +23,7 @@ type Session struct {
 // SessionStore defines the persistence operations for sessions.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *Session) error
-	GetSessionByToken(ctx context.Context, token string) (*Session, error)
+	GetSessionByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
 	DeleteSession(ctx context.Context, id string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpired(ctx context.Context) error
@@ -34,4 +36,9 @@ func generateSessionToken(nBytes int) (string, error) {
 		return "", fmt.Errorf("sulis: generating session token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func hashSessionToken(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
 }

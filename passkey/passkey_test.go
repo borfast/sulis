@@ -1,0 +1,243 @@
+package passkey
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"testing"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+)
+
+func TestBeginRegistrationSavesChallenge(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{
+		ID:          []byte("user-1"),
+		Name:        "user@example.com",
+		DisplayName: "User One",
+	}
+
+	creation, err := service.BeginRegistration(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+	if creation == nil {
+		t.Fatal("BeginRegistration() returned nil creation")
+	}
+
+	session := mustLoadSavedSession(t, challenges, user)
+	if session.Challenge == "" {
+		t.Fatal("saved session data has empty challenge")
+	}
+	if string(session.UserID) != string(user.ID) {
+		t.Fatalf("saved session user ID = %q, want %q", session.UserID, user.ID)
+	}
+}
+
+func TestBeginLoginSavesChallenge(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{CredentialID: []byte("credential-1")},
+		},
+	}}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{
+		ID:          []byte("user-1"),
+		Name:        "user@example.com",
+		DisplayName: "User One",
+	}
+
+	assertion, err := service.BeginLogin(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginLogin() error = %v", err)
+	}
+	if assertion == nil {
+		t.Fatal("BeginLogin() returned nil assertion")
+	}
+
+	session := mustLoadSavedSession(t, challenges, user)
+	if session.Challenge == "" {
+		t.Fatal("saved session data has empty challenge")
+	}
+	if string(session.UserID) != string(user.ID) {
+		t.Fatalf("saved session user ID = %q, want %q", session.UserID, user.ID)
+	}
+}
+
+func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	assertion, err := service.BeginLogin(context.Background(), user)
+	if !errors.Is(err, ErrPasskeyNotFound) {
+		t.Fatalf("BeginLogin() error = %v, want %v", err, ErrPasskeyNotFound)
+	}
+	if assertion != nil {
+		t.Fatalf("BeginLogin() assertion = %#v, want nil", assertion)
+	}
+	if len(challenges.saved) != 0 {
+		t.Fatalf("BeginLogin() saved %d challenges, want 0", len(challenges.saved))
+	}
+	if store.getCredentialsCalls != 1 {
+		t.Fatalf("GetCredentialsByUserID() calls = %d, want 1", store.getCredentialsCalls)
+	}
+	if got := store.lastUserID; got != string(user.ID) {
+		t.Fatalf("GetCredentialsByUserID() user ID = %q, want %q", got, user.ID)
+	}
+}
+
+func TestFinishRegistrationReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	cred, err := service.FinishRegistration(context.Background(), user, httptestNewRequest(t))
+	if !errors.Is(err, ErrChallengeExpired) {
+		t.Fatalf("FinishRegistration() error = %v, want %v", err, ErrChallengeExpired)
+	}
+	if cred != nil {
+		t.Fatalf("FinishRegistration() credential = %#v, want nil", cred)
+	}
+}
+
+func TestFinishLoginReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{CredentialID: []byte("credential-1")},
+		},
+	}}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	cred, err := service.FinishLogin(context.Background(), user, httptestNewRequest(t))
+	if !errors.Is(err, ErrChallengeExpired) {
+		t.Fatalf("FinishLogin() error = %v, want %v", err, ErrChallengeExpired)
+	}
+	if cred != nil {
+		t.Fatalf("FinishLogin() credential = %#v, want nil", cred)
+	}
+	if store.getCredentialsCalls != 1 {
+		t.Fatalf("GetCredentialsByUserID() calls = %d, want 1", store.getCredentialsCalls)
+	}
+}
+
+type fakeStore struct {
+	credentialsByUser   map[string][]Credential
+	credentialByID      map[string]*Credential
+	getCredentialsCalls int
+	lastUserID          string
+}
+
+func (f *fakeStore) SaveCredential(context.Context, *Credential) error { return nil }
+
+func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID string) ([]Credential, error) {
+	f.getCredentialsCalls++
+	f.lastUserID = userID
+	if f.credentialsByUser == nil {
+		return nil, nil
+	}
+	return f.credentialsByUser[userID], nil
+}
+
+func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*Credential, error) {
+	if f.credentialByID == nil {
+		return nil, errors.New("credential not found")
+	}
+	cred, ok := f.credentialByID[string(credentialID)]
+	if !ok {
+		return nil, errors.New("credential not found")
+	}
+	return cred, nil
+}
+
+func (f *fakeStore) UpdateCredentialSignCount(context.Context, []byte, uint32) error { return nil }
+
+func (f *fakeStore) DeleteCredential(context.Context, string) error { return nil }
+
+type fakeChallengeStore struct {
+	saved map[string][]byte
+}
+
+func newFakeChallengeStore() *fakeChallengeStore {
+	return &fakeChallengeStore{saved: make(map[string][]byte)}
+}
+
+func (f *fakeChallengeStore) SaveChallenge(_ context.Context, userID string, sessionData []byte) error {
+	f.saved[userID] = append([]byte(nil), sessionData...)
+	return nil
+}
+
+func (f *fakeChallengeStore) GetChallenge(_ context.Context, userID string) ([]byte, error) {
+	data, ok := f.saved[userID]
+	if !ok {
+		return nil, errors.New("challenge not found")
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (f *fakeChallengeStore) DeleteChallenge(_ context.Context, userID string) error {
+	delete(f.saved, userID)
+	return nil
+}
+
+func newTestService(t *testing.T, store Store, challenges ChallengeStore) *Service {
+	t.Helper()
+
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	return service
+}
+
+func httptestNewRequest(t *testing.T) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	return req
+}
+
+func mustLoadSavedSession(t *testing.T, challenges ChallengeStore, user *User) webauthn.SessionData {
+	t.Helper()
+
+	data, err := challenges.GetChallenge(context.Background(), string(user.ID))
+	if err != nil {
+		t.Fatalf("GetChallenge() error = %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("GetChallenge() returned empty challenge data")
+	}
+
+	var session webauthn.SessionData
+	if err := json.Unmarshal(data, &session); err != nil {
+		t.Fatalf("saved challenge is not valid session data: %v", err)
+	}
+
+	return session
+}

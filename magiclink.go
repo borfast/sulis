@@ -2,6 +2,7 @@ package sulis
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -12,7 +13,7 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string) (string,
 	// Ensure a user exists for this email; create one if not.
 	_, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
-		if err != ErrUserNotFound {
+		if !errors.Is(err, ErrUserNotFound) {
 			return "", err
 		}
 		now := time.Now()
