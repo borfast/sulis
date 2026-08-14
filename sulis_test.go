@@ -190,6 +190,28 @@ func (s *memTokenStore) DeleteUserTokens(_ context.Context, userID string, purpo
 	return nil
 }
 
+// fakeLimiter records every key it is asked about and denies (returning
+// denyErr, or a generic error if denyErr is nil) whenever denied is true.
+type fakeLimiter struct {
+	mu      sync.Mutex
+	keys    []string
+	denied  bool
+	denyErr error
+}
+
+func (f *fakeLimiter) Allow(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, key)
+	if f.denied {
+		if f.denyErr != nil {
+			return f.denyErr
+		}
+		return errors.New("denied")
+	}
+	return nil
+}
+
 // newTestEnv builds a Sulis instance wired to fresh in-memory stores and
 // returns the stores alongside it so tests can inspect persisted state directly.
 func newTestEnv(opts ...Option) (*Sulis, *memUserStore, *memSessionStore, *memTokenStore) {
@@ -1521,5 +1543,66 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 	}
 	if secondUser.EmailVerifiedAt == nil || !secondUser.EmailVerifiedAt.Equal(firstVerifiedAt) {
 		t.Fatalf("expected EmailVerifiedAt to remain %v (idempotent), got %v", firstVerifiedAt, secondUser.EmailVerifiedAt)
+	}
+}
+
+// TestLoginConsultsLimiterWithNormalizedEmailKey asserts that Login (via
+// VerifyPassword) consults the configured limiter with a key built from the
+// normalized (lowercased) email, before any store lookup.
+func TestLoginConsultsLimiterWithNormalizedEmailKey(t *testing.T) {
+	limiter := &fakeLimiter{}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
+	ctx := context.Background()
+
+	if _, _, err := s.Login(ctx, "Foo@X.com", "whatever"); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+
+	if len(limiter.keys) != 1 || limiter.keys[0] != "password:foo@x.com" {
+		t.Fatalf("expected limiter to be consulted with key %q, got %v", "password:foo@x.com", limiter.keys)
+	}
+}
+
+// TestDeniedLimiterReturnsErrRateLimited asserts that a denying limiter
+// blocks Login, CreatePasswordResetToken, and CreateMagicLinkToken with
+// ErrRateLimited, before any store lookup happens.
+func TestDeniedLimiterReturnsErrRateLimited(t *testing.T) {
+	limiter := &fakeLimiter{denied: true}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
+	ctx := context.Background()
+
+	if _, _, err := s.Login(ctx, "alice@example.com", "whatever"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Login: expected ErrRateLimited, got %v", err)
+	}
+
+	if _, err := s.CreatePasswordResetToken(ctx, "alice@example.com"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("CreatePasswordResetToken: expected ErrRateLimited, got %v", err)
+	}
+
+	if _, err := s.CreateMagicLinkToken(ctx, "alice@example.com"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("CreateMagicLinkToken: expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestNilLimiterIsNoOp asserts that omitting WithLimiter (the default) never
+// blocks any guarded operation.
+func TestNilLimiterIsNoOp(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "carol@example.com", "correct-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if _, _, err := s.Login(ctx, "carol@example.com", "correct-password"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if _, err := s.CreatePasswordResetToken(ctx, "carol@example.com"); err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	if _, err := s.CreateMagicLinkToken(ctx, "carol@example.com"); err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 }

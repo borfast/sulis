@@ -28,7 +28,17 @@ var (
 	ErrTOTPNotEnrolled = errors.New("totp: not enrolled")
 	ErrTOTPNotVerified = errors.New("totp: enrollment not verified")
 	ErrTOTPReplayed    = errors.New("totp: code already used")
+	ErrTOTPRateLimited = errors.New("totp: rate limited")
 )
+
+// Limiter enforces a rate limit for a caller-supplied key. It is declared
+// separately from (and identical to) the root package's Limiter interface so
+// this package has no dependency on the root module; a single implementation
+// satisfies both via structural typing. Allow returns a non-nil error if the
+// key should be denied.
+type Limiter interface {
+	Allow(ctx context.Context, key string) error
+}
 
 // Algorithm identifies the HMAC hash algorithm.
 type Algorithm int
@@ -69,6 +79,7 @@ type Config struct {
 	Period     uint64    // seconds, default: 30
 	Skew       uint      // number of periods to check before/after current (default: 1)
 	SecretSize int       // bytes of entropy for new secrets (default: 20)
+	Limiter    Limiter   // rate limiter consulted before validating a code (default: nil, disabled)
 }
 
 // Option is a functional option for configuring the TOTP service.
@@ -97,6 +108,14 @@ func WithSkew(s uint) Option {
 // WithSecretSize sets the number of random bytes for new secrets.
 func WithSecretSize(n int) Option {
 	return func(c *Config) { c.SecretSize = n }
+}
+
+// WithLimiter sets the rate limiter consulted before Validate or
+// ConfirmEnrollment checks a code, keyed by "totp:"+userID — the 10^6 code
+// space (or smaller, for 6-digit codes) is guessable without one. A nil
+// limiter (the default) disables rate limiting.
+func WithLimiter(l Limiter) Option {
+	return func(c *Config) { c.Limiter = l }
 }
 
 // Service manages TOTP enrollment and validation.
@@ -164,6 +183,10 @@ func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secre
 
 // ConfirmEnrollment verifies the first TOTP code to confirm enrollment.
 func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) error {
+	if err := s.allow(ctx, "totp:"+userID); err != nil {
+		return err
+	}
+
 	cred, err := s.store.GetTOTPByUserID(ctx, userID)
 	if err != nil {
 		return ErrTOTPNotEnrolled
@@ -191,6 +214,10 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 // credential. Reusing a previously accepted code (or an older one, once a
 // newer counter has been accepted) returns ErrTOTPReplayed.
 func (s *Service) Validate(ctx context.Context, userID, code string) (bool, error) {
+	if err := s.allow(ctx, "totp:"+userID); err != nil {
+		return false, err
+	}
+
 	cred, err := s.store.GetTOTPByUserID(ctx, userID)
 	if err != nil {
 		return false, ErrTOTPNotEnrolled
@@ -225,6 +252,19 @@ func (s *Service) Unenroll(ctx context.Context, userID string) error {
 // This is useful for testing; in production, the authenticator app generates codes.
 func (s *Service) Generate(secret string, t time.Time) (string, error) {
 	return generateCode(secret, t, s.cfg)
+}
+
+// allow consults the configured rate limiter for key, if one is set. A nil
+// limiter is a no-op. Any error from the limiter is normalized to
+// ErrTOTPRateLimited so callers never leak limiter implementation details.
+func (s *Service) allow(ctx context.Context, key string) error {
+	if s.cfg.Limiter == nil {
+		return nil
+	}
+	if err := s.cfg.Limiter.Allow(ctx, key); err != nil {
+		return ErrTOTPRateLimited
+	}
+	return nil
 }
 
 // matchCode checks a code against the secret, allowing for clock skew, and
