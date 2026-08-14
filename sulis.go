@@ -145,7 +145,7 @@ func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string) (str
 
 // ResetPassword resets a user's password using a raw reset token.
 func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
-	token, err := s.validateToken(ctx, rawToken, TokenPurposePasswordReset)
+	token, err := s.consumeToken(ctx, rawToken, TokenPurposePasswordReset)
 	if err != nil {
 		return err
 	}
@@ -155,11 +155,7 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 		return err
 	}
 
-	if err := s.setPassword(ctx, user, newPassword); err != nil {
-		return err
-	}
-
-	return s.tokens.MarkTokenUsed(ctx, token.ID)
+	return s.setPassword(ctx, user, newPassword)
 }
 
 // ValidateSession validates a session token and returns the session and user.
@@ -252,27 +248,19 @@ func (s *Sulis) createToken(ctx context.Context, email string, purpose TokenPurp
 	return raw, nil
 }
 
-// validateToken validates a raw token for the given purpose.
-func (s *Sulis) validateToken(ctx context.Context, rawToken string, purpose TokenPurpose) (*Token, error) {
-	hashed := hashToken(rawToken)
-	token, err := s.tokens.GetTokenByHash(ctx, hashed)
+// consumeToken atomically consumes a raw token for the given purpose. Expiry
+// is checked after consumption so failures burn the token (safe direction).
+func (s *Sulis) consumeToken(ctx context.Context, rawToken string, purpose TokenPurpose) (*Token, error) {
+	token, err := s.tokens.ConsumeToken(ctx, hashToken(rawToken), purpose)
 	if err != nil {
 		if errors.Is(err, ErrTokenNotFound) {
 			return nil, ErrTokenInvalid
 		}
-		return nil, err
-	}
-
-	if token.Purpose != purpose {
-		return nil, ErrTokenInvalid
-	}
-	if token.Used {
-		return nil, ErrTokenAlreadyUsed
+		return nil, err // ErrTokenAlreadyUsed and store failures propagate
 	}
 	if time.Now().After(token.ExpiresAt) {
 		return nil, ErrTokenExpired
 	}
-
 	return token, nil
 }
 

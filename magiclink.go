@@ -33,12 +33,8 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string) (string,
 
 // RedeemMagicLink validates a magic link token and returns the user and a new session.
 func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *Session, error) {
-	token, err := s.validateToken(ctx, rawToken, TokenPurposeMagicLink)
+	token, err := s.consumeToken(ctx, rawToken, TokenPurposeMagicLink)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	if err := s.tokens.MarkTokenUsed(ctx, token.ID); err != nil {
 		return nil, nil, err
 	}
 
