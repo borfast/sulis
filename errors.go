@@ -26,4 +26,7 @@ var (
 
 	// Email validation errors.
 	ErrInvalidEmail = errors.New("sulis: invalid email")
+
+	// Rate limiting.
+	ErrRateLimited = errors.New("sulis: rate limited")
 )

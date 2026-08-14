@@ -103,6 +103,10 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string) (*Us
 		return nil, err
 	}
 
+	if err := s.allow(ctx, "password:"+email); err != nil {
+		return nil, err
+	}
+
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
@@ -220,6 +224,10 @@ func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string)
 func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
+		return "", err
+	}
+
+	if err := s.allow(ctx, "reset:"+email); err != nil {
 		return "", err
 	}
 
@@ -350,6 +358,19 @@ func (s *Sulis) consumeToken(ctx context.Context, rawToken string, purpose Token
 		return nil, ErrTokenExpired
 	}
 	return token, nil
+}
+
+// allow consults the configured rate limiter for key, if one is set. A nil
+// limiter is a no-op. Any error from the limiter is normalized to
+// ErrRateLimited so callers never leak limiter implementation details.
+func (s *Sulis) allow(ctx context.Context, key string) error {
+	if s.cfg.Limiter == nil {
+		return nil
+	}
+	if err := s.cfg.Limiter.Allow(ctx, key); err != nil {
+		return ErrRateLimited
+	}
+	return nil
 }
 
 // generateID creates a random hex-encoded ID.

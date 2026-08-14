@@ -54,6 +54,28 @@ func (s *memTOTPStore) DeleteTOTP(_ context.Context, userID string) error {
 	return nil
 }
 
+// fakeLimiter records every key it is asked about and denies (returning
+// denyErr, or a generic error if denyErr is nil) whenever denied is true.
+type fakeLimiter struct {
+	mu      sync.Mutex
+	keys    []string
+	denied  bool
+	denyErr error
+}
+
+func (f *fakeLimiter) Allow(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, key)
+	if f.denied {
+		if f.denyErr != nil {
+			return f.denyErr
+		}
+		return errors.New("denied")
+	}
+	return nil
+}
+
 // failOnNthSaveStore wraps memTOTPStore and fails the Nth call (1-indexed) to
 // SaveTOTP, used to exercise fail-closed behavior when persisting fails.
 type failOnNthSaveStore struct {
@@ -498,5 +520,80 @@ func TestOTPAuthURI(t *testing.T) {
 	// Should start with otpauth://totp/
 	if uri[:15] != "otpauth://totp/" {
 		t.Fatalf("unexpected URI prefix: %s", uri)
+	}
+}
+
+// TestValidateConsultsLimiterBeforeCheckingCode asserts that Validate
+// consults the configured limiter as its first action, keyed by
+// "totp:"+userID, and never evaluates the code when the limiter denies —
+// proven here by denying for a userID with no enrollment at all: a store
+// lookup or code check would fail differently (ErrTOTPNotEnrolled), not with
+// ErrTOTPRateLimited.
+func TestValidateConsultsLimiterBeforeCheckingCode(t *testing.T) {
+	store := newMemTOTPStore()
+	limiter := &fakeLimiter{denied: true}
+	svc := mustService(t, store, "TestApp", WithLimiter(limiter))
+	ctx := context.Background()
+
+	ok, err := svc.Validate(ctx, "user1", "000000")
+	if ok {
+		t.Fatal("Validate returned true despite a denying limiter")
+	}
+	if !errors.Is(err, ErrTOTPRateLimited) {
+		t.Fatalf("expected ErrTOTPRateLimited, got %v", err)
+	}
+	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:user1" {
+		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:user1", limiter.keys)
+	}
+}
+
+// TestConfirmEnrollmentConsultsLimiterBeforeCheckingCode mirrors
+// TestValidateConsultsLimiterBeforeCheckingCode for ConfirmEnrollment.
+func TestConfirmEnrollmentConsultsLimiterBeforeCheckingCode(t *testing.T) {
+	store := newMemTOTPStore()
+	limiter := &fakeLimiter{denied: true}
+	svc := mustService(t, store, "TestApp", WithLimiter(limiter))
+	ctx := context.Background()
+
+	err := svc.ConfirmEnrollment(ctx, "user1", "000000")
+	if !errors.Is(err, ErrTOTPRateLimited) {
+		t.Fatalf("expected ErrTOTPRateLimited, got %v", err)
+	}
+	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:user1" {
+		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:user1", limiter.keys)
+	}
+}
+
+// TestTOTPNilLimiterIsNoOp asserts that omitting WithLimiter (the default)
+// never blocks Validate or ConfirmEnrollment.
+func TestTOTPNilLimiterIsNoOp(t *testing.T) {
+	store := newMemTOTPStore()
+	svc := mustService(t, store, "TestApp")
+	ctx := context.Background()
+
+	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+
+	code, err := svc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+		t.Fatalf("ConfirmEnrollment: %v", err)
+	}
+
+	period := time.Duration(svc.cfg.Period) * time.Second
+	codeNext, err := svc.Generate(secret, time.Now().Add(period))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	ok, err := svc.Validate(ctx, "user1", codeNext)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected Validate to succeed with a nil limiter")
 	}
 }

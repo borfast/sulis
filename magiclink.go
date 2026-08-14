@@ -19,6 +19,10 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string) (string,
 		return "", err
 	}
 
+	if err := s.allow(ctx, "magic:"+email); err != nil {
+		return "", err
+	}
+
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
 		if !errors.Is(err, ErrUserNotFound) {

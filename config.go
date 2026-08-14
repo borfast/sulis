@@ -1,6 +1,17 @@
 package sulis
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// Limiter enforces a rate limit for a caller-supplied key. Implementations
+// decide the algorithm, window, and storage (e.g. a token bucket backed by
+// Redis or an in-memory store). Allow returns a non-nil error if the key
+// should be denied.
+type Limiter interface {
+	Allow(ctx context.Context, key string) error
+}
 
 // Argon2Params holds the parameters for argon2id password hashing.
 type Argon2Params struct {
@@ -23,6 +34,7 @@ type Config struct {
 	MinPasswordLength              int           // minimum accepted password length in bytes (default: 8)
 	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
+	Limiter                        Limiter // rate limiter consulted at guessable choke points (default: nil, disabled)
 }
 
 // Option is a functional option for configuring Sulis.
@@ -92,4 +104,11 @@ func WithPasswordLengthLimits(minLength, maxLength int) Option {
 		c.MinPasswordLength = minLength
 		c.MaxPasswordLength = maxLength
 	}
+}
+
+// WithLimiter sets the rate limiter consulted at guessable authentication
+// choke points (password verification, and password reset / magic link
+// token issuance). A nil limiter (the default) disables rate limiting.
+func WithLimiter(l Limiter) Option {
+	return func(c *Config) { c.Limiter = l }
 }
