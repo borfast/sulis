@@ -24,9 +24,10 @@ import (
 )
 
 var (
-	ErrTOTPInvalid    = errors.New("totp: invalid code")
+	ErrTOTPInvalid     = errors.New("totp: invalid code")
 	ErrTOTPNotEnrolled = errors.New("totp: not enrolled")
 	ErrTOTPNotVerified = errors.New("totp: enrollment not verified")
+	ErrTOTPReplayed    = errors.New("totp: code already used")
 )
 
 // Algorithm identifies the HMAC hash algorithm.
@@ -154,15 +155,22 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 		return ErrTOTPNotEnrolled
 	}
 
-	if !s.validateCode(cred.Secret, code, time.Now()) {
+	counter, ok := s.matchCode(cred.Secret, code, time.Now())
+	if !ok {
 		return ErrTOTPInvalid
 	}
 
 	cred.Verified = true
+	cred.LastUsedCounter = counter
 	return s.store.SaveTOTP(ctx, cred)
 }
 
 // Validate checks a TOTP code for an enrolled, verified user.
+//
+// To prevent replay, a code is only accepted once: its time-step counter
+// must be strictly greater than the last accepted counter for this
+// credential. Reusing a previously accepted code (or an older one, once a
+// newer counter has been accepted) returns ErrTOTPReplayed.
 func (s *Service) Validate(ctx context.Context, userID, code string) (bool, error) {
 	cred, err := s.store.GetTOTPByUserID(ctx, userID)
 	if err != nil {
@@ -172,7 +180,21 @@ func (s *Service) Validate(ctx context.Context, userID, code string) (bool, erro
 		return false, ErrTOTPNotVerified
 	}
 
-	return s.validateCode(cred.Secret, code, time.Now()), nil
+	counter, ok := s.matchCode(cred.Secret, code, time.Now())
+	if !ok {
+		return false, nil
+	}
+	if counter <= cred.LastUsedCounter {
+		return false, ErrTOTPReplayed
+	}
+
+	cred.LastUsedCounter = counter
+	if err := s.store.SaveTOTP(ctx, cred); err != nil {
+		// Fail closed: if we can't persist the counter, we can't guarantee
+		// the code won't be replayed, so don't accept it.
+		return false, err
+	}
+	return true, nil
 }
 
 // Unenroll removes TOTP enrollment for a user.
@@ -186,8 +208,9 @@ func (s *Service) Generate(secret string, t time.Time) (string, error) {
 	return generateCode(secret, t, s.cfg)
 }
 
-// validateCode checks a code against the secret, allowing for clock skew.
-func (s *Service) validateCode(secret, code string, t time.Time) bool {
+// matchCode checks a code against the secret, allowing for clock skew, and
+// returns the time-step counter of the matched window.
+func (s *Service) matchCode(secret, code string, t time.Time) (counter uint64, ok bool) {
 	for i := -int(s.cfg.Skew); i <= int(s.cfg.Skew); i++ {
 		shifted := t.Add(time.Duration(i) * time.Duration(s.cfg.Period) * time.Second)
 		expected, err := generateCode(secret, shifted, s.cfg)
@@ -195,10 +218,10 @@ func (s *Service) validateCode(secret, code string, t time.Time) bool {
 			continue
 		}
 		if subtle(code, expected) {
-			return true
+			return uint64(shifted.Unix()) / s.cfg.Period, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // generateCode implements the TOTP algorithm per RFC 6238.
