@@ -2,6 +2,7 @@ package sulis
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,93 @@ func TestDecodeHashInvalid(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid hash format")
 	}
+}
+
+// mustHash returns a validly-encoded argon2id PHC hash for tampering tests
+// below, built with light params so hashing stays fast.
+func mustHash(t *testing.T) string {
+	t.Helper()
+	hash, err := hashPassword("correct-horse-battery-staple", testArgon2Params)
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+	return hash
+}
+
+// tamperHash splits a PHC-format hash on "$", replaces the segment at index
+// with replacement, and rejoins it.
+func tamperHash(hash string, index int, replacement string) string {
+	parts := strings.Split(hash, "$")
+	parts[index] = replacement
+	return strings.Join(parts, "$")
+}
+
+func TestDecodeHashRejectsWrongAlgorithm(t *testing.T) {
+	tampered := tamperHash(mustHash(t), 1, "argon2i")
+
+	_, err := verifyPassword("correct-horse-battery-staple", tampered)
+	if err == nil {
+		t.Fatal("expected error for wrong algorithm label")
+	}
+	if !strings.Contains(err.Error(), "unsupported algorithm") {
+		t.Fatalf("expected unsupported algorithm error, got %v", err)
+	}
+}
+
+func TestDecodeHashRejectsOversizedMemory(t *testing.T) {
+	tampered := tamperHash(mustHash(t), 3, "m=4294967295,t=1,p=1")
+
+	_, err := verifyPassword("correct-horse-battery-staple", tampered)
+	if err == nil {
+		t.Fatal("expected error for oversized memory parameter")
+	}
+	if !strings.Contains(err.Error(), "hash parameters out of bounds") {
+		t.Fatalf("expected out of bounds error, got %v", err)
+	}
+}
+
+func TestDecodeHashRejectsZeroParams(t *testing.T) {
+	hash := mustHash(t)
+
+	t.Run("ZeroIterations", func(t *testing.T) {
+		tampered := tamperHash(hash, 3, "m=8192,t=0,p=1")
+
+		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		if err == nil {
+			t.Fatal("expected error for zero iterations")
+		}
+	})
+
+	t.Run("ZeroParallelism", func(t *testing.T) {
+		tampered := tamperHash(hash, 3, "m=8192,t=1,p=0")
+
+		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		if err == nil {
+			t.Fatal("expected error for zero parallelism")
+		}
+	})
+}
+
+func TestDecodeHashRejectsBadSaltOrKeySize(t *testing.T) {
+	hash := mustHash(t)
+
+	t.Run("ShortSalt", func(t *testing.T) {
+		tampered := tamperHash(hash, 4, base64.RawStdEncoding.EncodeToString(make([]byte, 4)))
+
+		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		if err == nil {
+			t.Fatal("expected error for undersized salt")
+		}
+	})
+
+	t.Run("ShortKey", func(t *testing.T) {
+		tampered := tamperHash(hash, 5, base64.RawStdEncoding.EncodeToString(make([]byte, 8)))
+
+		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		if err == nil {
+			t.Fatal("expected error for undersized key/hash")
+		}
+	})
 }
 
 func TestRegisterRejectsShortPassword(t *testing.T) {
