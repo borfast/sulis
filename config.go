@@ -13,11 +13,12 @@ type Argon2Params struct {
 
 // Config holds the configuration for a Sulis instance.
 type Config struct {
-	SessionDuration   time.Duration // how long sessions are valid (default: 24h)
-	TokenDuration     time.Duration // how long reset/magic link tokens are valid (default: 1h)
-	SessionTokenBytes int           // length of random session tokens in bytes (default: 32)
-	ResetTokenBytes   int           // length of random reset/magic link tokens in bytes (default: 32)
-	Argon2            Argon2Params
+	SessionDuration                time.Duration // how long sessions are valid (default: 24h)
+	TokenDuration                  time.Duration // how long reset/magic link tokens are valid (default: 1h)
+	SessionTokenBytes              int           // length of random session tokens in bytes (default: 32)
+	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
+	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
+	Argon2                         Argon2Params
 }
 
 // Option is a functional option for configuring Sulis.
@@ -25,10 +26,11 @@ type Option func(*Config)
 
 func defaultConfig() Config {
 	return Config{
-		SessionDuration:   24 * time.Hour,
-		TokenDuration:     1 * time.Hour,
-		SessionTokenBytes: 32,
-		ResetTokenBytes:   32,
+		SessionDuration:                24 * time.Hour,
+		TokenDuration:                  1 * time.Hour,
+		SessionTokenBytes:              32,
+		ResetTokenBytes:                32,
+		RevokeSessionsOnPasswordChange: true,
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -52,4 +54,10 @@ func WithTokenDuration(d time.Duration) Option {
 // WithArgon2Params sets custom argon2id parameters for password hashing.
 func WithArgon2Params(p Argon2Params) Option {
 	return func(c *Config) { c.Argon2 = p }
+}
+
+// WithRevokeSessionsOnPasswordChange controls whether all of a user's
+// sessions are revoked when their password is changed or reset (default: true).
+func WithRevokeSessionsOnPasswordChange(revoke bool) Option {
+	return func(c *Config) { c.RevokeSessionsOnPasswordChange = revoke }
 }

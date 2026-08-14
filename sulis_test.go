@@ -178,12 +178,30 @@ func (s *memTokenStore) DeleteExpiredTokens(_ context.Context) error {
 	return nil
 }
 
+func (s *memTokenStore) DeleteUserTokens(_ context.Context, userID string, purpose TokenPurpose) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, t := range s.tokens {
+		if t.UserID == userID && t.Purpose == purpose {
+			delete(s.tokens, id)
+		}
+	}
+	return nil
+}
+
+// newTestEnv builds a Sulis instance wired to fresh in-memory stores and
+// returns the stores alongside it so tests can inspect persisted state directly.
+func newTestEnv(opts ...Option) (*Sulis, *memUserStore, *memSessionStore, *memTokenStore) {
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+	s := New(users, sessions, tokens, opts...)
+	return s, users, sessions, tokens
+}
+
 func newTestSulis() *Sulis {
-	return New(
-		newMemUserStore(),
-		newMemSessionStore(),
-		newMemTokenStore(),
-	)
+	s, _, _, _ := newTestEnv()
+	return s
 }
 
 func TestRegisterAndLogin(t *testing.T) {
@@ -279,9 +297,6 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	if user.Email != "alice@example.com" {
 		t.Fatal("wrong user from session")
 	}
-	if sess.Token != session.Token {
-		t.Fatal("validated session should preserve the presented raw token")
-	}
 
 	// Revoke the session.
 	if err := s.RevokeSession(ctx, sess.ID); err != nil {
@@ -323,10 +338,10 @@ func TestPasswordResetFlow(t *testing.T) {
 		t.Fatalf("Login with reset password: %v", err)
 	}
 
-	// Token should be used; can't reuse.
+	// Token should be used and deleted by the outstanding-token cleanup; can't reuse.
 	err = s.ResetPassword(ctx, rawToken, "another-password")
-	if err != ErrTokenAlreadyUsed {
-		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	if err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
 }
 
@@ -456,6 +471,10 @@ func (s *errTokenStore) ConsumeToken(_ context.Context, _ string, _ TokenPurpose
 }
 
 func (s *errTokenStore) DeleteExpiredTokens(_ context.Context) error { return nil }
+
+func (s *errTokenStore) DeleteUserTokens(_ context.Context, _ string, _ TokenPurpose) error {
+	return nil
+}
 
 type wrappedNotFoundUserStore struct {
 	mu   sync.Mutex
@@ -603,8 +622,8 @@ func TestValidateSessionDoesNotMutateStoredSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
-	if validated.Token != rawToken {
-		t.Fatalf("expected validated session token %q, got %q", rawToken, validated.Token)
+	if validated.Token != "" {
+		t.Fatalf("expected validated session token to be blank, got %q", validated.Token)
 	}
 	if store.session.Token != "" {
 		t.Fatalf("expected stored session token to remain blank, got %q", store.session.Token)
@@ -800,5 +819,134 @@ func TestConsumeTokenWrongPurposeIsInvalid(t *testing.T) {
 	err = s.ResetPassword(ctx, rawToken, "new-password")
 	if err != nil {
 		t.Fatalf("expected reset token to remain usable, got %v", err)
+	}
+}
+
+func TestResetPasswordRevokesAllSessions(t *testing.T) {
+	s, _, sessions, _ := newTestEnv()
+	ctx := context.Background()
+
+	_, session, err := s.Register(ctx, "alice@example.com", "old-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	if err := s.ResetPassword(ctx, rawToken, "new-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+
+	// The pre-reset session must be invalidated.
+	if _, _, err := s.ValidateSession(ctx, session.Token); err != ErrSessionNotFound {
+		t.Fatalf("expected ErrSessionNotFound for pre-reset session, got %v", err)
+	}
+	if len(sessions.sessions) != 0 {
+		t.Fatalf("expected all sessions revoked, got %d remaining", len(sessions.sessions))
+	}
+}
+
+func TestChangePasswordRevokesAllSessions(t *testing.T) {
+	s, _, sessions, _ := newTestEnv()
+	ctx := context.Background()
+
+	user, session, err := s.Register(ctx, "alice@example.com", "old-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := s.ChangePassword(ctx, user.ID, "old-password", "new-password"); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+
+	// The pre-change session must be invalidated.
+	if _, _, err := s.ValidateSession(ctx, session.Token); err != ErrSessionNotFound {
+		t.Fatalf("expected ErrSessionNotFound for pre-change session, got %v", err)
+	}
+	if len(sessions.sessions) != 0 {
+		t.Fatalf("expected all sessions revoked, got %d remaining", len(sessions.sessions))
+	}
+}
+
+func TestResetPasswordDeletesOutstandingResetTokens(t *testing.T) {
+	s, _, _, tokens := newTestEnv()
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "old-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	firstToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken (first): %v", err)
+	}
+	secondToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken (second): %v", err)
+	}
+
+	if err := s.ResetPassword(ctx, firstToken, "new-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+
+	// The second, still-live reset token must no longer be redeemable.
+	if err := s.ResetPassword(ctx, secondToken, "another-password"); err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid for outstanding reset token, got %v", err)
+	}
+	if len(tokens.tokens) != 0 {
+		t.Fatalf("expected outstanding reset tokens deleted, got %d remaining", len(tokens.tokens))
+	}
+}
+
+func TestWithRevokeSessionsOnPasswordChangeFalseKeepsSessions(t *testing.T) {
+	s, _, sessions, tokens := newTestEnv(WithRevokeSessionsOnPasswordChange(false))
+	ctx := context.Background()
+
+	_, session, err := s.Register(ctx, "alice@example.com", "old-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	if err := s.ResetPassword(ctx, rawToken, "new-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+
+	// Session revocation opted out: the pre-reset session should still validate.
+	if _, _, err := s.ValidateSession(ctx, session.Token); err != nil {
+		t.Fatalf("expected session to remain valid, got %v", err)
+	}
+	if len(sessions.sessions) != 1 {
+		t.Fatalf("expected session to survive, got %d remaining", len(sessions.sessions))
+	}
+
+	// DeleteUserTokens still runs unconditionally even when session revocation is skipped.
+	if len(tokens.tokens) != 0 {
+		t.Fatalf("expected reset tokens still deleted, got %d remaining", len(tokens.tokens))
+	}
+}
+
+func TestValidateSessionDoesNotEchoRawToken(t *testing.T) {
+	s, _, _, _ := newTestEnv()
+	ctx := context.Background()
+
+	_, session, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	validated, _, err := s.ValidateSession(ctx, session.Token)
+	if err != nil {
+		t.Fatalf("ValidateSession: %v", err)
+	}
+	if validated.Token != "" {
+		t.Fatalf("expected validated session token to be blank, got %q", validated.Token)
 	}
 }

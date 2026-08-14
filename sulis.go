@@ -133,7 +133,16 @@ func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string)
 
 	user.PasswordHash = hash
 	user.UpdatedAt = time.Now()
-	return s.users.UpdateUser(ctx, user)
+	if err := s.users.UpdateUser(ctx, user); err != nil {
+		return err
+	}
+
+	if s.cfg.RevokeSessionsOnPasswordChange {
+		if err := s.sessions.DeleteUserSessions(ctx, user.ID); err != nil {
+			return err
+		}
+	}
+	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposePasswordReset)
 }
 
 // CreatePasswordResetToken generates a password reset token for the given email.
@@ -167,7 +176,6 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 		return nil, nil, err
 	}
 	validated := *session
-	validated.Token = token
 
 	if time.Now().After(validated.ExpiresAt) {
 		_ = s.sessions.DeleteSession(ctx, validated.ID)
