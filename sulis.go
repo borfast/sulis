@@ -12,10 +12,11 @@ import (
 // Sulis is the main authentication service. It coordinates user registration,
 // login, password reset, and session management.
 type Sulis struct {
-	users    UserStore
-	sessions SessionStore
-	tokens   TokenStore
-	cfg      Config
+	users     UserStore
+	sessions  SessionStore
+	tokens    TokenStore
+	cfg       Config
+	dummyHash string // used to equalize Login timing for unknown/passwordless users
 }
 
 // New creates a new Sulis instance with the given stores and options.
@@ -24,17 +25,24 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, opts ...Opti
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return &Sulis{
+	s := &Sulis{
 		users:    users,
 		sessions: sessions,
 		tokens:   tokens,
 		cfg:      cfg,
 	}
+	// crypto/rand cannot fail on Go >= 1.24, so ignoring the error here is safe.
+	s.dummyHash, _ = hashPassword("sulis-timing-equalization-dummy", cfg.Argon2)
+	return s
 }
 
 // Register creates a new user with the given email and password, and returns
 // a new session. Returns ErrUserAlreadyExists if the email is already taken.
 func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *Session, error) {
+	if err := s.checkPasswordPolicy(password); err != nil {
+		return nil, nil, err
+	}
+
 	hash, err := hashPassword(password, s.cfg.Argon2)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sulis: hashing password: %w", err)
@@ -67,12 +75,17 @@ func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Sess
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			// Run the same Argon2 work a real verification would, so the
+			// response time doesn't reveal whether the account exists.
+			_, _ = verifyPassword(password, s.dummyHash)
 			return nil, nil, ErrInvalidCredentials
 		}
 		return nil, nil, err
 	}
 
 	if user.PasswordHash == "" {
+		// Passwordless user: verify against the dummy hash for the same reason.
+		_, _ = verifyPassword(password, s.dummyHash)
 		return nil, nil, ErrInvalidCredentials
 	}
 
@@ -93,7 +106,13 @@ func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Sess
 }
 
 // ChangePassword changes a user's password after verifying the old password.
+// The length policy applies only to the new password; the old one was
+// already validated when it was set.
 func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+	if err := s.checkPasswordPolicy(newPassword); err != nil {
+		return err
+	}
+
 	user, err := s.users.GetUserByID(ctx, userID)
 	if err != nil {
 		return err
@@ -115,6 +134,10 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 
 // SetInitialPassword sets the first password for a passwordless user.
 func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword string) error {
+	if err := s.checkPasswordPolicy(newPassword); err != nil {
+		return err
+	}
+
 	user, err := s.users.GetUserByID(ctx, userID)
 	if err != nil {
 		return err
@@ -123,6 +146,18 @@ func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword stri
 		return ErrInvalidCredentials
 	}
 	return s.setPassword(ctx, user, newPassword)
+}
+
+// checkPasswordPolicy enforces the configured minimum and maximum password
+// length. Lengths are measured in bytes.
+func (s *Sulis) checkPasswordPolicy(password string) error {
+	if len(password) < s.cfg.MinPasswordLength {
+		return ErrPasswordTooShort
+	}
+	if len(password) > s.cfg.MaxPasswordLength {
+		return ErrPasswordTooLong
+	}
+	return nil
 }
 
 func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string) error {
@@ -152,8 +187,14 @@ func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string) (str
 	return s.createToken(ctx, email, TokenPurposePasswordReset)
 }
 
-// ResetPassword resets a user's password using a raw reset token.
+// ResetPassword resets a user's password using a raw reset token. The
+// password policy is checked before the token is consumed, so a policy
+// failure does not burn the token.
 func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
+	if err := s.checkPasswordPolicy(newPassword); err != nil {
+		return err
+	}
+
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposePasswordReset)
 	if err != nil {
 		return err

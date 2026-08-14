@@ -19,4 +19,8 @@ var (
 	ErrTokenNotFound    = errors.New("sulis: token not found")
 	ErrTokenExpired     = errors.New("sulis: token expired")
 	ErrTokenAlreadyUsed = errors.New("sulis: token already used")
+
+	// Password policy errors.
+	ErrPasswordTooShort = errors.New("sulis: password too short")
+	ErrPasswordTooLong  = errors.New("sulis: password too long")
 )

@@ -18,6 +18,8 @@ type Config struct {
 	SessionTokenBytes              int           // length of random session tokens in bytes (default: 32)
 	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
 	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
+	MinPasswordLength              int           // minimum accepted password length in bytes (default: 8)
+	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
 }
 
@@ -31,6 +33,8 @@ func defaultConfig() Config {
 		SessionTokenBytes:              32,
 		ResetTokenBytes:                32,
 		RevokeSessionsOnPasswordChange: true,
+		MinPasswordLength:              8,
+		MaxPasswordLength:              1024,
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -60,4 +64,16 @@ func WithArgon2Params(p Argon2Params) Option {
 // sessions are revoked when their password is changed or reset (default: true).
 func WithRevokeSessionsOnPasswordChange(revoke bool) Option {
 	return func(c *Config) { c.RevokeSessionsOnPasswordChange = revoke }
+}
+
+// WithPasswordLengthLimits sets the minimum and maximum accepted password
+// length. Both bounds are measured in bytes (len(password)), not runes or
+// characters — deliberately, to bound Argon2's input size regardless of
+// encoding, so multi-byte UTF-8 passwords count for more than one unit per
+// character.
+func WithPasswordLengthLimits(minLength, maxLength int) Option {
+	return func(c *Config) {
+		c.MinPasswordLength = minLength
+		c.MaxPasswordLength = maxLength
+	}
 }
