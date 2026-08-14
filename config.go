@@ -31,6 +31,7 @@ type Config struct {
 	SessionTokenBytes              int           // length of random session tokens in bytes (default: 32)
 	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
 	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
+	RequireVerifiedEmail           bool          // block new sessions for unverified accounts (default: true)
 	MinPasswordLength              int           // minimum accepted password length in bytes (default: 8)
 	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
@@ -49,6 +50,7 @@ func defaultConfig() Config {
 		SessionTokenBytes:              32,
 		ResetTokenBytes:                32,
 		RevokeSessionsOnPasswordChange: true,
+		RequireVerifiedEmail:           true,
 		MinPasswordLength:              8,
 		MaxPasswordLength:              1024,
 		Argon2: Argon2Params{
@@ -104,6 +106,13 @@ func WithPasswordLengthLimits(minLength, maxLength int) Option {
 		c.MinPasswordLength = minLength
 		c.MaxPasswordLength = maxLength
 	}
+}
+
+// WithRequireVerifiedEmail sets whether new sessions are blocked until the
+// account's email is verified. Register's signup session and magic-link
+// redemption (which verifies the email itself) are always exempt.
+func WithRequireVerifiedEmail(require bool) Option {
+	return func(c *Config) { c.RequireVerifiedEmail = require }
 }
 
 // WithLimiter sets the rate limiter consulted at guessable authentication

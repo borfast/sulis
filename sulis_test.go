@@ -227,6 +227,38 @@ func newTestSulis() *Sulis {
 	return s
 }
 
+// verifyUserEmail stamps EmailVerifiedAt directly on the stored user, for
+// tests where verification is incidental to what's being tested. It bypasses
+// VerifyEmail/RedeemMagicLink so it has no side effects (e.g. no session
+// revocation).
+func verifyUserEmail(t *testing.T, users *memUserStore, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := users.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	now := time.Now()
+	u.EmailVerifiedAt = &now
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+}
+
+// unverifyUserEmail clears EmailVerifiedAt directly on the stored user.
+func unverifyUserEmail(t *testing.T, users *memUserStore, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := users.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	u.EmailVerifiedAt = nil
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+}
+
 // testArgon2Params are deliberately weak, fast Argon2 parameters for tests
 // that exercise password hashing but aren't testing timing behavior itself.
 var testArgon2Params = Argon2Params{
@@ -238,7 +270,7 @@ var testArgon2Params = Argon2Params{
 }
 
 func TestRegisterAndLogin(t *testing.T) {
-	s := newTestSulis()
+	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
 	user, session, err := s.Register(ctx, "alice@example.com", "password123")
@@ -251,6 +283,8 @@ func TestRegisterAndLogin(t *testing.T) {
 	if session.Token == "" {
 		t.Fatal("expected non-empty session token")
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	// Login with correct credentials.
 	user2, session2, err := s.Login(ctx, "alice@example.com", "password123")
@@ -293,10 +327,12 @@ func TestRegisterDuplicate(t *testing.T) {
 }
 
 func TestChangePassword(t *testing.T) {
-	s := newTestSulis()
+	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
 	user, _, _ := s.Register(ctx, "alice@example.com", "old-password")
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	err := s.ChangePassword(ctx, user.ID, "old-password", "new-password")
 	if err != nil {
@@ -344,10 +380,12 @@ func TestValidateAndRevokeSession(t *testing.T) {
 }
 
 func TestPasswordResetFlow(t *testing.T) {
-	s := newTestSulis()
+	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	s.Register(ctx, "alice@example.com", "old-password")
+	user, _, _ := s.Register(ctx, "alice@example.com", "old-password")
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
 	if err != nil {
@@ -941,13 +979,15 @@ func TestResetPasswordDeletesOutstandingResetTokens(t *testing.T) {
 // afterward — otherwise an attacker who obtained a pending token under the
 // old password could still complete login post-reset.
 func TestResetPasswordRevokesTwoFactorTokens(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "old-password")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	pending, err := s.CreateTwoFactorToken(ctx, user.ID)
 	if err != nil {
@@ -1081,15 +1121,18 @@ func TestLoginPasswordlessUserReturnsInvalidCredentials(t *testing.T) {
 }
 
 func TestEmailsAreNormalized(t *testing.T) {
-	s := newTestSulis()
+	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "Foo@X.com ", "password123"); err != nil {
+	user, _, err := s.Register(ctx, "Foo@X.com ", "password123")
+	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	// A differently-cased, untrimmed variant of the same address must log in.
-	_, _, err := s.Login(ctx, "foo@x.com", "password123")
+	_, _, err = s.Login(ctx, "foo@x.com", "password123")
 	if err != nil {
 		t.Fatalf("Login with normalized email: %v", err)
 	}
@@ -1281,13 +1324,15 @@ func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
 // meant to be called directly after out-of-band authentication (passkey,
 // completed 2FA) with no password check of its own.
 func TestIssueSessionReturnsValidatableSession(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	session, err := s.IssueSession(ctx, user.ID)
 	if err != nil {
@@ -1312,13 +1357,15 @@ func TestIssueSessionReturnsValidatableSession(t *testing.T) {
 // TestLoginStillReturnsUserAndSession pins down that Login's public contract
 // is unchanged: it behaves as VerifyPassword followed by IssueSession.
 func TestLoginStillReturnsUserAndSession(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	loggedInUser, session, err := s.Login(ctx, "alice@example.com", "password123")
 	if err != nil {
@@ -1349,13 +1396,15 @@ func TestLoginStillReturnsUserAndSession(t *testing.T) {
 // -> (app checks its own "user has 2FA" flag) -> CreateTwoFactorToken -> (app
 // verifies TOTP/recovery code/passkey) -> CompleteTwoFactor.
 func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
-	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 	// Register creates its own session; clear it so we can observe the
 	// two-factor flow's effect in isolation.
 	sessions.sessions = make(map[string]*Session)
@@ -1391,13 +1440,15 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 // TestTwoFactorTokenIsSingleUse asserts that a two-factor token cannot be
 // replayed to mint a second session.
 func TestTwoFactorTokenIsSingleUse(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
 	if err != nil {
@@ -1420,7 +1471,7 @@ func TestTwoFactorTokenIsSingleUse(t *testing.T) {
 // passing that account's userID. The token is consumed regardless, so the
 // mismatch also burns it against replay.
 func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	userA, _, err := s.Register(ctx, "alice@example.com", "password123")
@@ -1431,6 +1482,8 @@ func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register (B): %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, userA.ID)
 
 	rawToken, err := s.CreateTwoFactorToken(ctx, userA.ID)
 	if err != nil {
@@ -1451,13 +1504,15 @@ func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
 // TestTwoFactorTokenExpires asserts that an expired two-factor token is
 // rejected rather than silently accepted.
 func TestTwoFactorTokenExpires(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTwoFactorTokenDuration(-time.Second))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTwoFactorTokenDuration(-time.Second))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
 	if err != nil {
@@ -1473,13 +1528,15 @@ func TestTwoFactorTokenExpires(t *testing.T) {
 // cannot be replayed against an unrelated flow like ResetPassword, since
 // consumeToken checks purpose as part of its atomic lookup.
 func TestTwoFactorTokenRejectedByOtherFlows(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
 	user, _, err := s.Register(ctx, "alice@example.com", "password123")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
 	if err != nil {
@@ -1766,12 +1823,15 @@ func TestChangePasswordConsultsLimiterBeforeVerifyingOldPassword(t *testing.T) {
 // TestNilLimiterIsNoOp asserts that omitting WithLimiter (the default) never
 // blocks any guarded operation.
 func TestNilLimiterIsNoOp(t *testing.T) {
-	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "carol@example.com", "correct-password"); err != nil {
+	user, _, err := s.Register(ctx, "carol@example.com", "correct-password")
+	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test; the gate is covered elsewhere.
+	verifyUserEmail(t, users, user.ID)
 
 	if _, _, err := s.Login(ctx, "carol@example.com", "correct-password"); err != nil {
 		t.Fatalf("Login: %v", err)
@@ -1783,5 +1843,144 @@ func TestNilLimiterIsNoOp(t *testing.T) {
 
 	if _, err := s.CreateMagicLinkToken(ctx, "carol@example.com"); err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+}
+
+// TestUnverifiedAccountCannotStartNewSessions asserts that, under the default
+// config, every session-starting entry point rejects an account whose email
+// has not been verified, while Register's own signup session is unaffected.
+func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, session, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("expected Register's auto-session to still be issued")
+	}
+
+	if _, _, err := s.Login(ctx, "alice@example.com", "password123"); err != ErrEmailNotVerified {
+		t.Fatalf("Login: expected ErrEmailNotVerified, got %v", err)
+	}
+
+	if _, err := s.CreateTwoFactorToken(ctx, user.ID); err != ErrEmailNotVerified {
+		t.Fatalf("CreateTwoFactorToken: expected ErrEmailNotVerified, got %v", err)
+	}
+
+	if _, err := s.IssueSession(ctx, user.ID); err != ErrEmailNotVerified {
+		t.Fatalf("IssueSession: expected ErrEmailNotVerified, got %v", err)
+	}
+
+	// Mint a pending 2FA token while the account is verified, then unverify
+	// it before completing the token, proving CompleteTwoFactor checks the
+	// user's CURRENT verification state rather than the state at
+	// token-creation time.
+	verifyUserEmail(t, users, user.ID)
+	pending, err := s.CreateTwoFactorToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken (verified): %v", err)
+	}
+	unverifyUserEmail(t, users, user.ID)
+
+	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, pending); err != ErrEmailNotVerified {
+		t.Fatalf("CompleteTwoFactor: expected ErrEmailNotVerified, got %v", err)
+	}
+}
+
+// TestLoginSucceedsAfterEmailVerification asserts that verifying the email
+// via VerifyEmail lifts the gate for subsequent logins.
+func TestLoginSucceedsAfterEmailVerification(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+	if _, err := s.VerifyEmail(ctx, rawToken); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+
+	if _, _, err := s.Login(ctx, "alice@example.com", "password123"); err != nil {
+		t.Fatalf("Login after verification: expected success, got %v", err)
+	}
+}
+
+// TestRedeemMagicLinkStillSignsInUnverifiedUser asserts that redeeming a
+// magic link for a previously-unverified account still returns a session
+// under the default gate, since RedeemMagicLink stamps EmailVerifiedAt before
+// creating the session.
+func TestRedeemMagicLinkStillSignsInUnverifiedUser(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	user, session, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: expected success despite default RequireVerifiedEmail, got %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("expected non-empty session token")
+	}
+	if user.EmailVerifiedAt == nil {
+		t.Fatal("expected RedeemMagicLink to verify the email before issuing the session")
+	}
+}
+
+// TestRegisterStillReturnsSession asserts that Register's auto-session is
+// unaffected by the default-on verified-email gate.
+func TestRegisterStillReturnsSession(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	_, session, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: expected success under default RequireVerifiedEmail, got %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("expected Register's auto-session to be issued despite the unverified email")
+	}
+}
+
+// TestWithRequireVerifiedEmailFalseRestoresOldBehavior asserts that opting
+// out of the gate restores the pre-gate behavior: an unverified account can
+// log in.
+func TestWithRequireVerifiedEmailFalseRestoresOldBehavior(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithRequireVerifiedEmail(false))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if user.EmailVerifiedAt != nil {
+		t.Fatal("expected EmailVerifiedAt nil; this test is about unverified accounts")
+	}
+
+	if _, _, err := s.Login(ctx, "alice@example.com", "password123"); err != nil {
+		t.Fatalf("Login: expected success with WithRequireVerifiedEmail(false), got %v", err)
+	}
+}
+
+// TestIssueSessionUnknownUserReturnsErrUserNotFound asserts that IssueSession
+// now loads the user first, so an unknown ID is rejected with ErrUserNotFound
+// rather than silently minting a session for a nonexistent user.
+func TestIssueSessionUnknownUserReturnsErrUserNotFound(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, err := s.IssueSession(ctx, "unknown-user-id"); err != ErrUserNotFound {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 }
