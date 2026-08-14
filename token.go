@@ -14,6 +14,7 @@ type TokenPurpose string
 const (
 	TokenPurposePasswordReset TokenPurpose = "password_reset"
 	TokenPurposeMagicLink     TokenPurpose = "magic_link"
+	TokenPurposeTwoFactor     TokenPurpose = "two_factor"
 )
 
 // Token represents a single-use, time-limited token for password resets or magic links.
