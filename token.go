@@ -25,6 +25,9 @@ type Token struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	Used      bool
+	// Email is only set for magic-link tokens issued before the user account
+	// exists; UserID is empty in that case until the token is redeemed.
+	Email string
 }
 
 // TokenStore defines the persistence operations for tokens.
