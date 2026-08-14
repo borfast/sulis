@@ -235,6 +235,70 @@ func TestFinishLoginRejectsClonedAuthenticator(t *testing.T) {
 	}
 }
 
+func TestBeginDiscoverableLoginSavesChallengeUnderCeremonyID(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	assertion, ceremonyID, err := service.BeginDiscoverableLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin() error = %v", err)
+	}
+	if assertion == nil {
+		t.Fatal("BeginDiscoverableLogin() returned nil assertion")
+	}
+	if ceremonyID == "" {
+		t.Fatal("BeginDiscoverableLogin() returned empty ceremony ID")
+	}
+
+	session := mustLoadSavedSession(t, challenges, challengeKey("discover", ceremonyID))
+	if session.Challenge == "" {
+		t.Fatal("saved session data has empty challenge")
+	}
+}
+
+func TestBeginDiscoverableLoginReturnsUniqueCeremonyIDs(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	_, ceremonyID1, err := service.BeginDiscoverableLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin() error = %v", err)
+	}
+	_, ceremonyID2, err := service.BeginDiscoverableLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin() error = %v", err)
+	}
+
+	if ceremonyID1 == ceremonyID2 {
+		t.Fatalf("BeginDiscoverableLogin() returned identical ceremony IDs: %q", ceremonyID1)
+	}
+	if len(challenges.saved) != 2 {
+		t.Fatalf("challenges.saved has %d entries, want 2 (got keys = %v)", len(challenges.saved), keysOf(challenges.saved))
+	}
+}
+
+func TestFinishDiscoverableLoginWithoutChallengeReturnsErrChallengeExpired(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	cred, err := service.FinishDiscoverableLogin(context.Background(), "missing-ceremony-id", httptestNewRequest(t))
+	if !errors.Is(err, ErrChallengeExpired) {
+		t.Fatalf("FinishDiscoverableLogin() error = %v, want %v", err, ErrChallengeExpired)
+	}
+	if cred != nil {
+		t.Fatalf("FinishDiscoverableLogin() credential = %#v, want nil", cred)
+	}
+}
+
 func keysOf(m map[string][]byte) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
