@@ -33,7 +33,7 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 `IssueSession(ctx, userID)` creates a new session for an already-authenticated user. Call it only after a fully completed authentication — a finished passkey ceremony, `CompleteTwoFactor`, or your own trusted flow — since it performs no credential check itself.
 
-`ChangePassword(ctx, userID, oldPassword, newPassword)` is for accounts that already have a password. It verifies the old password before storing the new one and returns `ErrInvalidCredentials` for a passwordless account or a wrong old password.
+`ChangePassword(ctx, userID, oldPassword, newPassword)` is for accounts that already have a password. It consults the configured `Limiter` (key `"password:"+email`, the same key `Login`/`VerifyPassword` use) before verifying the old password, so a stolen session token can't be used to brute-force it once rate limiting is enabled. It returns `ErrInvalidCredentials` for a passwordless account or a wrong old password.
 
 `SetInitialPassword(ctx, userID, newPassword)` is for passwordless accounts created through flows such as magic link. Call it only after your application has already authenticated the user through a trusted flow; it returns `ErrInvalidCredentials` if the account already has a password.
 
@@ -45,7 +45,7 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 `CreatePasswordResetToken(ctx, email)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. Unlike `Login`/`VerifyPassword`, it returns `ErrUserNotFound` verbatim when the email doesn't exist — see [Operational requirements](#operational-requirements) for why that means your HTTP handler, not this method, must equalize the response.
 
-`ResetPassword(ctx, rawToken, newPassword)` checks the password policy first (so a policy failure doesn't burn the token), then atomically consumes the token (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token, `ErrTokenExpired` for an expired one, and `ErrTokenAlreadyUsed` for a replayed one.
+`ResetPassword(ctx, rawToken, newPassword)` checks the password policy first (so a policy failure doesn't burn the token), then atomically consumes the token (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token and `ErrTokenExpired` for an expired one. A replay's error depends on timing: redeeming the same still-live token twice (e.g. a concurrent racing request) returns `ErrTokenAlreadyUsed` for the loser; redeeming it again *after* a successful reset returns `ErrTokenInvalid` instead, because a successful reset purges the user's outstanding password-reset tokens, so the replay finds nothing to consume rather than an already-used row.
 
 By default, both `ChangePassword` and `ResetPassword` revoke every session belonging to the user and delete any other outstanding password-reset tokens for that user — see [Operational requirements](#operational-requirements).
 
@@ -59,7 +59,9 @@ By default, both `ChangePassword` and `ResetPassword` revoke every session belon
 
 Two-factor authentication is a pending-login token sandwiched between a verified first factor and a verified second factor. `sulis` doesn't implement any second factor itself — pair it with `totp`, `recovery`, or `passkey` below — it only issues and redeems the short-lived pending token that stands in for "first factor passed, second factor pending."
 
-Flow: `VerifyPassword` → your app checks whether the user has 2FA enabled → `CreateTwoFactorToken` → your app independently verifies the second factor (TOTP, recovery code, or passkey) → `CompleteTwoFactor`. No session exists until `CompleteTwoFactor` succeeds; the pending token is single-use, purpose-scoped (rejected by `ResetPassword`, `RedeemMagicLink`, and `VerifyEmail`), and expires after `TwoFactorTokenDuration` (default 5 minutes).
+Flow: `VerifyPassword` → your app checks whether the user has 2FA enabled → `CreateTwoFactorToken` → your app independently verifies the second factor (TOTP, recovery code, or passkey) → `CompleteTwoFactor(ctx, userID, rawToken)`. No session exists until `CompleteTwoFactor` succeeds; the pending token is single-use, purpose-scoped (rejected by `ResetPassword`, `RedeemMagicLink`, and `VerifyEmail`), and expires after `TwoFactorTokenDuration` (default 5 minutes).
+
+`CompleteTwoFactor` takes `userID` as an explicit argument and rejects the token with `ErrTokenInvalid` if it wasn't minted for that user (consuming the token either way, so a mismatched attempt also burns it). Your app must carry the `userID` obtained from `VerifyPassword` through its own server-side state across the two requests — e.g. keyed by the pending token, or in a short-lived server session — and pass that value to `CompleteTwoFactor`. **Never accept a client-supplied `userID` for this call**: if the second-factor request's `userID` came from the client instead, an attacker who can produce a *valid* second factor for their own account (their own TOTP code, their own passkey) could pair it with someone else's pending token and pass someone else's `userID`, since `sulis` only checks that the token and the userID match each other, not that the caller is who they claim.
 
 ```go
 user, err := auth.VerifyPassword(ctx, email, password)
@@ -78,26 +80,33 @@ if err != nil {
     return err
 }
 // Return `pending` to the client (e.g. in a short-lived, httpOnly value) and
-// prompt for a second factor. On the follow-up request:
+// prompt for a second factor. Persist user.ID server-side (e.g. keyed by
+// `pending`) so the follow-up request doesn't have to trust the client for it.
 
+// On the follow-up request:
 ok, err := totpSvc.Validate(ctx, user.ID, submittedCode)
 if err != nil {
-    // totp.ErrTOTPInvalid, totp.ErrTOTPReplayed, totp.ErrTOTPNotEnrolled, or
-    // totp.ErrTOTPRateLimited; consider falling back to a recovery code via
-    // recoverySvc.Consume(ctx, user.ID, submittedRecoveryCode).
+    // totp.ErrTOTPNotEnrolled, totp.ErrTOTPNotVerified, totp.ErrTOTPReplayed,
+    // or totp.ErrTOTPRateLimited; consider falling back to a recovery code
+    // via recoverySvc.Consume(ctx, user.ID, submittedRecoveryCode).
     return err
 }
 if !ok {
+    // Wrong code: Validate returns (false, nil), not an error.
     return errors.New("invalid code")
 }
 
-user, session, err := auth.CompleteTwoFactor(ctx, pending)
+// user.ID here comes from server-side state established above, never from
+// the client's request.
+user, session, err := auth.CompleteTwoFactor(ctx, user.ID, pending)
 return finish(user, session, err)
 ```
 
 ### Email Verification
 
-`CreateEmailVerificationToken(ctx, userID)` issues a single-use token proving control of the user's registered address (default TTL 24h). `VerifyEmail(ctx, rawToken)` consumes it and stamps `User.EmailVerifiedAt`. Verification is idempotent — once set, `EmailVerifiedAt` is never overwritten by a later verification (e.g. a second magic-link redemption keeps the original timestamp).
+`CreateEmailVerificationToken(ctx, userID)` issues a single-use token proving control of the user's registered address (default TTL 24h), bound to that address: if the user's email changes before redemption, `VerifyEmail` rejects the stale token with `ErrTokenInvalid` rather than verifying the new address. `VerifyEmail(ctx, rawToken)` consumes it and stamps `User.EmailVerifiedAt`. Verification is idempotent — once set, `EmailVerifiedAt` is never overwritten by a later verification (e.g. a second magic-link redemption keeps the original timestamp).
+
+The *first* time an account with a password gets verified (via either `VerifyEmail` or a redeemed magic link), all of that user's sessions are revoked unconditionally — regardless of `RevokeSessionsOnPasswordChange`. This closes a residual account-takeover window: an attacker who registered the victim's email with their own password before the victim ever proved mailbox control could otherwise keep a live session through the victim's later verification. Applications should additionally prompt for a password reset on this path, since the attacker's chosen password itself remains valid until changed.
 
 ## Subpackages
 
@@ -151,7 +160,7 @@ These stores are part of the security boundary. They should enforce uniqueness w
 
 ## Security Notes
 
-- `Token.TokenHash` stores a SHA-256 hash of a reset, magic-link, two-factor, or email-verification token. Raw tokens are returned once for delivery and should never be persisted. `Token.Email` is set only for magic-link tokens issued before the user account exists.
+- `Token.TokenHash` stores a SHA-256 hash of a reset, magic-link, two-factor, or email-verification token. Raw tokens are returned once for delivery and should never be persisted. `Token.Email` is set for magic-link tokens issued before the user account exists, and for email-verification tokens (bound to the address they prove, so a later email change invalidates them); it is empty for password-reset and two-factor tokens.
 - Session tokens are opaque bearer tokens. `SessionStore` implementations persist only `TokenHash` (the root package always clears `Session.Token` before calling `CreateSession`) and perform `GetSessionByTokenHash` lookups against the hash of the presented session token rather than the raw token. `ValidateSession` likewise never returns the raw token to the caller.
 - TOTP secrets (`totp.Credential.Secret`) and passkey public keys are handed to your stores as-is; recovery codes and all `sulis` tokens/sessions are hashed before your store ever sees them. See [Operational requirements](#operational-requirements) for what that implies for TOTP secrets specifically.
 
@@ -159,7 +168,7 @@ These stores are part of the security boundary. They should enforce uniqueness w
 
 These are things the library deliberately leaves to the consumer. Skipping them weakens the security properties described above.
 
-**Rate limiting is required in production.** Wire `sulis.WithLimiter` and, separately, `totp.WithLimiter` — they are independent interfaces so a single implementation can satisfy both structurally. The root limiter guards `"password:"+email` (both `Login` and `VerifyPassword`), `"reset:"+email` (`CreatePasswordResetToken`), and `"magic:"+email` (`CreateMagicLinkToken`); the totp limiter guards `"totp:"+userID` (`Validate` and `ConfirmEnrollment`). Token-redemption calls — `ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`, `VerifyEmail` — are deliberately **not** gated by the limiter: the guessable space there is a 256-bit random token (default `ResetTokenBytes` = 32 bytes), not a password or a 6-digit code, so rate limiting doesn't meaningfully raise the cost of an attack the way it does for a small guessable space. `recovery.Consume` also has no built-in limiter; its 80-bit codes make brute force impractical, but add rate limiting at your HTTP layer if you want defense in depth there too.
+**Rate limiting is required in production.** Wire `sulis.WithLimiter` and, separately, `totp.WithLimiter` — they are independent interfaces so a single implementation can satisfy both structurally. The root limiter guards `"password:"+email` (`Login`, `VerifyPassword`, and `ChangePassword`), `"reset:"+email` (`CreatePasswordResetToken`), and `"magic:"+email` (`CreateMagicLinkToken`); the totp limiter guards `"totp:"+userID` (`Validate` and `ConfirmEnrollment`). Token-redemption calls — `ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`, `VerifyEmail` — are deliberately **not** gated by the limiter: the guessable space there is a 256-bit random token (default `ResetTokenBytes` = 32 bytes), not a password or a 6-digit code, so rate limiting doesn't meaningfully raise the cost of an attack the way it does for a small guessable space. `recovery.Consume` also has no built-in limiter; its 80-bit codes make brute force impractical, but add rate limiting at your HTTP layer if you want defense in depth there too.
 
 **Schedule cleanup yourself.** `TokenStore.DeleteExpiredTokens` and `SessionStore.CleanExpired` exist so expired rows don't accumulate forever, but `sulis` never calls either — it runs no background workers. Run them on a periodic job (cron, a ticker goroutine, etc.). `ValidateSession` does delete a session it discovers is expired at validation time, but that's incidental to the read path, not a substitute for sweeping sessions and tokens that are never revisited.
 

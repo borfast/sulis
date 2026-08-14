@@ -18,6 +18,11 @@ func mustService(t *testing.T, store Store, issuer string, opts ...Option) *Serv
 	return svc
 }
 
+// errTOTPCounterRegressed is returned by memTOTPStore.SaveTOTP when a save
+// would lower LastUsedCounter for an existing credential with the same ID,
+// per the fail-closed contract documented on Store.SaveTOTP.
+var errTOTPCounterRegressed = errors.New("totp: counter would regress for existing credential")
+
 // In-memory TOTP store for testing.
 type memTOTPStore struct {
 	mu    sync.Mutex
@@ -31,6 +36,11 @@ func newMemTOTPStore() *memTOTPStore {
 func (s *memTOTPStore) SaveTOTP(_ context.Context, cred *Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if existing, ok := s.creds[cred.UserID]; ok {
+		if existing.ID == cred.ID && cred.LastUsedCounter < existing.LastUsedCounter {
+			return errTOTPCounterRegressed
+		}
+	}
 	cp := *cred
 	s.creds[cred.UserID] = &cp
 	return nil
@@ -454,6 +464,51 @@ func TestConfirmEnrollmentDoesNotRollBackCounter(t *testing.T) {
 	}
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
+	}
+}
+
+// TestMemTOTPStoreRejectsLoweredCounterForSameCredential asserts that the
+// reference in-memory store enforces the fail-closed monotonicity contract
+// documented on Store.SaveTOTP: a save for an existing credential ID must
+// not be allowed to lower LastUsedCounter, since that would let a
+// concurrent, already-superseded validate win a replay race. A save under a
+// different (re-enrollment) credential ID is unaffected and always
+// succeeds, even with a lower or zero counter.
+func TestMemTOTPStoreRejectsLoweredCounterForSameCredential(t *testing.T) {
+	store := newMemTOTPStore()
+	ctx := context.Background()
+
+	cred := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 10}
+	if err := store.SaveTOTP(ctx, cred); err != nil {
+		t.Fatalf("SaveTOTP (initial): %v", err)
+	}
+
+	// Same credential ID, lower counter: must be rejected.
+	lowered := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 5}
+	if err := store.SaveTOTP(ctx, lowered); !errors.Is(err, errTOTPCounterRegressed) {
+		t.Fatalf("expected errTOTPCounterRegressed, got %v", err)
+	}
+	// The rejected save must not have overwritten the stored counter.
+	got, err := store.GetTOTPByUserID(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetTOTPByUserID: %v", err)
+	}
+	if got.LastUsedCounter != 10 {
+		t.Fatalf("expected stored counter to remain 10, got %d", got.LastUsedCounter)
+	}
+
+	// Same credential ID, equal counter: must succeed (ConfirmEnrollment's
+	// no-op-counter re-save relies on this).
+	same := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 10}
+	if err := store.SaveTOTP(ctx, same); err != nil {
+		t.Fatalf("SaveTOTP (equal counter): %v", err)
+	}
+
+	// Different credential ID (re-enrollment): always succeeds, even with a
+	// lower/zero counter.
+	reenrolled := &Credential{ID: "cred-2", UserID: "user1", Secret: "OTHERSECRET", Verified: false, LastUsedCounter: 0}
+	if err := store.SaveTOTP(ctx, reenrolled); err != nil {
+		t.Fatalf("SaveTOTP (re-enrollment): %v", err)
 	}
 }
 

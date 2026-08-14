@@ -21,10 +21,20 @@ func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string
 // user's second factor, issues a new session. The token is single-use and
 // purpose-scoped: it cannot be replayed, and it is rejected by any flow
 // other than CompleteTwoFactor.
-func (s *Sulis) CompleteTwoFactor(ctx context.Context, rawToken string) (*User, *Session, error) {
+//
+// userID must be the ID the app obtained from its own VerifyPassword call
+// and carried through its own server-side state (e.g. keyed by the pending
+// token) — never a value supplied by the client on the second-factor
+// request. The token is consumed first and then checked against userID,
+// rejecting with ErrTokenInvalid on a mismatch; either way the token is
+// burned, so a mismatched userID cannot be retried against the same token.
+func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string) (*User, *Session, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeTwoFactor)
 	if err != nil {
 		return nil, nil, err
+	}
+	if token.UserID != userID {
+		return nil, nil, ErrTokenInvalid
 	}
 	user, err := s.users.GetUserByID(ctx, token.UserID)
 	if err != nil {

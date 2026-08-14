@@ -936,6 +936,37 @@ func TestResetPasswordDeletesOutstandingResetTokens(t *testing.T) {
 	}
 }
 
+// TestResetPasswordRevokesTwoFactorTokens asserts that a pending 2FA
+// login token minted before a password reset cannot be completed
+// afterward — otherwise an attacker who obtained a pending token under the
+// old password could still complete login post-reset.
+func TestResetPasswordRevokesTwoFactorTokens(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "old-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	pending, err := s.CreateTwoFactorToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+	if err := s.ResetPassword(ctx, rawToken, "new-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+
+	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, pending); err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid for 2FA token surviving password reset, got %v", err)
+	}
+}
+
 func TestWithRevokeSessionsOnPasswordChangeFalseKeepsSessions(t *testing.T) {
 	s, _, sessions, tokens := newTestEnv(WithRevokeSessionsOnPasswordChange(false))
 	ctx := context.Background()
@@ -1342,7 +1373,7 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 		t.Fatalf("expected no sessions before CompleteTwoFactor, got %d", len(sessions.sessions))
 	}
 
-	completedUser, session2, err := s.CompleteTwoFactor(ctx, rawToken)
+	completedUser, session2, err := s.CompleteTwoFactor(ctx, gotUser.ID, rawToken)
 	if err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
@@ -1373,12 +1404,47 @@ func TestTwoFactorTokenIsSingleUse(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != nil {
+	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != ErrTokenAlreadyUsed {
+	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != ErrTokenAlreadyUsed {
 		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	}
+}
+
+// TestCompleteTwoFactorRejectsMismatchedUserID asserts that a pending token
+// minted for one user cannot be completed by supplying a different user's
+// ID — the defense against an attacker who has their own valid pending
+// token (or a leaked one) and tries to complete it as another account by
+// passing that account's userID. The token is consumed regardless, so the
+// mismatch also burns it against replay.
+func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	userA, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register (A): %v", err)
+	}
+	userB, _, err := s.Register(ctx, "bob@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register (B): %v", err)
+	}
+
+	rawToken, err := s.CreateTwoFactorToken(ctx, userA.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+
+	if _, _, err := s.CompleteTwoFactor(ctx, userB.ID, rawToken); err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
+	}
+
+	// The token must be consumed by the mismatched attempt, so even the
+	// rightful owner (userA) can no longer complete it afterward.
+	if _, _, err := s.CompleteTwoFactor(ctx, userA.ID, rawToken); err != ErrTokenAlreadyUsed {
+		t.Fatalf("expected ErrTokenAlreadyUsed after mismatched attempt consumed the token, got %v", err)
 	}
 }
 
@@ -1398,7 +1464,7 @@ func TestTwoFactorTokenExpires(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != ErrTokenExpired {
+	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != ErrTokenExpired {
 		t.Fatalf("expected ErrTokenExpired, got %v", err)
 	}
 }
@@ -1500,6 +1566,41 @@ func TestVerifyEmailTokenIsSingleUse(t *testing.T) {
 	}
 }
 
+// TestVerifyEmailRejectsTokenForChangedEmail asserts that an
+// email-verification token is bound to the address it was issued for: if
+// the user's email changes before the token is redeemed, VerifyEmail must
+// not stamp verification for the new address using a token that never
+// proved control of it.
+func TestVerifyEmailRejectsTokenForChangedEmail(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	// Simulate the user's email changing after the token was issued (e.g. an
+	// account-settings email change) by mutating the store directly.
+	stored, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	stored.Email = "changed@example.com"
+	if err := users.UpdateUser(ctx, stored); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+
+	if _, err := s.VerifyEmail(ctx, rawToken); err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid for a token bound to a stale email, got %v", err)
+	}
+}
+
 // TestRedeemMagicLinkStampsEmailVerified asserts that redeeming a magic link
 // proves inbox ownership and stamps EmailVerifiedAt, closing the
 // pre-registration account-takeover gap: an attacker who registers the
@@ -1546,6 +1647,52 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 	}
 }
 
+// TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification closes the
+// residual account-takeover window: an attacker registers the victim's
+// email with their own password (getting a session), and the victim later
+// proves mailbox control via a magic link. The attacker's pre-verification
+// session must not survive that first verification. Because RedeemMagicLink
+// calls stampEmailVerified BEFORE createSession, the victim's freshly
+// created session is issued after the revocation and must survive.
+func TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	// Attacker seeds the account with the victim's email and their own
+	// password, obtaining a session.
+	_, attackerSession, err := s.Register(ctx, "victim@example.com", "attacker-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "victim@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	victimUser, victimSession, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if victimUser.EmailVerifiedAt == nil {
+		t.Fatal("expected EmailVerifiedAt to be set")
+	}
+
+	// The attacker's session, created before verification, must be revoked.
+	if _, _, err := s.ValidateSession(ctx, attackerSession.Token); err != ErrSessionNotFound {
+		t.Fatalf("expected attacker session revoked, got %v", err)
+	}
+
+	// The victim's session, created by RedeemMagicLink AFTER the revocation,
+	// must survive.
+	if _, _, err := s.ValidateSession(ctx, victimSession.Token); err != nil {
+		t.Fatalf("expected victim's new session to validate, got %v", err)
+	}
+	if len(sessions.sessions) != 1 {
+		t.Fatalf("expected exactly one surviving session, got %d", len(sessions.sessions))
+	}
+}
+
 // TestLoginConsultsLimiterWithNormalizedEmailKey asserts that Login (via
 // VerifyPassword) consults the configured limiter with a key built from the
 // normalized (lowercased) email, before any store lookup.
@@ -1581,6 +1728,38 @@ func TestDeniedLimiterReturnsErrRateLimited(t *testing.T) {
 
 	if _, err := s.CreateMagicLinkToken(ctx, "alice@example.com"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("CreateMagicLinkToken: expected ErrRateLimited, got %v", err)
+	}
+}
+
+// TestChangePasswordConsultsLimiterBeforeVerifyingOldPassword asserts that
+// ChangePassword is guarded against old-password brute force: a denying
+// limiter blocks it with ErrRateLimited, consulted with the "password:"+email
+// key, before the old password is ever verified (proven here by supplying a
+// wrong old password and still getting ErrRateLimited rather than
+// ErrInvalidCredentials).
+func TestChangePasswordConsultsLimiterBeforeVerifyingOldPassword(t *testing.T) {
+	limiter := &fakeLimiter{denied: true}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "old-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	limiter.mu.Lock()
+	limiter.keys = nil
+	limiter.mu.Unlock()
+
+	err = s.ChangePassword(ctx, user.ID, "definitely-wrong-old-password", "new-password")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if len(limiter.keys) != 1 || limiter.keys[0] != "password:alice@example.com" {
+		t.Fatalf("expected limiter consulted with key %q, got %v", "password:alice@example.com", limiter.keys)
 	}
 }
 
