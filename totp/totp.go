@@ -34,7 +34,7 @@ var (
 type Algorithm int
 
 const (
-	AlgorithmSHA1   Algorithm = iota // default, most widely supported
+	AlgorithmSHA1 Algorithm = iota // default, most widely supported
 	AlgorithmSHA256
 	AlgorithmSHA512
 )
@@ -63,12 +63,12 @@ func (a Algorithm) hash() func() hash.Hash {
 
 // Config holds TOTP generation parameters.
 type Config struct {
-	Issuer    string    // e.g. "MyApp"
-	Algorithm Algorithm // default: SHA1
-	Digits    int       // default: 6
-	Period    uint64    // seconds, default: 30
-	Skew      uint      // number of periods to check before/after current (default: 1)
-	SecretSize int      // bytes of entropy for new secrets (default: 20)
+	Issuer     string    // e.g. "MyApp"
+	Algorithm  Algorithm // default: SHA1
+	Digits     int       // default: 6
+	Period     uint64    // seconds, default: 30
+	Skew       uint      // number of periods to check before/after current (default: 1)
+	SecretSize int       // bytes of entropy for new secrets (default: 20)
 }
 
 // Option is a functional option for configuring the TOTP service.
@@ -106,7 +106,7 @@ type Service struct {
 }
 
 // NewService creates a new TOTP service.
-func NewService(store Store, issuer string, opts ...Option) *Service {
+func NewService(store Store, issuer string, opts ...Option) (*Service, error) {
 	cfg := Config{
 		Issuer:     issuer,
 		Algorithm:  AlgorithmSHA1,
@@ -118,7 +118,21 @@ func NewService(store Store, issuer string, opts ...Option) *Service {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return &Service{store: store, cfg: cfg}
+
+	switch {
+	case cfg.Issuer == "" || strings.Contains(cfg.Issuer, ":"):
+		return nil, fmt.Errorf("totp: issuer must be non-empty and contain no ':'")
+	case cfg.Digits < 6 || cfg.Digits > 8:
+		return nil, fmt.Errorf("totp: digits must be 6-8, got %d", cfg.Digits)
+	case cfg.Period < 15 || cfg.Period > 300:
+		return nil, fmt.Errorf("totp: period must be 15-300 seconds, got %d", cfg.Period)
+	case cfg.Skew > 4:
+		return nil, fmt.Errorf("totp: skew must be at most 4, got %d", cfg.Skew)
+	case cfg.SecretSize < 16:
+		return nil, fmt.Errorf("totp: secret size must be at least 16 bytes, got %d", cfg.SecretSize)
+	}
+
+	return &Service{store: store, cfg: cfg}, nil
 }
 
 // Enroll generates a new TOTP secret for the user and returns the base32-encoded

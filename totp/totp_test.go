@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// mustService creates a Service, failing the test if construction errors.
+func mustService(t *testing.T, store Store, issuer string, opts ...Option) *Service {
+	t.Helper()
+	svc, err := NewService(store, issuer, opts...)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
+}
+
 // In-memory TOTP store for testing.
 type memTOTPStore struct {
 	mu    sync.Mutex
@@ -114,7 +124,7 @@ func TestGenerateCode6Digits(t *testing.T) {
 
 func TestEnrollAndValidate(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, uri, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -163,7 +173,7 @@ func TestEnrollAndValidate(t *testing.T) {
 
 func TestValidateBeforeConfirm(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, _ := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -177,7 +187,7 @@ func TestValidateBeforeConfirm(t *testing.T) {
 
 func TestUnenroll(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	svc.Enroll(ctx, "user1", "alice@example.com")
@@ -191,7 +201,7 @@ func TestUnenroll(t *testing.T) {
 
 func TestValidateRejectsReplayedCode(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -220,7 +230,7 @@ func TestValidateRejectsReplayedCode(t *testing.T) {
 
 func TestValidateAcceptsNextWindowCode(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -254,7 +264,7 @@ func TestValidateAcceptsNextWindowCode(t *testing.T) {
 
 func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -294,7 +304,7 @@ func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 
 func TestValidatePersistsLastUsedCounter(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -337,7 +347,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 	// Calls: 1) Enroll's SaveTOTP, 2) ConfirmEnrollment's SaveTOTP,
 	// 3) Validate's SaveTOTP persisting the new counter — fail that one.
 	store := &failOnNthSaveStore{memTOTPStore: base, failOn: 3}
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -371,7 +381,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 
 func TestConfirmEnrollmentDoesNotRollBackCounter(t *testing.T) {
 	store := newMemTOTPStore()
-	svc := NewService(store, "TestApp")
+	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
 	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
@@ -422,6 +432,57 @@ func TestConfirmEnrollmentDoesNotRollBackCounter(t *testing.T) {
 	}
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
+	}
+}
+
+func TestNewServiceRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []Option
+	}{
+		{"digits too low", []Option{WithDigits(5)}},
+		{"digits too high", []Option{WithDigits(9)}},
+		{"period zero", []Option{WithPeriod(0)}},
+		{"period too high", []Option{WithPeriod(301)}},
+		{"skew too high", []Option{WithSkew(5)}},
+		{"secret size too small", []Option{WithSecretSize(15)}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemTOTPStore()
+			_, err := NewService(store, "TestApp", tc.opts...)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+
+	t.Run("empty issuer", func(t *testing.T) {
+		store := newMemTOTPStore()
+		_, err := NewService(store, "")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("issuer containing colon", func(t *testing.T) {
+		store := newMemTOTPStore()
+		_, err := NewService(store, "My:App")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+}
+
+func TestNewServiceAcceptsDefaults(t *testing.T) {
+	store := newMemTOTPStore()
+	svc, err := NewService(store, "TestApp")
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if svc == nil {
+		t.Fatal("expected non-nil service")
 	}
 }
 
