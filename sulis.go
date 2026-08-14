@@ -84,7 +84,7 @@ func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Sess
 		return nil, nil, err
 	}
 
-	session, err := s.IssueSession(ctx, user.ID)
+	session, err := s.issueSessionForUser(ctx, user)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -147,10 +147,17 @@ func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, erro
 	if err != nil {
 		return nil, err
 	}
+	return s.issueSessionForUser(ctx, user)
+}
+
+// issueSessionForUser gates and creates a session for an already-loaded user,
+// avoiding a redundant store round-trip for callers (like Login) that already
+// have the user in hand.
+func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, error) {
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, err
 	}
-	return s.createSession(ctx, userID)
+	return s.createSession(ctx, user.ID)
 }
 
 // ChangePassword changes a user's password after verifying the old password.
