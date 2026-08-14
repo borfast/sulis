@@ -189,6 +189,66 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) 
 	return s.finishLoginCredential(ctx, waCredential)
 }
 
+// BeginDiscoverableLogin starts a usernameless ("discoverable") WebAuthn
+// authentication ceremony: the caller does not need to know the user's
+// identity up front, since the authenticator itself supplies it during
+// FinishDiscoverableLogin.
+// Returns the credential assertion options to send to the client and a
+// ceremony ID that the caller must round-trip to FinishDiscoverableLogin.
+func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
+	assertion, sessionData, err := s.wa.BeginDiscoverableLogin()
+	if err != nil {
+		return nil, "", fmt.Errorf("passkey: begin discoverable login: %w", err)
+	}
+	data, err := json.Marshal(sessionData)
+	if err != nil {
+		return nil, "", fmt.Errorf("passkey: marshaling session: %w", err)
+	}
+	ceremonyID := generateID()
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("discover", ceremonyID), data); err != nil {
+		return nil, "", err
+	}
+	return assertion, ceremonyID, nil
+}
+
+// FinishDiscoverableLogin completes a usernameless WebAuthn authentication
+// ceremony started by BeginDiscoverableLogin. ceremonyID must be the value
+// returned by the matching BeginDiscoverableLogin call. The user is resolved
+// from the credential's stored owner rather than being supplied by the
+// caller.
+// The http.Request must contain the authenticator's response body.
+// Returns the credential that was used for authentication.
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string, r *http.Request) (*Credential, error) {
+	key := challengeKey("discover", ceremonyID)
+	data, err := s.challenges.GetChallenge(ctx, key)
+	if err != nil {
+		return nil, ErrChallengeExpired
+	}
+	defer s.challenges.DeleteChallenge(ctx, key)
+
+	var sessionData webauthn.SessionData
+	if err := json.Unmarshal(data, &sessionData); err != nil {
+		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
+	}
+
+	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+		cred, err := s.store.GetCredentialByID(ctx, rawID)
+		if err != nil {
+			return nil, ErrPasskeyNotFound
+		}
+		if cred.UserID != string(userHandle) {
+			return nil, ErrChallengeFailed
+		}
+		return &User{ID: userHandle, Credentials: []Credential{*cred}}, nil
+	}
+
+	waCred, err := s.wa.FinishDiscoverableLogin(handler, sessionData, r)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
+	}
+	return s.finishLoginCredential(ctx, waCred)
+}
+
 // finishLoginCredential applies the post-verification checks and bookkeeping
 // for a successfully verified assertion: it rejects credentials flagged as
 // possibly cloned, then persists the updated sign count and returns the
