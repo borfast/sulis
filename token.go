@@ -12,9 +12,10 @@ import (
 type TokenPurpose string
 
 const (
-	TokenPurposePasswordReset TokenPurpose = "password_reset"
-	TokenPurposeMagicLink     TokenPurpose = "magic_link"
-	TokenPurposeTwoFactor     TokenPurpose = "two_factor"
+	TokenPurposePasswordReset     TokenPurpose = "password_reset"
+	TokenPurposeMagicLink         TokenPurpose = "magic_link"
+	TokenPurposeTwoFactor         TokenPurpose = "two_factor"
+	TokenPurposeEmailVerification TokenPurpose = "email_verification"
 )
 
 // Token represents a single-use, time-limited token for password resets or magic links.
