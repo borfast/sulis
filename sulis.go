@@ -79,9 +79,28 @@ func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *S
 // Login authenticates a user with email and password and returns a new session.
 // Returns ErrInvalidCredentials if the email or password is wrong.
 func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Session, error) {
-	email, err := normalizeEmail(email)
+	user, err := s.VerifyPassword(ctx, email, password)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	session, err := s.IssueSession(ctx, user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return user, session, nil
+}
+
+// VerifyPassword checks an email and password against the stored credentials
+// without creating a session. Returns ErrInvalidCredentials if the email or
+// password is wrong. Like Login, it equalizes response timing for
+// unknown-user and passwordless-user cases by running the same Argon2 work
+// against a dummy hash.
+func (s *Sulis) VerifyPassword(ctx context.Context, email, password string) (*User, error) {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return nil, err
 	}
 
 	user, err := s.users.GetUserByEmail(ctx, email)
@@ -90,31 +109,34 @@ func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Sess
 			// Run the same Argon2 work a real verification would, so the
 			// response time doesn't reveal whether the account exists.
 			_, _ = verifyPassword(password, s.dummyHash)
-			return nil, nil, ErrInvalidCredentials
+			return nil, ErrInvalidCredentials
 		}
-		return nil, nil, err
+		return nil, err
 	}
 
 	if user.PasswordHash == "" {
 		// Passwordless user: verify against the dummy hash for the same reason.
 		_, _ = verifyPassword(password, s.dummyHash)
-		return nil, nil, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 
 	ok, err := verifyPassword(password, user.PasswordHash)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sulis: verifying password: %w", err)
+		return nil, fmt.Errorf("sulis: verifying password: %w", err)
 	}
 	if !ok {
-		return nil, nil, ErrInvalidCredentials
+		return nil, ErrInvalidCredentials
 	}
 
-	session, err := s.createSession(ctx, user.ID)
-	if err != nil {
-		return nil, nil, err
-	}
+	return user, nil
+}
 
-	return user, session, nil
+// IssueSession creates a new session for the given user ID.
+//
+// Callers MUST invoke this only after fully authenticating the user (e.g. a
+// finished passkey ceremony or completed 2FA).
+func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, error) {
+	return s.createSession(ctx, userID)
 }
 
 // ChangePassword changes a user's password after verifying the old password.

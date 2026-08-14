@@ -1177,3 +1177,115 @@ func TestGetOrCreatePasswordlessUserFallsBackAfterCreateUserRace(t *testing.T) {
 		t.Fatalf("expected exactly one user to remain, got %d", len(users.users))
 	}
 }
+
+// TestVerifyPasswordDoesNotCreateSession asserts that VerifyPassword checks
+// credentials without ever touching the session store, so it's safe to use
+// as a standalone check in a multi-step (e.g. 2FA) login flow.
+func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "password123"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// Register creates its own session; clear it so we can observe
+	// VerifyPassword's effect in isolation.
+	sessions.sessions = make(map[string]*Session)
+
+	user, err := s.VerifyPassword(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+	if user.Email != "alice@example.com" {
+		t.Fatalf("expected email alice@example.com, got %s", user.Email)
+	}
+	if len(sessions.sessions) != 0 {
+		t.Fatalf("expected no sessions to be created, got %d", len(sessions.sessions))
+	}
+}
+
+// TestVerifyPasswordWrongPasswordReturnsInvalidCredentials asserts that
+// VerifyPassword preserves Login's ErrInvalidCredentials semantics.
+func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "password123"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "wrong"); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+
+	if _, err := s.VerifyPassword(ctx, "nobody@example.com", "password123"); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials for unknown user, got %v", err)
+	}
+}
+
+// TestIssueSessionReturnsValidatableSession asserts that IssueSession
+// produces a session that round-trips through ValidateSession, since it's
+// meant to be called directly after out-of-band authentication (passkey,
+// completed 2FA) with no password check of its own.
+func TestIssueSessionReturnsValidatableSession(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	session, err := s.IssueSession(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+	if session.Token == "" {
+		t.Fatal("expected non-empty session token")
+	}
+
+	gotSession, gotUser, err := s.ValidateSession(ctx, session.Token)
+	if err != nil {
+		t.Fatalf("ValidateSession: %v", err)
+	}
+	if gotSession.ID != session.ID {
+		t.Fatalf("expected session ID %s, got %s", session.ID, gotSession.ID)
+	}
+	if gotUser.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, gotUser.ID)
+	}
+}
+
+// TestLoginStillReturnsUserAndSession pins down that Login's public contract
+// is unchanged: it behaves as VerifyPassword followed by IssueSession.
+func TestLoginStillReturnsUserAndSession(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	loggedInUser, session, err := s.Login(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if loggedInUser.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, loggedInUser.ID)
+	}
+	if session.Token == "" {
+		t.Fatal("expected non-empty session token")
+	}
+
+	gotSession, gotUser, err := s.ValidateSession(ctx, session.Token)
+	if err != nil {
+		t.Fatalf("ValidateSession: %v", err)
+	}
+	if gotSession.ID != session.ID {
+		t.Fatalf("expected session ID %s, got %s", session.ID, gotSession.ID)
+	}
+	if gotUser.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, gotUser.ID)
+	}
+}
