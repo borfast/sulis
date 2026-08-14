@@ -63,6 +63,10 @@ func decodeHash(encoded string) (params Argon2Params, salt, hash []byte, err err
 		return params, nil, nil, fmt.Errorf("sulis: invalid hash format")
 	}
 
+	if parts[1] != "argon2id" {
+		return params, nil, nil, fmt.Errorf("sulis: unsupported algorithm %q", parts[1])
+	}
+
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
 		return params, nil, nil, fmt.Errorf("sulis: parsing version: %w", err)
@@ -86,6 +90,15 @@ func decodeHash(encoded string) (params Argon2Params, salt, hash []byte, err err
 		return params, nil, nil, fmt.Errorf("sulis: decoding hash: %w", err)
 	}
 	params.KeyLength = uint32(len(hash))
+
+	switch {
+	case params.Parallelism == 0,
+		params.Iterations == 0 || params.Iterations > 1024,
+		params.Memory < 8*uint32(params.Parallelism) || params.Memory > 1<<22, // 4 GiB cap
+		len(salt) < 8 || len(salt) > 64,
+		len(hash) < 16 || len(hash) > 128:
+		return params, nil, nil, fmt.Errorf("sulis: hash parameters out of bounds")
+	}
 
 	return params, salt, hash, nil
 }
