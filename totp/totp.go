@@ -161,7 +161,12 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 	}
 
 	cred.Verified = true
-	cred.LastUsedCounter = counter
+	// Monotonic: don't let a re-confirmation with an older (but still
+	// skew-valid) code roll the counter backward and re-open replay of
+	// codes already superseded by a prior confirmation or validation.
+	if counter > cred.LastUsedCounter {
+		cred.LastUsedCounter = counter
+	}
 	return s.store.SaveTOTP(ctx, cred)
 }
 
