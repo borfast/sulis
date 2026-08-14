@@ -369,6 +369,62 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 	}
 }
 
+func TestConfirmEnrollmentDoesNotRollBackCounter(t *testing.T) {
+	store := newMemTOTPStore()
+	svc := NewService(store, "TestApp")
+	ctx := context.Background()
+
+	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+
+	now := time.Now()
+	period := time.Duration(svc.cfg.Period) * time.Second
+
+	codeT, err := svc.Generate(secret, now)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	codeNext, err := svc.Generate(secret, now.Add(period))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Confirm with the later (T+period) code first, establishing counter N+1.
+	if err := svc.ConfirmEnrollment(ctx, "user1", codeNext); err != nil {
+		t.Fatalf("ConfirmEnrollment(next): %v", err)
+	}
+	credAfterFirst, err := store.GetTOTPByUserID(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetTOTPByUserID: %v", err)
+	}
+	wantCounter := credAfterFirst.LastUsedCounter
+
+	// Re-confirm with the older, still skew-valid T code (e.g. a setup-retry
+	// endpoint calling ConfirmEnrollment again). This must not roll the
+	// counter backward and re-open replay of codes between N and N+1.
+	if err := svc.ConfirmEnrollment(ctx, "user1", codeT); err != nil {
+		t.Fatalf("ConfirmEnrollment(older): %v", err)
+	}
+	cred, err := store.GetTOTPByUserID(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetTOTPByUserID: %v", err)
+	}
+	if cred.LastUsedCounter != wantCounter {
+		t.Fatalf("LastUsedCounter = %d, want %d (rolled back)", cred.LastUsedCounter, wantCounter)
+	}
+
+	// The older code must still be rejected as a replay.
+	ok, err := svc.Validate(ctx, "user1", codeT)
+	if ok {
+		t.Fatal("Validate returned true for a code superseded before re-confirmation")
+	}
+	if !errors.Is(err, ErrTOTPReplayed) {
+		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
+	}
+}
+
 func TestOTPAuthURI(t *testing.T) {
 	uri := buildOTPAuthURI("MyApp", "alice@example.com", "JBSWY3DPEHPK3PXP", Config{
 		Algorithm: AlgorithmSHA1,
