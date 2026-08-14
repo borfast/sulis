@@ -180,12 +180,14 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 
 	t.Run("SetInitialPassword", func(t *testing.T) {
 		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
-		if _, err := s.CreateMagicLinkToken(ctx, "bob@example.com"); err != nil {
+		rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+		if err != nil {
 			t.Fatalf("CreateMagicLinkToken: %v", err)
 		}
-		bob, err := s.users.GetUserByEmail(ctx, "bob@example.com")
+		// The user is only created at redemption time (deferred user creation).
+		bob, _, err := s.RedeemMagicLink(ctx, rawToken)
 		if err != nil {
-			t.Fatalf("GetUserByEmail: %v", err)
+			t.Fatalf("RedeemMagicLink: %v", err)
 		}
 		if err := s.SetInitialPassword(ctx, bob.ID, short); err != ErrPasswordTooShort {
 			t.Fatalf("expected ErrPasswordTooShort, got %v", err)

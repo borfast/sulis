@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -644,13 +645,14 @@ func TestChangePasswordRejectsPasswordlessUser(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, err := s.CreateMagicLinkToken(ctx, "bob@example.com"); err != nil {
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
-
-	user, err := s.users.GetUserByEmail(ctx, "bob@example.com")
+	// The user is only created at redemption time (deferred user creation).
+	user, _, err := s.RedeemMagicLink(ctx, rawToken)
 	if err != nil {
-		t.Fatalf("GetUserByEmail: %v", err)
+		t.Fatalf("RedeemMagicLink: %v", err)
 	}
 
 	err = s.ChangePassword(ctx, user.ID, "", "new-password")
@@ -663,13 +665,14 @@ func TestSetInitialPassword(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, err := s.CreateMagicLinkToken(ctx, "bob@example.com"); err != nil {
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
-
-	user, err := s.users.GetUserByEmail(ctx, "bob@example.com")
+	// The user is only created at redemption time (deferred user creation).
+	user, _, err := s.RedeemMagicLink(ctx, rawToken)
 	if err != nil {
-		t.Fatalf("GetUserByEmail: %v", err)
+		t.Fatalf("RedeemMagicLink: %v", err)
 	}
 	if user.PasswordHash != "" {
 		t.Fatal("expected passwordless user")
@@ -1009,11 +1012,168 @@ func TestLoginPasswordlessUserReturnsInvalidCredentials(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, err := s.CreateMagicLinkToken(ctx, "bob@example.com"); err != nil {
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	// Redeem so the passwordless user actually exists; otherwise this would
+	// exercise the unknown-user path instead of the passwordless-user path.
+	if _, _, err := s.RedeemMagicLink(ctx, rawToken); err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
 	}
 
 	if _, _, err := s.Login(ctx, "bob@example.com", "any-password"); err != ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestEmailsAreNormalized(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "Foo@X.com ", "password123"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// A differently-cased, untrimmed variant of the same address must log in.
+	_, _, err := s.Login(ctx, "foo@x.com", "password123")
+	if err != nil {
+		t.Fatalf("Login with normalized email: %v", err)
+	}
+}
+
+func TestRegisterRejectsInvalidEmail(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	overlong := strings.Repeat("a", 250) + "@example.com" // > 254 chars total
+	cases := []string{
+		"not-an-email",
+		"a b@c.d",
+		overlong,
+	}
+
+	for _, email := range cases {
+		_, _, err := s.Register(ctx, email, "password123")
+		if err != ErrInvalidEmail {
+			t.Fatalf("Register(%q): expected ErrInvalidEmail, got %v", email, err)
+		}
+	}
+}
+
+func TestCreateMagicLinkTokenDoesNotCreateUser(t *testing.T) {
+	s, users, _, _ := newTestEnv()
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if rawToken == "" {
+		t.Fatal("expected a non-empty raw token")
+	}
+	if len(users.users) != 0 {
+		t.Fatalf("expected no user created before redemption, got %d", len(users.users))
+	}
+}
+
+func TestRedeemMagicLinkCreatesPasswordlessUser(t *testing.T) {
+	s, users, _, _ := newTestEnv()
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "Bob@Example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if len(users.users) != 0 {
+		t.Fatalf("expected no user before redemption, got %d", len(users.users))
+	}
+
+	user, session, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if user.Email != "bob@example.com" {
+		t.Fatalf("expected normalized email bob@example.com, got %s", user.Email)
+	}
+	if user.PasswordHash != "" {
+		t.Fatal("expected passwordless user")
+	}
+	if session.Token == "" {
+		t.Fatal("expected non-empty session token")
+	}
+	if len(users.users) != 1 {
+		t.Fatalf("expected exactly one user created, got %d", len(users.users))
+	}
+}
+
+func TestRedeemMagicLinkRacesWithRegister(t *testing.T) {
+	s, _, _, _ := newTestEnv()
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	// Someone registers a full account for this email between token issuance
+	// and redemption (e.g. via a concurrent request on another path).
+	registeredUser, _, err := s.Register(ctx, "bob@example.com", "some-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	user, _, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if user.ID != registeredUser.ID {
+		t.Fatalf("expected redeem to log into the registered account %s, got %s", registeredUser.ID, user.ID)
+	}
+	if user.PasswordHash == "" {
+		t.Fatal("expected the already-registered account's password hash to be preserved")
+	}
+}
+
+// raceCreateUserStore simulates another actor's CreateUser call winning a
+// race for the same email between this call's GetUserByEmail miss and its
+// own CreateUser attempt, so CreateUser observes ErrUserAlreadyExists the way
+// a real store's unique constraint would.
+type raceCreateUserStore struct {
+	*memUserStore
+}
+
+func (s *raceCreateUserStore) CreateUser(ctx context.Context, u *User) error {
+	winner := &User{
+		ID:        "race-winner-" + u.ID,
+		Email:     u.Email,
+		CreatedAt: u.CreatedAt,
+		UpdatedAt: u.UpdatedAt,
+	}
+	if err := s.memUserStore.CreateUser(ctx, winner); err != nil {
+		return err
+	}
+	return s.memUserStore.CreateUser(ctx, u) // now hits the email-exists check
+}
+
+func TestGetOrCreatePasswordlessUserFallsBackAfterCreateUserRace(t *testing.T) {
+	users := &raceCreateUserStore{memUserStore: newMemUserStore()}
+	s := New(users, newMemSessionStore(), newMemTokenStore())
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	user, _, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if user.Email != "bob@example.com" {
+		t.Fatalf("expected to fall back to the race winner's user, got %+v", user)
+	}
+	if len(users.users) != 1 {
+		t.Fatalf("expected exactly one user to remain, got %d", len(users.users))
 	}
 }

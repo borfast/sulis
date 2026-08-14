@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
 )
 
@@ -39,6 +41,11 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, opts ...Opti
 // Register creates a new user with the given email and password, and returns
 // a new session. Returns ErrUserAlreadyExists if the email is already taken.
 func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *Session, error) {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if err := s.checkPasswordPolicy(password); err != nil {
 		return nil, nil, err
 	}
@@ -72,6 +79,11 @@ func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *S
 // Login authenticates a user with email and password and returns a new session.
 // Returns ErrInvalidCredentials if the email or password is wrong.
 func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Session, error) {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
@@ -184,7 +196,17 @@ func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string)
 // The raw token is returned so the consumer can deliver it (e.g. via email).
 // Returns ErrUserNotFound if the email does not exist.
 func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string) (string, error) {
-	return s.createToken(ctx, email, TokenPurposePasswordReset)
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return "", err
+	}
+
+	user, err := s.users.GetUserByEmail(ctx, email)
+	if err != nil {
+		return "", err
+	}
+
+	return s.createTokenForUser(ctx, user.ID, TokenPurposePasswordReset, s.cfg.TokenDuration)
 }
 
 // ResetPassword resets a user's password using a raw reset token. The
@@ -268,13 +290,8 @@ func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, err
 	return session, nil
 }
 
-// createToken generates a token for the given email and purpose.
-func (s *Sulis) createToken(ctx context.Context, email string, purpose TokenPurpose) (string, error) {
-	user, err := s.users.GetUserByEmail(ctx, email)
-	if err != nil {
-		return "", err
-	}
-
+// createTokenForUser generates a token for the given user, purpose, and TTL.
+func (s *Sulis) createTokenForUser(ctx context.Context, userID string, purpose TokenPurpose, ttl time.Duration) (string, error) {
 	raw, hashed, err := generateRawToken(s.cfg.ResetTokenBytes)
 	if err != nil {
 		return "", fmt.Errorf("sulis: generating token: %w", err)
@@ -283,10 +300,10 @@ func (s *Sulis) createToken(ctx context.Context, email string, purpose TokenPurp
 	now := time.Now()
 	token := &Token{
 		ID:        generateID(),
-		UserID:    user.ID,
+		UserID:    userID,
 		TokenHash: hashed,
 		Purpose:   purpose,
-		ExpiresAt: now.Add(s.cfg.TokenDuration),
+		ExpiresAt: now.Add(ttl),
 		CreatedAt: now,
 	}
 
@@ -318,4 +335,20 @@ func generateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// normalizeEmail trims surrounding whitespace, validates the result as a
+// single RFC 5322 address (rejecting display-name forms like "Name <a@b>"),
+// and lowercases it for consistent storage and comparison. Returns
+// ErrInvalidEmail for empty, overlong (>254 bytes), or malformed input.
+func normalizeEmail(email string) (string, error) {
+	email = strings.TrimSpace(email)
+	if email == "" || len(email) > 254 {
+		return "", ErrInvalidEmail
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email { // rejects "Name <a@b>" forms
+		return "", ErrInvalidEmail
+	}
+	return strings.ToLower(email), nil
 }

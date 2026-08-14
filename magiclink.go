@@ -3,42 +3,73 @@ package sulis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
-// CreateMagicLinkToken generates a magic link token for the given email.
-// If no user exists for the email, one is created (passwordless user).
-// The raw token is returned so the consumer can deliver it (e.g. via email).
+// CreateMagicLinkToken generates a magic link token for the given email. If
+// no user exists for the email, the token is issued without creating a user
+// row — the user is created at redemption time (see RedeemMagicLink) so that
+// requesting magic links for arbitrary addresses cannot be used to flood the
+// user store before anything is ever delivered. The raw token is returned so
+// the consumer can deliver it (e.g. via email).
 func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string) (string, error) {
-	// Ensure a user exists for this email; create one if not.
-	_, err := s.users.GetUserByEmail(ctx, email)
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return "", err
+	}
+
+	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
 		if !errors.Is(err, ErrUserNotFound) {
 			return "", err
 		}
-		now := time.Now()
-		user := &User{
-			ID:        generateID(),
-			Email:     email,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if err := s.users.CreateUser(ctx, user); err != nil {
-			return "", err
-		}
+		return s.createMagicLinkTokenForEmail(ctx, email)
 	}
 
-	return s.createToken(ctx, email, TokenPurposeMagicLink)
+	return s.createTokenForUser(ctx, user.ID, TokenPurposeMagicLink, s.cfg.TokenDuration)
 }
 
-// RedeemMagicLink validates a magic link token and returns the user and a new session.
+// createMagicLinkTokenForEmail issues a magic-link token for an email with no
+// existing user, deferring user creation until the token is redeemed.
+func (s *Sulis) createMagicLinkTokenForEmail(ctx context.Context, email string) (string, error) {
+	raw, hashed, err := generateRawToken(s.cfg.ResetTokenBytes)
+	if err != nil {
+		return "", fmt.Errorf("sulis: generating token: %w", err)
+	}
+
+	now := time.Now()
+	token := &Token{
+		ID:        generateID(),
+		Email:     email,
+		TokenHash: hashed,
+		Purpose:   TokenPurposeMagicLink,
+		ExpiresAt: now.Add(s.cfg.TokenDuration),
+		CreatedAt: now,
+	}
+
+	if err := s.tokens.CreateToken(ctx, token); err != nil {
+		return "", err
+	}
+
+	return raw, nil
+}
+
+// RedeemMagicLink validates a magic link token and returns the user and a new
+// session. If the token was issued before the user existed, the user is
+// created now, as a passwordless account.
 func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *Session, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeMagicLink)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	user, err := s.users.GetUserByID(ctx, token.UserID)
+	var user *User
+	if token.UserID != "" {
+		user, err = s.users.GetUserByID(ctx, token.UserID)
+	} else {
+		user, err = s.getOrCreatePasswordlessUser(ctx, token.Email)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,4 +80,33 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *S
 	}
 
 	return user, session, nil
+}
+
+// getOrCreatePasswordlessUser looks up a user by email, creating a
+// passwordless user if none exists yet. If another request won the race and
+// created the user first (CreateUser returns ErrUserAlreadyExists), the
+// lookup is retried so the caller logs into that account instead of failing.
+func (s *Sulis) getOrCreatePasswordlessUser(ctx context.Context, email string) (*User, error) {
+	user, err := s.users.GetUserByEmail(ctx, email)
+	if err == nil {
+		return user, nil
+	}
+	if !errors.Is(err, ErrUserNotFound) {
+		return nil, err
+	}
+
+	now := time.Now()
+	user = &User{
+		ID:        generateID(),
+		Email:     email,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.users.CreateUser(ctx, user); err != nil {
+		if errors.Is(err, ErrUserAlreadyExists) {
+			return s.users.GetUserByEmail(ctx, email)
+		}
+		return nil, err
+	}
+	return user, nil
 }

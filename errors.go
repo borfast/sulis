@@ -23,4 +23,7 @@ var (
 	// Password policy errors.
 	ErrPasswordTooShort = errors.New("sulis: password too short")
 	ErrPasswordTooLong  = errors.New("sulis: password too long")
+
+	// Email validation errors.
+	ErrInvalidEmail = errors.New("sulis: invalid email")
 )
