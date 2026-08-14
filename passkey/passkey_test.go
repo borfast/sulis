@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -30,7 +31,7 @@ func TestBeginRegistrationSavesChallenge(t *testing.T) {
 		t.Fatal("BeginRegistration() returned nil creation")
 	}
 
-	session := mustLoadSavedSession(t, challenges, user)
+	session := mustLoadSavedSession(t, challenges, challengeKey("register", string(user.ID)))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
@@ -63,7 +64,7 @@ func TestBeginLoginSavesChallenge(t *testing.T) {
 		t.Fatal("BeginLogin() returned nil assertion")
 	}
 
-	session := mustLoadSavedSession(t, challenges, user)
+	session := mustLoadSavedSession(t, challenges, challengeKey("login", string(user.ID)))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
@@ -139,11 +140,115 @@ func TestFinishLoginReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T)
 	}
 }
 
+func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{CredentialID: []byte("credential-1")},
+		},
+	}}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{
+		ID:          []byte("user-1"),
+		Name:        "user@example.com",
+		DisplayName: "User One",
+	}
+
+	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+	if _, err := service.BeginLogin(context.Background(), user); err != nil {
+		t.Fatalf("BeginLogin() error = %v", err)
+	}
+
+	registerData, ok := challenges.saved["register:user-1"]
+	if !ok || len(registerData) == 0 {
+		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "register:user-1", keysOf(challenges.saved))
+	}
+	loginData, ok := challenges.saved["login:user-1"]
+	if !ok || len(loginData) == 0 {
+		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "login:user-1", keysOf(challenges.saved))
+	}
+	if len(challenges.saved) != 2 {
+		t.Fatalf("challenges.saved has %d entries, want 2 (got keys = %v)", len(challenges.saved), keysOf(challenges.saved))
+	}
+}
+
+func TestFinishLoginWrapsUnderlyingError(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{CredentialID: []byte("credential-1")},
+		},
+	}}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	if _, err := service.BeginLogin(context.Background(), user); err != nil {
+		t.Fatalf("BeginLogin() error = %v", err)
+	}
+
+	badRequest, err := http.NewRequest(http.MethodPost, "https://example.com", strings.NewReader("not valid json"))
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	badRequest.Header.Set("Content-Type", "application/json")
+
+	cred, err := service.FinishLogin(context.Background(), user, badRequest)
+	if !errors.Is(err, ErrChallengeFailed) {
+		t.Fatalf("FinishLogin() error = %v, want errors.Is(err, ErrChallengeFailed)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishLogin() credential = %#v, want nil", cred)
+	}
+	if got, sentinel := err.Error(), ErrChallengeFailed.Error(); len(got) <= len(sentinel) {
+		t.Fatalf("FinishLogin() error = %q, want detail beyond bare sentinel %q", got, sentinel)
+	}
+}
+
+func TestFinishLoginRejectsClonedAuthenticator(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	service := newTestService(t, store, newFakeChallengeStore())
+	waCred := &webauthn.Credential{
+		ID: []byte("credential-1"),
+		Authenticator: webauthn.Authenticator{
+			CloneWarning: true,
+			SignCount:    42,
+		},
+	}
+
+	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	if !errors.Is(err, ErrCloneWarning) {
+		t.Fatalf("finishLoginCredential() error = %v, want %v", err, ErrCloneWarning)
+	}
+	if cred != nil {
+		t.Fatalf("finishLoginCredential() credential = %#v, want nil", cred)
+	}
+	if store.updateSignCountCalls != 0 {
+		t.Fatalf("UpdateCredentialSignCount() calls = %d, want 0", store.updateSignCountCalls)
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 type fakeStore struct {
-	credentialsByUser   map[string][]Credential
-	credentialByID      map[string]*Credential
-	getCredentialsCalls int
-	lastUserID          string
+	credentialsByUser    map[string][]Credential
+	credentialByID       map[string]*Credential
+	getCredentialsCalls  int
+	lastUserID           string
+	updateSignCountCalls int
 }
 
 func (f *fakeStore) SaveCredential(context.Context, *Credential) error { return nil }
@@ -168,7 +273,10 @@ func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*
 	return cred, nil
 }
 
-func (f *fakeStore) UpdateCredentialSignCount(context.Context, []byte, uint32) error { return nil }
+func (f *fakeStore) UpdateCredentialSignCount(context.Context, []byte, uint32) error {
+	f.updateSignCountCalls++
+	return nil
+}
 
 func (f *fakeStore) DeleteCredential(context.Context, string) error { return nil }
 
@@ -223,10 +331,10 @@ func httptestNewRequest(t *testing.T) *http.Request {
 	return req
 }
 
-func mustLoadSavedSession(t *testing.T, challenges ChallengeStore, user *User) webauthn.SessionData {
+func mustLoadSavedSession(t *testing.T, challenges ChallengeStore, key string) webauthn.SessionData {
 	t.Helper()
 
-	data, err := challenges.GetChallenge(context.Background(), string(user.ID))
+	data, err := challenges.GetChallenge(context.Background(), key)
 	if err != nil {
 		t.Fatalf("GetChallenge() error = %v", err)
 	}

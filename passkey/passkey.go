@@ -21,6 +21,7 @@ var (
 	ErrPasskeyNotFound  = errors.New("passkey: credential not found")
 	ErrChallengeFailed  = errors.New("passkey: challenge verification failed")
 	ErrChallengeExpired = errors.New("passkey: challenge expired or not found")
+	ErrCloneWarning     = errors.New("passkey: credential clone detected (sign count anomaly)")
 )
 
 // WebAuthnConfig holds the configuration for the WebAuthn relying party.
@@ -82,7 +83,7 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 		return nil, fmt.Errorf("passkey: marshaling session: %w", err)
 	}
 
-	if err := s.challenges.SaveChallenge(ctx, string(user.ID), data); err != nil {
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("register", string(user.ID)), data); err != nil {
 		return nil, err
 	}
 
@@ -92,11 +93,12 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 // FinishRegistration completes the WebAuthn registration ceremony.
 // The http.Request must contain the authenticator's response body.
 func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Request) (*Credential, error) {
-	data, err := s.challenges.GetChallenge(ctx, string(user.ID))
+	key := challengeKey("register", string(user.ID))
+	data, err := s.challenges.GetChallenge(ctx, key)
 	if err != nil {
 		return nil, ErrChallengeExpired
 	}
-	defer s.challenges.DeleteChallenge(ctx, string(user.ID))
+	defer s.challenges.DeleteChallenge(ctx, key)
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
@@ -149,7 +151,7 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 		return nil, fmt.Errorf("passkey: marshaling session: %w", err)
 	}
 
-	if err := s.challenges.SaveChallenge(ctx, string(user.ID), data); err != nil {
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("login", string(user.ID)), data); err != nil {
 		return nil, err
 	}
 
@@ -167,11 +169,12 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) 
 	}
 	user.Credentials = creds
 
-	data, err := s.challenges.GetChallenge(ctx, string(user.ID))
+	key := challengeKey("login", string(user.ID))
+	data, err := s.challenges.GetChallenge(ctx, key)
 	if err != nil {
 		return nil, ErrChallengeExpired
 	}
-	defer s.challenges.DeleteChallenge(ctx, string(user.ID))
+	defer s.challenges.DeleteChallenge(ctx, key)
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
@@ -180,21 +183,26 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) 
 
 	waCredential, err := s.wa.FinishLogin(user, sessionData, r)
 	if err != nil {
-		return nil, ErrChallengeFailed
+		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
 	}
 
-	// Update sign count.
-	if err := s.store.UpdateCredentialSignCount(ctx, waCredential.ID, waCredential.Authenticator.SignCount); err != nil {
+	return s.finishLoginCredential(ctx, waCredential)
+}
+
+// finishLoginCredential applies the post-verification checks and bookkeeping
+// for a successfully verified assertion: it rejects credentials flagged as
+// possibly cloned, then persists the updated sign count and returns the
+// stored credential.
+func (s *Service) finishLoginCredential(ctx context.Context, waCred *webauthn.Credential) (*Credential, error) {
+	if waCred.Authenticator.CloneWarning {
+		return nil, ErrCloneWarning
+	}
+
+	if err := s.store.UpdateCredentialSignCount(ctx, waCred.ID, waCred.Authenticator.SignCount); err != nil {
 		return nil, err
 	}
 
-	// Find and return the matching credential.
-	storedCred, err := s.store.GetCredentialByID(ctx, waCredential.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	return storedCred, nil
+	return s.store.GetCredentialByID(ctx, waCred.ID)
 }
 
 // toWebAuthnCreds converts our Credential type to the webauthn library's type.
@@ -212,6 +220,13 @@ func toWebAuthnCreds(creds []Credential) []webauthn.Credential {
 		}
 	}
 	return result
+}
+
+// challengeKey scopes a challenge store key by ceremony kind ("register" or
+// "login") so that concurrent registration and login ceremonies for the same
+// user do not overwrite each other's saved challenge.
+func challengeKey(kind, id string) string {
+	return kind + ":" + id
 }
 
 func generateID() string {
