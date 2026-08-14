@@ -204,6 +204,16 @@ func newTestSulis() *Sulis {
 	return s
 }
 
+// testArgon2Params are deliberately weak, fast Argon2 parameters for tests
+// that exercise password hashing but aren't testing timing behavior itself.
+var testArgon2Params = Argon2Params{
+	Memory:      8 * 1024,
+	Iterations:  1,
+	Parallelism: 1,
+	SaltLength:  16,
+	KeyLength:   32,
+}
+
 func TestRegisterAndLogin(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
@@ -948,5 +958,62 @@ func TestValidateSessionDoesNotEchoRawToken(t *testing.T) {
 	}
 	if validated.Token != "" {
 		t.Fatalf("expected validated session token to be blank, got %q", validated.Token)
+	}
+}
+
+// TestLoginUnknownUserStillRunsArgon2 asserts that Login for an unknown email
+// pays roughly the same Argon2 cost as a known email with a wrong password,
+// so response timing doesn't reveal whether an account exists. This must use
+// the DEFAULT (slow) Argon2 params for the comparison to be meaningful.
+func TestLoginUnknownUserStillRunsArgon2(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "correct-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	const iterations = 3
+	var knownTotal, unknownTotal time.Duration
+
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		if _, _, err := s.Login(ctx, "alice@example.com", "wrong-password"); err != ErrInvalidCredentials {
+			t.Fatalf("expected ErrInvalidCredentials for wrong password, got %v", err)
+		}
+		knownTotal += time.Since(start)
+
+		start = time.Now()
+		if _, _, err := s.Login(ctx, "nobody@example.com", "wrong-password"); err != ErrInvalidCredentials {
+			t.Fatalf("expected ErrInvalidCredentials for unknown email, got %v", err)
+		}
+		unknownTotal += time.Since(start)
+	}
+
+	knownAvg := knownTotal / iterations
+	unknownAvg := unknownTotal / iterations
+
+	// Coarse bound (not a precise statistical test): an unknown-email login
+	// must still pay at least half of the Argon2 cost a known-email
+	// wrong-password login pays. A near-zero unknownAvg would indicate the
+	// early-return path is skipping password verification entirely.
+	if unknownAvg < knownAvg/2 {
+		t.Fatalf("unknown-email login too fast, timing leaks account existence: known avg=%v unknown avg=%v", knownAvg, unknownAvg)
+	}
+}
+
+// TestLoginPasswordlessUserReturnsInvalidCredentials documents that a
+// passwordless (magic-link-only) user still gets ErrInvalidCredentials on a
+// password login attempt, now via a dummy verify rather than an early return.
+func TestLoginPasswordlessUserReturnsInvalidCredentials(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	if _, err := s.CreateMagicLinkToken(ctx, "bob@example.com"); err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	if _, _, err := s.Login(ctx, "bob@example.com", "any-password"); err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 }
