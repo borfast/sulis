@@ -13,6 +13,10 @@ type User struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	Metadata     map[string]any
+	// EmailVerifiedAt records when the user's email address was confirmed as
+	// reachable (e.g. via VerifyEmail or a redeemed magic link). Nil means
+	// the address has not been verified.
+	EmailVerifiedAt *time.Time
 }
 
 // UserStore defines the persistence operations for users.

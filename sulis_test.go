@@ -1402,3 +1402,124 @@ func TestTwoFactorTokenRejectedByOtherFlows(t *testing.T) {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
 }
+
+// TestRegisterLeavesEmailUnverified asserts that Register does not implicitly
+// prove inbox ownership: only actually receiving and using a verification
+// token or magic link should stamp EmailVerifiedAt.
+func TestRegisterLeavesEmailUnverified(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if user.EmailVerifiedAt != nil {
+		t.Fatalf("expected EmailVerifiedAt nil after Register, got %v", user.EmailVerifiedAt)
+	}
+}
+
+// TestVerifyEmailStampsEmailVerifiedAt asserts that redeeming a valid
+// email-verification token stamps EmailVerifiedAt on both the returned user
+// and the persisted record.
+func TestVerifyEmailStampsEmailVerifiedAt(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	verifiedUser, err := s.VerifyEmail(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	if verifiedUser.EmailVerifiedAt == nil {
+		t.Fatal("expected EmailVerifiedAt to be set on the returned user")
+	}
+
+	stored, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if stored.EmailVerifiedAt == nil {
+		t.Fatal("expected EmailVerifiedAt to be persisted")
+	}
+}
+
+// TestVerifyEmailTokenIsSingleUse asserts that an email-verification token
+// cannot be replayed.
+func TestVerifyEmailTokenIsSingleUse(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	if _, err := s.VerifyEmail(ctx, rawToken); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+
+	if _, err := s.VerifyEmail(ctx, rawToken); err != ErrTokenAlreadyUsed {
+		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	}
+}
+
+// TestRedeemMagicLinkStampsEmailVerified asserts that redeeming a magic link
+// proves inbox ownership and stamps EmailVerifiedAt, closing the
+// pre-registration account-takeover gap: an attacker who registers the
+// victim's email with their own password cannot benefit from the victim
+// later magic-linking in, since that redemption verifies the victim's
+// control of the mailbox. It also asserts stampEmailVerified is idempotent
+// across a second verification path: the timestamp does not change once set.
+func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "victim@example.com", "attacker-password")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if user.EmailVerifiedAt != nil {
+		t.Fatal("expected EmailVerifiedAt nil before any verification")
+	}
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "victim@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	verifiedUser, _, err := s.RedeemMagicLink(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if verifiedUser.EmailVerifiedAt == nil {
+		t.Fatal("expected RedeemMagicLink to stamp EmailVerifiedAt")
+	}
+	firstVerifiedAt := *verifiedUser.EmailVerifiedAt
+
+	rawToken2, err := s.CreateMagicLinkToken(ctx, "victim@example.com")
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (second): %v", err)
+	}
+	secondUser, _, err := s.RedeemMagicLink(ctx, rawToken2)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink (second): %v", err)
+	}
+	if secondUser.EmailVerifiedAt == nil || !secondUser.EmailVerifiedAt.Equal(firstVerifiedAt) {
+		t.Fatalf("expected EmailVerifiedAt to remain %v (idempotent), got %v", firstVerifiedAt, secondUser.EmailVerifiedAt)
+	}
+}

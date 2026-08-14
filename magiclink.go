@@ -74,6 +74,12 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *S
 		return nil, nil, err
 	}
 
+	// Redeeming a magic link proves control of the mailbox, so treat it as
+	// email verification too.
+	if err := s.stampEmailVerified(ctx, user); err != nil {
+		return nil, nil, err
+	}
+
 	session, err := s.createSession(ctx, user.ID)
 	if err != nil {
 		return nil, nil, err
