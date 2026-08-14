@@ -15,6 +15,7 @@ type Argon2Params struct {
 type Config struct {
 	SessionDuration                time.Duration // how long sessions are valid (default: 24h)
 	TokenDuration                  time.Duration // how long reset/magic link tokens are valid (default: 1h)
+	TwoFactorTokenDuration         time.Duration // how long two-factor pending-login tokens are valid (default: 5m)
 	SessionTokenBytes              int           // length of random session tokens in bytes (default: 32)
 	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
 	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
@@ -30,6 +31,7 @@ func defaultConfig() Config {
 	return Config{
 		SessionDuration:                24 * time.Hour,
 		TokenDuration:                  1 * time.Hour,
+		TwoFactorTokenDuration:         5 * time.Minute,
 		SessionTokenBytes:              32,
 		ResetTokenBytes:                32,
 		RevokeSessionsOnPasswordChange: true,
@@ -53,6 +55,12 @@ func WithSessionDuration(d time.Duration) Option {
 // WithTokenDuration sets how long password reset and magic link tokens remain valid.
 func WithTokenDuration(d time.Duration) Option {
 	return func(c *Config) { c.TokenDuration = d }
+}
+
+// WithTwoFactorTokenDuration sets how long two-factor pending-login tokens
+// remain valid.
+func WithTwoFactorTokenDuration(d time.Duration) Option {
+	return func(c *Config) { c.TwoFactorTokenDuration = d }
 }
 
 // WithArgon2Params sets custom argon2id parameters for password hashing.

@@ -1289,3 +1289,116 @@ func TestLoginStillReturnsUserAndSession(t *testing.T) {
 		t.Fatalf("expected user ID %s, got %s", user.ID, gotUser.ID)
 	}
 }
+
+// TestTwoFactorFlowIssuesSessionOnlyAfterCompletion asserts that verifying a
+// password and minting a two-factor token does not create a session; only
+// CompleteTwoFactor does. This mirrors the intended app flow: VerifyPassword
+// -> (app checks its own "user has 2FA" flag) -> CreateTwoFactorToken -> (app
+// verifies TOTP/recovery code/passkey) -> CompleteTwoFactor.
+func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// Register creates its own session; clear it so we can observe the
+	// two-factor flow's effect in isolation.
+	sessions.sessions = make(map[string]*Session)
+
+	gotUser, err := s.VerifyPassword(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+
+	rawToken, err := s.CreateTwoFactorToken(ctx, gotUser.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+	if len(sessions.sessions) != 0 {
+		t.Fatalf("expected no sessions before CompleteTwoFactor, got %d", len(sessions.sessions))
+	}
+
+	completedUser, session2, err := s.CompleteTwoFactor(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("CompleteTwoFactor: %v", err)
+	}
+	if completedUser.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, completedUser.ID)
+	}
+	if session2.Token == "" {
+		t.Fatal("expected non-empty session token")
+	}
+	if len(sessions.sessions) != 1 {
+		t.Fatalf("expected exactly one session after CompleteTwoFactor, got %d", len(sessions.sessions))
+	}
+}
+
+// TestTwoFactorTokenIsSingleUse asserts that a two-factor token cannot be
+// replayed to mint a second session.
+func TestTwoFactorTokenIsSingleUse(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+
+	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != nil {
+		t.Fatalf("CompleteTwoFactor: %v", err)
+	}
+
+	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != ErrTokenAlreadyUsed {
+		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	}
+}
+
+// TestTwoFactorTokenExpires asserts that an expired two-factor token is
+// rejected rather than silently accepted.
+func TestTwoFactorTokenExpires(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTwoFactorTokenDuration(-time.Second))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+
+	if _, _, err := s.CompleteTwoFactor(ctx, rawToken); err != ErrTokenExpired {
+		t.Fatalf("expected ErrTokenExpired, got %v", err)
+	}
+}
+
+// TestTwoFactorTokenRejectedByOtherFlows asserts that a two-factor token
+// cannot be replayed against an unrelated flow like ResetPassword, since
+// consumeToken checks purpose as part of its atomic lookup.
+func TestTwoFactorTokenRejectedByOtherFlows(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, err := s.Register(ctx, "alice@example.com", "password123")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateTwoFactorToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateTwoFactorToken: %v", err)
+	}
+
+	if err := s.ResetPassword(ctx, rawToken, "new-password"); err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
+	}
+}
