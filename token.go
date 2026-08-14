@@ -30,8 +30,12 @@ type Token struct {
 // TokenStore defines the persistence operations for tokens.
 type TokenStore interface {
 	CreateToken(ctx context.Context, token *Token) error
-	GetTokenByHash(ctx context.Context, hash string) (*Token, error)
-	MarkTokenUsed(ctx context.Context, id string) error
+	// ConsumeToken atomically finds the unused token matching hash AND purpose
+	// and marks it used, returning it. Lookup and mark MUST be one atomic
+	// operation (e.g. UPDATE ... WHERE hash=? AND purpose=? AND used=false).
+	// Returns ErrTokenNotFound if no token matches hash+purpose;
+	// ErrTokenAlreadyUsed if it exists but was already consumed.
+	ConsumeToken(ctx context.Context, hash string, purpose TokenPurpose) (*Token, error)
 	DeleteExpiredTokens(ctx context.Context) error
 }
 

@@ -150,27 +150,20 @@ func (s *memTokenStore) CreateToken(_ context.Context, t *Token) error {
 	return nil
 }
 
-func (s *memTokenStore) GetTokenByHash(_ context.Context, hash string) (*Token, error) {
+func (s *memTokenStore) ConsumeToken(_ context.Context, hash string, purpose TokenPurpose) (*Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.tokens {
-		if t.TokenHash == hash {
+		if t.TokenHash == hash && t.Purpose == purpose {
+			if t.Used {
+				return nil, ErrTokenAlreadyUsed
+			}
+			t.Used = true
 			cp := *t
 			return &cp, nil
 		}
 	}
 	return nil, ErrTokenNotFound
-}
-
-func (s *memTokenStore) MarkTokenUsed(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t, ok := s.tokens[id]
-	if !ok {
-		return ErrTokenInvalid
-	}
-	t.Used = true
-	return nil
 }
 
 func (s *memTokenStore) DeleteExpiredTokens(_ context.Context) error {
@@ -458,11 +451,9 @@ type errTokenStore struct {
 
 func (s *errTokenStore) CreateToken(_ context.Context, _ *Token) error { return nil }
 
-func (s *errTokenStore) GetTokenByHash(_ context.Context, _ string) (*Token, error) {
+func (s *errTokenStore) ConsumeToken(_ context.Context, _ string, _ TokenPurpose) (*Token, error) {
 	return nil, s.err
 }
-
-func (s *errTokenStore) MarkTokenUsed(_ context.Context, _ string) error { return nil }
 
 func (s *errTokenStore) DeleteExpiredTokens(_ context.Context) error { return nil }
 
@@ -502,6 +493,17 @@ func (s *wrappedNotFoundUserStore) GetUserByEmail(_ context.Context, email strin
 func (s *wrappedNotFoundUserStore) UpdateUser(_ context.Context, _ *User) error { return nil }
 
 func (s *wrappedNotFoundUserStore) DeleteUser(_ context.Context, _ string) error { return nil }
+
+// failUpdateUserStore wraps a real memUserStore but forces UpdateUser to fail,
+// so tests can assert token consumption happens before the password change.
+type failUpdateUserStore struct {
+	*memUserStore
+	updateErr error
+}
+
+func (s *failUpdateUserStore) UpdateUser(_ context.Context, _ *User) error {
+	return s.updateErr
+}
 
 func TestCreateSessionStoresOnlyTokenHash(t *testing.T) {
 	ctx := context.Background()
@@ -669,18 +671,18 @@ func TestSetInitialPasswordRejectsExistingPassword(t *testing.T) {
 	}
 }
 
-func TestValidateTokenPropagatesLookupFailures(t *testing.T) {
+func TestConsumeTokenPropagatesLookupFailures(t *testing.T) {
 	ctx := context.Background()
 	wantErr := errors.New("token store offline")
 	s := New(newMemUserStore(), newMemSessionStore(), &errTokenStore{err: wantErr})
 
-	_, err := s.validateToken(ctx, "raw-token", TokenPurposeMagicLink)
+	_, err := s.consumeToken(ctx, "raw-token", TokenPurposeMagicLink)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected lookup error to propagate, got %v", err)
 	}
 }
 
-func TestValidateTokenNormalizesWrappedTokenNotFound(t *testing.T) {
+func TestConsumeTokenNormalizesWrappedTokenNotFound(t *testing.T) {
 	ctx := context.Background()
 	s := New(
 		newMemUserStore(),
@@ -688,7 +690,7 @@ func TestValidateTokenNormalizesWrappedTokenNotFound(t *testing.T) {
 		&errTokenStore{err: fmt.Errorf("wrapped token lookup: %w", ErrTokenNotFound)},
 	)
 
-	_, err := s.validateToken(ctx, "raw-token", TokenPurposeMagicLink)
+	_, err := s.consumeToken(ctx, "raw-token", TokenPurposeMagicLink)
 	if err != ErrTokenInvalid {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
@@ -704,5 +706,99 @@ func TestCreateMagicLinkTokenAcceptsWrappedUserNotFound(t *testing.T) {
 	}
 	if rawToken == "" {
 		t.Fatal("expected magic link token")
+	}
+}
+
+func TestResetPasswordConsumesTokenBeforePasswordChange(t *testing.T) {
+	ctx := context.Background()
+	updateErr := errors.New("update user failed")
+	users := &failUpdateUserStore{memUserStore: newMemUserStore(), updateErr: updateErr}
+	s := New(users, newMemSessionStore(), newMemTokenStore())
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "old-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	err = s.ResetPassword(ctx, rawToken, "new-password")
+	if !errors.Is(err, updateErr) {
+		t.Fatalf("expected update error, got %v", err)
+	}
+
+	// The token must already be consumed even though the password change
+	// failed, so a second attempt with the same raw token is rejected.
+	err = s.ResetPassword(ctx, rawToken, "another-password")
+	if err != ErrTokenAlreadyUsed {
+		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	}
+}
+
+func TestConcurrentResetPasswordSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	s := newTestSulis()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "old-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.ResetPassword(ctx, rawToken, fmt.Sprintf("new-password-%d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	var nilCount, usedCount int
+	for _, e := range errs {
+		switch {
+		case e == nil:
+			nilCount++
+		case errors.Is(e, ErrTokenAlreadyUsed):
+			usedCount++
+		default:
+			t.Fatalf("unexpected error: %v", e)
+		}
+	}
+	if nilCount != 1 || usedCount != 1 {
+		t.Fatalf("expected exactly one success and one already-used, got nilCount=%d usedCount=%d", nilCount, usedCount)
+	}
+}
+
+func TestConsumeTokenWrongPurposeIsInvalid(t *testing.T) {
+	ctx := context.Background()
+	s := newTestSulis()
+
+	if _, _, err := s.Register(ctx, "alice@example.com", "old-password"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	// Presenting a reset token to the magic-link flow must not consume it.
+	_, _, err = s.RedeemMagicLink(ctx, rawToken)
+	if err != ErrTokenInvalid {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
+	}
+
+	// The token must still be usable for its original purpose.
+	err = s.ResetPassword(ctx, rawToken, "new-password")
+	if err != nil {
+		t.Fatalf("expected reset token to remain usable, got %v", err)
 	}
 }
