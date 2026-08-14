@@ -27,8 +27,12 @@ type Token struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	Used      bool
-	// Email is only set for magic-link tokens issued before the user account
-	// exists; UserID is empty in that case until the token is redeemed.
+	// Email records the address a token proves control of. It is set for
+	// magic-link tokens issued before the user account exists (UserID is
+	// empty in that case until the token is redeemed) and for
+	// email-verification tokens (bound to the user's email at issuance, so a
+	// later address change invalidates an outstanding token). It is empty
+	// for password-reset and two-factor tokens.
 	Email string
 }
 

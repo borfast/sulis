@@ -155,6 +155,11 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 	if err != nil {
 		return err
 	}
+
+	if err := s.allow(ctx, "password:"+user.Email); err != nil {
+		return err
+	}
+
 	if user.PasswordHash == "" {
 		return ErrInvalidCredentials
 	}
@@ -215,7 +220,13 @@ func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string)
 			return err
 		}
 	}
-	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposePasswordReset)
+	if err := s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposePasswordReset); err != nil {
+		return err
+	}
+	// A pending 2FA login token was minted against the old password's first
+	// factor; once the password changes, that pending login must not be
+	// completable, so purge it too.
+	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeTwoFactor)
 }
 
 // CreatePasswordResetToken generates a password reset token for the given email.
@@ -321,7 +332,17 @@ func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, err
 }
 
 // createTokenForUser generates a token for the given user, purpose, and TTL.
+// The token is not bound to a specific email address; use
+// createTokenForUserWithEmail for tokens (like email verification) that must
+// be invalidated if the user's address changes after issuance.
 func (s *Sulis) createTokenForUser(ctx context.Context, userID string, purpose TokenPurpose, ttl time.Duration) (string, error) {
+	return s.createTokenForUserWithEmail(ctx, userID, "", purpose, ttl)
+}
+
+// createTokenForUserWithEmail generates a token for the given user and
+// purpose, recording email as the address the token proves control of. Pass
+// an empty email for tokens that aren't bound to a specific address.
+func (s *Sulis) createTokenForUserWithEmail(ctx context.Context, userID, email string, purpose TokenPurpose, ttl time.Duration) (string, error) {
 	raw, hashed, err := generateRawToken(s.cfg.ResetTokenBytes)
 	if err != nil {
 		return "", fmt.Errorf("sulis: generating token: %w", err)
@@ -331,6 +352,7 @@ func (s *Sulis) createTokenForUser(ctx context.Context, userID string, purpose T
 	token := &Token{
 		ID:        generateID(),
 		UserID:    userID,
+		Email:     email,
 		TokenHash: hashed,
 		Purpose:   purpose,
 		ExpiresAt: now.Add(ttl),

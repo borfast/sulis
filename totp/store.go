@@ -17,10 +17,13 @@ type Credential struct {
 
 // Store defines the persistence operations for TOTP credentials.
 type Store interface {
-	// SaveTOTP creates or updates a TOTP credential. Implementations should
+	// SaveTOTP creates or updates a TOTP credential. Implementations MUST
 	// persist LastUsedCounter atomically with respect to concurrent
-	// validates, so that two racing calls cannot both accept the same
-	// (or an older) time-step counter.
+	// validates, and MUST reject (fail closed) any save that would lower
+	// LastUsedCounter for an existing credential with the same ID, so two
+	// racing validates cannot both win. Re-enrollment is unaffected: Enroll
+	// always generates a new credential ID, so a re-enrollment save never
+	// collides with the prior credential's counter.
 	SaveTOTP(ctx context.Context, cred *Credential) error
 	GetTOTPByUserID(ctx context.Context, userID string) (*Credential, error)
 	DeleteTOTP(ctx context.Context, userID string) error
