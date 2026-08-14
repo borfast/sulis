@@ -37,6 +37,9 @@ type TokenStore interface {
 	// ErrTokenAlreadyUsed if it exists but was already consumed.
 	ConsumeToken(ctx context.Context, hash string, purpose TokenPurpose) (*Token, error)
 	DeleteExpiredTokens(ctx context.Context) error
+	// DeleteUserTokens deletes all tokens for the given user and purpose.
+	// Deleting zero tokens is not an error.
+	DeleteUserTokens(ctx context.Context, userID string, purpose TokenPurpose) error
 }
 
 // generateRawToken creates a cryptographically random token and returns both
