@@ -135,11 +135,21 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string) (*Us
 	return user, nil
 }
 
-// IssueSession creates a new session for the given user ID.
+// IssueSession creates a new session for the given user ID. It returns
+// ErrUserNotFound if userID does not exist, and ErrEmailNotVerified if the
+// account's email is unverified and RequireVerifiedEmail is enabled
+// (default).
 //
 // Callers MUST invoke this only after fully authenticating the user (e.g. a
 // finished passkey ceremony or completed 2FA).
 func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, error) {
+	user, err := s.users.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.requireVerifiedEmail(user); err != nil {
+		return nil, err
+	}
 	return s.createSession(ctx, userID)
 }
 
@@ -391,6 +401,16 @@ func (s *Sulis) allow(ctx context.Context, key string) error {
 	}
 	if err := s.cfg.Limiter.Allow(ctx, key); err != nil {
 		return ErrRateLimited
+	}
+	return nil
+}
+
+// requireVerifiedEmail returns ErrEmailNotVerified if RequireVerifiedEmail is
+// enabled and user's email has not been verified. A nil result means the
+// caller may proceed with issuing a session or minting a two-factor token.
+func (s *Sulis) requireVerifiedEmail(user *User) error {
+	if s.cfg.RequireVerifiedEmail && user.EmailVerifiedAt == nil {
+		return ErrEmailNotVerified
 	}
 	return nil
 }

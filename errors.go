@@ -27,6 +27,9 @@ var (
 	// Email validation errors.
 	ErrInvalidEmail = errors.New("sulis: invalid email")
 
+	// Email verification errors.
+	ErrEmailNotVerified = errors.New("sulis: email not verified")
+
 	// Rate limiting.
 	ErrRateLimited = errors.New("sulis: rate limited")
 )
