@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -412,4 +413,97 @@ func mustLoadSavedSession(t *testing.T, challenges ChallengeStore, key string) w
 	}
 
 	return session
+}
+
+// TestUserVerificationIsRequiredByDefault is the regression test for audit
+// finding A2. NewService left webauthn.Config.AuthenticatorSelection at its
+// zero value, so UserVerification was "" — and go-webauthn only checks the UV
+// flag when the ceremony's session data says VerificationRequired. A
+// presence-only tap was therefore accepted, reducing a passwordless passkey
+// from two factors to bare possession.
+func TestUserVerificationIsRequiredByDefault(t *testing.T) {
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {{ID: "c1", UserID: "user-1", CredentialID: []byte("cred-1")}},
+	}}
+	challenges := newFakeChallengeStore()
+	svc := newTestService(t, store, challenges)
+	ctx := context.Background()
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+
+	t.Run("registration", func(t *testing.T) {
+		creation, err := svc.BeginRegistration(ctx, user)
+		if err != nil {
+			t.Fatalf("BeginRegistration: %v", err)
+		}
+		if got := creation.Response.AuthenticatorSelection.UserVerification; got != protocol.VerificationRequired {
+			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
+		}
+		session := mustLoadSavedSession(t, challenges, "register:user-1")
+		if session.UserVerification != protocol.VerificationRequired {
+			t.Errorf("session records UV %q, want %q — go-webauthn only enforces the flag when it is %q",
+				session.UserVerification, protocol.VerificationRequired, protocol.VerificationRequired)
+		}
+	})
+
+	t.Run("login", func(t *testing.T) {
+		assertion, err := svc.BeginLogin(ctx, user)
+		if err != nil {
+			t.Fatalf("BeginLogin: %v", err)
+		}
+		if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
+			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
+		}
+		session := mustLoadSavedSession(t, challenges, "login:user-1")
+		if session.UserVerification != protocol.VerificationRequired {
+			t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationRequired)
+		}
+	})
+
+	t.Run("discoverable login", func(t *testing.T) {
+		assertion, ceremonyID, err := svc.BeginDiscoverableLogin(ctx)
+		if err != nil {
+			t.Fatalf("BeginDiscoverableLogin: %v", err)
+		}
+		if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
+			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
+		}
+		session := mustLoadSavedSession(t, challenges, "discover:"+ceremonyID)
+		if session.UserVerification != protocol.VerificationRequired {
+			t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationRequired)
+		}
+	})
+}
+
+// TestWithUserVerificationOverridesDefault covers the escape hatch for
+// passkeys used strictly as a second factor behind a verified password.
+func TestWithUserVerificationOverridesDefault(t *testing.T) {
+	challenges := newFakeChallengeStore()
+	svc, err := NewService(&fakeStore{}, challenges, WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithUserVerification(protocol.VerificationDiscouraged))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	if _, err := svc.BeginRegistration(context.Background(), user); err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+	session := mustLoadSavedSession(t, challenges, "register:user-1")
+	if session.UserVerification != protocol.VerificationDiscouraged {
+		t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationDiscouraged)
+	}
+}
+
+func TestNewServiceRejectsUnknownUserVerification(t *testing.T) {
+	_, err := NewService(&fakeStore{}, newFakeChallengeStore(), WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithUserVerification(protocol.UserVerificationRequirement("sometimes")))
+	if err == nil {
+		t.Fatal("expected an unknown user verification requirement to be rejected")
+	}
 }

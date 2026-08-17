@@ -31,6 +31,29 @@ type WebAuthnConfig struct {
 	RPOrigins     []string // allowed origins, e.g. ["https://example.com"]
 }
 
+// serviceConfig holds the tunable ceremony parameters.
+type serviceConfig struct {
+	userVerification protocol.UserVerificationRequirement
+}
+
+// Option configures a passkey Service.
+type Option func(*serviceConfig)
+
+// WithUserVerification sets whether the authenticator must verify the user —
+// a PIN, a biometric — rather than merely confirming that someone is present.
+//
+// The default is protocol.VerificationRequired, and it should stay there for a
+// passwordless passkey: user verification is what makes the credential two
+// factors ("something you have" plus "something you are") instead of bare
+// possession of an unlocked device. protocol.VerificationDiscouraged is only
+// defensible when the passkey is a SECOND factor behind a verified password.
+//
+// This must be set for the check to happen at all: go-webauthn only verifies
+// the UV flag when the ceremony's session data says VerificationRequired.
+func WithUserVerification(uv protocol.UserVerificationRequirement) Option {
+	return func(c *serviceConfig) { c.userVerification = uv }
+}
+
 // User adapts a consumer's user type to the webauthn.User interface.
 // Consumers create this from their own user type when calling Service methods.
 type User struct {
@@ -50,14 +73,28 @@ type Service struct {
 	wa         *webauthn.WebAuthn
 	store      Store
 	challenges ChallengeStore
+	cfg        serviceConfig
 }
 
 // NewService creates a new passkey service with the given stores and configuration.
-func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig) (*Service, error) {
+func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts ...Option) (*Service, error) {
+	sc := serviceConfig{userVerification: protocol.VerificationRequired}
+	for _, opt := range opts {
+		opt(&sc)
+	}
+	switch sc.userVerification {
+	case protocol.VerificationRequired, protocol.VerificationPreferred, protocol.VerificationDiscouraged:
+	default:
+		return nil, fmt.Errorf("passkey: invalid user verification requirement %q", sc.userVerification)
+	}
+
 	wa, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: cfg.RPDisplayName,
 		RPID:          cfg.RPID,
 		RPOrigins:     cfg.RPOrigins,
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: sc.userVerification,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("passkey: initializing webauthn: %w", err)
@@ -67,6 +104,7 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig) (*Se
 		wa:         wa,
 		store:      store,
 		challenges: challenges,
+		cfg:        sc,
 	}, nil
 }
 
@@ -141,7 +179,7 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 	}
 	user.Credentials = creds
 
-	assertion, sessionData, err := s.wa.BeginLogin(user)
+	assertion, sessionData, err := s.wa.BeginLogin(user, webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
 		return nil, fmt.Errorf("passkey: begin login: %w", err)
 	}
@@ -196,7 +234,7 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) 
 // Returns the credential assertion options to send to the client and a
 // ceremony ID that the caller must round-trip to FinishDiscoverableLogin.
 func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
-	assertion, sessionData, err := s.wa.BeginDiscoverableLogin()
+	assertion, sessionData, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
 		return nil, "", fmt.Errorf("passkey: begin discoverable login: %w", err)
 	}

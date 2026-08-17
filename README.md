@@ -163,6 +163,11 @@ The package depends on a consumer-owned `totp.Store` for saving and loading TOTP
 
 ### `passkey`
 
+**User verification is required by default.** `NewService` sets `UserVerification: required` on the relying-party config and on both login ceremonies. This matters because go-webauthn only checks the UV flag in the authenticator data when the ceremony's session data says `required` — leaving it unset means a presence-only tap (no PIN, no biometric) is accepted, which reduces a passwordless passkey from two factors to bare possession of an unlocked device.
+
+Pass `passkey.WithUserVerification(protocol.VerificationDiscouraged)` only when the passkey is a **second** factor behind a verified password.
+
+
 `passkey` wraps `github.com/go-webauthn/webauthn` to provide higher-level passkey registration and login helpers. It manages begin/finish WebAuthn ceremonies, persists credentials through a consumer-owned `passkey.Store`, and persists transient ceremony state through a consumer-owned `passkey.ChallengeStore`.
 
 Besides the identified `BeginRegistration`/`FinishRegistration` and `BeginLogin`/`FinishLogin` pairs (which require the caller to already know the user), `passkey` supports **discoverable ("usernameless") login**: `BeginDiscoverableLogin(ctx)` returns the assertion options plus a `ceremonyID` that the caller must round-trip to `FinishDiscoverableLogin(ctx, ceremonyID, r)`. The user is resolved from the credential's stored owner (via the authenticator's user handle), not supplied by the caller.
