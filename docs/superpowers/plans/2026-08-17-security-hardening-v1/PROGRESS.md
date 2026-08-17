@@ -154,7 +154,7 @@ Appendix A stays the single source of truth for signatures — it is not copied 
 
 ### Known deferrals
 
-- **NFKC password normalization (T505)** needs `golang.org/x/text`, which the no-new-dependencies rule forbids. Not decided here — surface it at T505 and ask.
+None outstanding. (The NFKC dependency question was resolved on 2026-08-18 — see the Decisions table.)
 
 ---
 
@@ -166,6 +166,7 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 |---|---|---|
 | — | Commits use no trailers | User preference, 2026-08-17 |
 | — | Plan split into `PLAN.md` (stable) + `PROGRESS.md` (state) | Sessions restart often; one state file avoids divergence |
+| T505 | **`golang.org/x/text` approved** — user authorised it 2026-08-18. Amends the Global Constraints in `PLAN.md` | NFKC normalization is needed so a password typed with different Unicode composition still verifies. Hand-rolling it would be worse than depending on the semi-official module that implements the spec. Do **not** treat this as a general relaxation: it is a one-module carve-out, and everything else still obeys the no-new-dependencies rule |
 | — | Work on branch `security-hardening-v1`, not `main` | Long breaking-change series; keeps `main` releasable |
 | — | `git config user.name/email` set repo-locally to match existing history | No identity was configured; used `Raúl Santos <4837+borfast@users.noreply.github.com>` from prior commits |
 | T001 | Actions upgraded v4/v5 → v7, SHA-pinned | Pinning stale majors trades one risk for another; Dependabot keeps them current |

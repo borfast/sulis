@@ -14,7 +14,7 @@
 ## Global Constraints
 
 - Go 1.25.0 floor. Test against the two most recent Go releases.
-- No new third-party dependencies in the root module or `totp/`, `passkey/`, `recovery/`. New deps live in `store/sql/` as its own module.
+- No new third-party dependencies in the root module or `totp/`, `passkey/`, `recovery/`. New deps live in `store/sql/` as its own module. **One approved exception:** `golang.org/x/text`, for NFKC password normalization in T505 (authorised 2026-08-18). Pin it and add nothing else.
 - Breaking changes are expected. Land them all before v1.0.0.
 - Sentinel errors use the package prefix: `sulis:`, `totp:`, `passkey:`, `recovery:`.
 - Raw secrets — passwords, tokens, session tokens, TOTP secrets, recovery codes — never appear in error messages, events, or logs.
@@ -528,7 +528,7 @@ Length-only means `password123` passes. NIST SP 800-63B expects comparison again
 - [ ] Run them. They fail.
 - [ ] Implement the blocklist with an embedded common-password list via `embed`.
 - [ ] Implement the HIBP k-anonymity client on stdlib `net/http`. Assert in a test that the outbound request carries only the prefix.
-- [ ] **NFKC normalization needs `golang.org/x/text`, which violates the no-new-dependencies rule.** Either implement the narrow normalization, get the user's approval for the dependency, or defer it. Record the decision in `PROGRESS.md`. Do not silently add the dependency.
+- [ ] Apply NFKC normalization before hashing, using `golang.org/x/text/unicode/norm`. The dependency is **approved** (2026-08-18) — pin it, add nothing else, and confirm `go mod tidy` pulls in no surprises. Normalize on every path that sets or verifies a password, or the same password will hash differently depending on how it was typed.
 - [ ] Raise the default minimum length to 12 while the API is already breaking.
 - [ ] Run the suite, update the README, commit.
 
