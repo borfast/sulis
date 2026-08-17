@@ -60,8 +60,8 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001, T002, T101 done. Phase 1 in progress.
-**Next task:** T102 — make session issuance aware of second factors.
+**Status:** T001, T002, T101, T102 done. Phase 1 in progress.
+**Next task:** T103 — close the magic-link 2FA bypass.
 **Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
@@ -77,7 +77,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 
 ### Phase 1 — Close the bypasses
 - [x] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
-- [ ] **T102** · A1 · Make session issuance aware of second factors
+- [x] **T102** · A1 · Make session issuance aware of second factors
 - [ ] **T103** · A1 · Close the magic-link 2FA bypass
 - [ ] **T104** · B5 · Remove `Session.Token`
 - [ ] **T105** · A2 · Require WebAuthn user verification
@@ -172,6 +172,10 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 | T101 | `setPassword` signature changed to `(ctx, userID, newPassword string, guard func(*User) error)` | Extends Appendix A (internal, so not a public break). The guard re-runs on each retry, so `ChangePassword`'s old-password check and `SetInitialPassword`'s passwordless check hold against current state, not the caller's first read |
 | T101 | `ChangePassword` re-verifies the old password inside the update | A concurrent change must not be overwritten on the strength of a stale check. Costs an extra Argon2 run only on an actual conflict |
 | T101 | `stampEmailVerified` reads `hadPassword` from the reloaded row | A password set between the caller's read and this write still triggers the session revocation it is there to guarantee |
+| T102 | **Deviates from PLAN.md T102:** the checker is wired into `Login` only, NOT `IssueSession` | `IssueSession` is the post-all-factors primitive that `CompleteTwoFactor` calls. Consulting the checker there would demand a second factor again after it was just verified — an infinite loop. T305 replaces its `userID` argument with an `Authentication` proof, which is the real guard |
+| T102 | `RequestInfo` threaded in this task rather than T106 | Otherwise T106 re-touches the same ~35 call sites for no benefit. The parameters are accepted and documented now, and consumed by the limiter in T106 |
+| T102 | `New` also validates `MinPasswordLength <= MaxPasswordLength` | Free to add now that it returns an error; an inverted range would otherwise reject every password |
+| T102 | `LoginResult.SessionToken` populated from `Session.Token` until T104 | Keeps `LoginResult` correct from the start, so T104 is a pure deletion of the struct field |
 
 ---
 
@@ -195,6 +199,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-17 | T001 | CI hardened: SHA-pinned actions, `permissions: contents: read`, Go matrix (1.25.x + stable), gofmt gate, pinned staticcheck/gosec/govulncheck, atomic coverage, Dependabot. Fixed 7 gosec findings (2 real fixes in `password.go` and `totp/totp.go`, 3 suppressed with reasons) |
 | 2026-08-18 | T002 | Appendix A ratified as written; four open questions answered (explicit `RequestInfo`, `User.Version`, separate `store/sql` module, `New` returns an error). NFKC dependency question deferred to T505 |
 | 2026-08-18 | T101 | `User.Version` optimistic concurrency + `ErrConcurrentUpdate`; `updateUserWithRetry` helper; `setPassword` and `stampEmailVerified` no longer write whole rows from stale reads; `setPassword` takes a re-checked guard; regression test proves the resurrection bug is fixed |
+| 2026-08-18 | T102 | `SecondFactorChecker` (required by `New`), `NoSecondFactors`, `LoginResult`, `AuthMethod`, `RequestInfo`; `New` returns an error; `Login` returns `*LoginResult` and fails closed on checker errors; `createSession` moved to `issue.go`. Mutation-tested: the A1 regression test fails if the check is bypassed |
 
 ---
 

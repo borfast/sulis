@@ -17,30 +17,52 @@ type Sulis struct {
 	users     UserStore
 	sessions  SessionStore
 	tokens    TokenStore
+	factors   SecondFactorChecker
 	cfg       Config
 	dummyHash string // used to equalize Login timing for unknown/passwordless users
 }
 
 // New creates a new Sulis instance with the given stores and options.
-func New(users UserStore, sessions SessionStore, tokens TokenStore, opts ...Option) *Sulis {
+//
+// factors is required and must not be nil: it is how the library learns that a
+// user has a second factor, and defaulting it would mean silently issuing
+// fully-privileged sessions to accounts that expect two-factor authentication.
+// Applications with no second factors pass NoSecondFactors{}.
+func New(users UserStore, sessions SessionStore, tokens TokenStore, factors SecondFactorChecker, opts ...Option) (*Sulis, error) {
+	switch {
+	case users == nil:
+		return nil, fmt.Errorf("sulis: UserStore must not be nil")
+	case sessions == nil:
+		return nil, fmt.Errorf("sulis: SessionStore must not be nil")
+	case tokens == nil:
+		return nil, fmt.Errorf("sulis: TokenStore must not be nil")
+	case factors == nil:
+		return nil, fmt.Errorf("sulis: SecondFactorChecker must not be nil; pass sulis.NoSecondFactors{} if this application has no second factors")
+	}
+
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.MinPasswordLength > cfg.MaxPasswordLength {
+		return nil, fmt.Errorf("sulis: minimum password length %d exceeds maximum %d", cfg.MinPasswordLength, cfg.MaxPasswordLength)
+	}
+
 	s := &Sulis{
 		users:    users,
 		sessions: sessions,
 		tokens:   tokens,
+		factors:  factors,
 		cfg:      cfg,
 	}
 	// crypto/rand cannot fail on Go >= 1.24, so ignoring the error here is safe.
 	s.dummyHash, _ = hashPassword("sulis-timing-equalization-dummy", cfg.Argon2)
-	return s
+	return s, nil
 }
 
 // Register creates a new user with the given email and password, and returns
 // a new session. Returns ErrUserAlreadyExists if the email is already taken.
-func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *Session, error) {
+func (s *Sulis) Register(ctx context.Context, email, password string, ri RequestInfo) (*User, *Session, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, nil, err
@@ -76,20 +98,24 @@ func (s *Sulis) Register(ctx context.Context, email, password string) (*User, *S
 	return user, session, nil
 }
 
-// Login authenticates a user with email and password and returns a new session.
-// Returns ErrInvalidCredentials if the email or password is wrong.
-func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Session, error) {
-	user, err := s.VerifyPassword(ctx, email, password)
+// Login authenticates a user with email and password.
+//
+// A correct password is only the FIRST factor. If the configured
+// SecondFactorChecker reports that the user has one enrolled, the returned
+// LoginResult has NeedsSecondFactor set and carries a PendingToken instead of
+// a session — no session exists until CompleteTwoFactor succeeds. Callers must
+// branch on NeedsSecondFactor rather than assuming a non-nil result means the
+// user is logged in.
+//
+// Returns ErrInvalidCredentials if the email or password is wrong, and
+// ErrEmailNotVerified if the account is unverified and RequireVerifiedEmail is
+// enabled (the default).
+func (s *Sulis) Login(ctx context.Context, email, password string, ri RequestInfo) (*LoginResult, error) {
+	user, err := s.VerifyPassword(ctx, email, password, ri)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	session, err := s.issueSessionForUser(ctx, user)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return user, session, nil
+	return s.completeFirstFactor(ctx, user, AuthMethodPassword)
 }
 
 // VerifyPassword checks an email and password against the stored credentials
@@ -97,7 +123,7 @@ func (s *Sulis) Login(ctx context.Context, email, password string) (*User, *Sess
 // password is wrong. Like Login, it equalizes response timing for
 // unknown-user and passwordless-user cases by running the same Argon2 work
 // against a dummy hash.
-func (s *Sulis) VerifyPassword(ctx context.Context, email, password string) (*User, error) {
+func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri RequestInfo) (*User, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, err
@@ -163,7 +189,7 @@ func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, 
 // ChangePassword changes a user's password after verifying the old password.
 // The length policy applies only to the new password; the old one was
 // already validated when it was set.
-func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string, ri RequestInfo) error {
 	if err := s.checkPasswordPolicy(newPassword); err != nil {
 		return err
 	}
@@ -300,7 +326,7 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 // CreatePasswordResetToken generates a password reset token for the given email.
 // The raw token is returned so the consumer can deliver it (e.g. via email).
 // Returns ErrUserNotFound if the email does not exist.
-func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string) (string, error) {
+func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string, ri RequestInfo) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return "", err
@@ -365,33 +391,6 @@ func (s *Sulis) RevokeSession(ctx context.Context, sessionID string) error {
 // RevokeAllSessions deletes all sessions for a user.
 func (s *Sulis) RevokeAllSessions(ctx context.Context, userID string) error {
 	return s.sessions.DeleteUserSessions(ctx, userID)
-}
-
-// createSession creates a new session for the given user.
-func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, error) {
-	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	session := &Session{
-		ID:        generateID(),
-		UserID:    userID,
-		Token:     token,
-		TokenHash: hashSessionToken(token),
-		ExpiresAt: now.Add(s.cfg.SessionDuration),
-		CreatedAt: now,
-	}
-
-	persisted := *session
-	persisted.Token = ""
-
-	if err := s.sessions.CreateSession(ctx, &persisted); err != nil {
-		return nil, err
-	}
-
-	return session, nil
 }
 
 // createTokenForUser generates a token for the given user, purpose, and TTL.

@@ -6,7 +6,19 @@ Requires Go 1.25+ (matching `go.mod`).
 
 ## Root Package
 
-Create a service with `sulis.New(userStore, sessionStore, tokenStore, opts...)`. The root package owns the auth logic and data types:
+Create a service with `sulis.New(userStore, sessionStore, tokenStore, secondFactorChecker, opts...)`, which returns `(*Sulis, error)`.
+
+`secondFactorChecker` is **required and must not be nil**. It is how the library learns that a user has a second factor, and defaulting it would mean silently issuing fully-privileged sessions to accounts that expect two-factor authentication:
+
+```go
+type SecondFactorChecker interface {
+    HasSecondFactor(ctx context.Context, userID string) (bool, error)
+}
+```
+
+Implement it against whatever your application counts as a second factor — a verified TOTP enrollment, a registered passkey, or both. Applications with no second factors pass `sulis.NoSecondFactors{}`, which states that in code rather than by omission.
+
+The root package owns the auth logic and data types:
 
 - `User`, `Session`, and `Token`
 - `Register`, `Login`, `VerifyPassword`, `IssueSession`, `ChangePassword`, `SetInitialPassword`
@@ -23,17 +35,38 @@ Password hashes use Argon2id. Reset, magic-link, two-factor, and email-verificat
 
 ### Register
 
-`Register(ctx, email, password)` normalizes and validates the email, checks the password against the length policy, hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, and `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
+`Register(ctx, email, password, requestInfo)` normalizes and validates the email, checks the password against the length policy, hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, and `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
 
 ### Login and VerifyPassword
 
-`Login(ctx, email, password)` is `VerifyPassword` followed by `IssueSession`. `VerifyPassword(ctx, email, password)` checks credentials without creating a session, so an application that requires a second factor can call it, decide whether the user has 2FA enabled, and only call `IssueSession` (directly, or via `CompleteTwoFactor`) once the whole login is done.
+`Login(ctx, email, password, requestInfo)` treats a correct password as the **first factor only**. It verifies the password, then asks the configured `SecondFactorChecker` whether the account has a second factor enrolled, and returns a `*LoginResult`:
+
+```go
+res, err := auth.Login(ctx, email, password, sulis.RequestInfo{IP: ip})
+if err != nil {
+    return err
+}
+if res.NeedsSecondFactor {
+    // No session exists yet. Stash res.PendingToken server-side, prompt for
+    // the second factor, then call CompleteTwoFactor.
+    return promptForSecondFactor(res.User, res.PendingToken)
+}
+setSessionCookie(res.SessionToken)
+```
+
+Exactly one outcome is populated: either `Session` + `SessionToken`, or `PendingToken` with `NeedsSecondFactor` set. **Branch on `NeedsSecondFactor`** — treating a non-nil `LoginResult` as "logged in" defeats two-factor authentication.
+
+If the checker returns an error, `Login` fails closed: no session, no pending token, error propagated. An unavailable factor store must never silently downgrade an account to one factor.
+
+`VerifyPassword(ctx, email, password, requestInfo)` checks credentials without creating anything, for applications that want to drive the second-factor step entirely themselves.
 
 Both equalize response timing for unknown-user and passwordless-user cases by running the same Argon2 work against an internal dummy hash, and both return `ErrInvalidCredentials` for any of: unknown email, passwordless account, or wrong password — the error never reveals which. If a `Limiter` is configured (see [Operational requirements](#operational-requirements)), it is consulted before the store lookup, keyed by `"password:"+<normalized email>`.
 
-`IssueSession(ctx, userID)` creates a new session for an already-authenticated user. It loads the user first (returning `ErrUserNotFound` for an unknown ID), then — by default — `ErrEmailNotVerified` if the account's email isn't verified yet, before creating the session; see [Operational requirements](#operational-requirements) for the `RequireVerifiedEmail` flag. Call it only after a fully completed authentication — a finished passkey ceremony, `CompleteTwoFactor`, or your own trusted flow — since it performs no credential check itself. `Login` calls `IssueSession` internally, so it inherits the same gate: a correct password for an unverified account returns `ErrEmailNotVerified` rather than a session.
+`IssueSession(ctx, userID)` creates a new session for an already-authenticated user. It loads the user first (returning `ErrUserNotFound` for an unknown ID), then — by default — `ErrEmailNotVerified` if the account's email isn't verified yet, before creating the session; see [Operational requirements](#operational-requirements) for the `RequireVerifiedEmail` flag. Call it only after a fully completed authentication — a finished passkey ceremony, `CompleteTwoFactor`, or your own trusted flow — since it performs no credential check itself. `Login` applies the same gate before consulting the second-factor checker, so a correct password for an unverified account returns `ErrEmailNotVerified` rather than a session or a pending token.
 
-`ChangePassword(ctx, userID, oldPassword, newPassword)` is for accounts that already have a password. It consults the configured `Limiter` (key `"password:"+email`, the same key `Login`/`VerifyPassword` use) before verifying the old password, so a stolen session token can't be used to brute-force it once rate limiting is enabled. It returns `ErrInvalidCredentials` for a passwordless account or a wrong old password.
+`IssueSession` deliberately does **not** consult the `SecondFactorChecker`: it is the primitive for a login that has already cleared every factor, which is exactly what `CompleteTwoFactor` uses it for.
+
+`ChangePassword(ctx, userID, oldPassword, newPassword, requestInfo)` is for accounts that already have a password. It consults the configured `Limiter` (key `"password:"+email`, the same key `Login`/`VerifyPassword` use) before verifying the old password, so a stolen session token can't be used to brute-force it once rate limiting is enabled. It returns `ErrInvalidCredentials` for a passwordless account or a wrong old password. The old password is re-verified against the freshly loaded user as part of the write, so a password changed by a concurrent request is never overwritten on the strength of a stale check.
 
 `SetInitialPassword(ctx, userID, newPassword)` is for passwordless accounts created through flows such as magic link. Call it only after your application has already authenticated the user through a trusted flow; it returns `ErrInvalidCredentials` if the account already has a password.
 
@@ -43,7 +76,7 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 ### Password Reset
 
-`CreatePasswordResetToken(ctx, email)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. Unlike `Login`/`VerifyPassword`, it returns `ErrUserNotFound` verbatim when the email doesn't exist — see [Operational requirements](#operational-requirements) for why that means your HTTP handler, not this method, must equalize the response.
+`CreatePasswordResetToken(ctx, email, requestInfo)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. Unlike `Login`/`VerifyPassword`, it returns `ErrUserNotFound` verbatim when the email doesn't exist — see [Operational requirements](#operational-requirements) for why that means your HTTP handler, not this method, must equalize the response.
 
 `ResetPassword(ctx, rawToken, newPassword)` checks the password policy first (so a policy failure doesn't burn the token), then atomically consumes the token (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token and `ErrTokenExpired` for an expired one. A replay's error depends on timing: redeeming the same still-live token twice (e.g. a concurrent racing request) returns `ErrTokenAlreadyUsed` for the loser; redeeming it again *after* a successful reset returns `ErrTokenInvalid` instead, because a successful reset purges the user's outstanding password-reset tokens, so the replay finds nothing to consume rather than an already-used row.
 
