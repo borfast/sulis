@@ -132,6 +132,9 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	if err := s.allow(ctx, "password:"+email); err != nil {
 		return nil, err
 	}
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
+		return nil, err
+	}
 
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
@@ -200,6 +203,9 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 	}
 
 	if err := s.allow(ctx, "password:"+user.Email); err != nil {
+		return err
+	}
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
 		return err
 	}
 
@@ -333,6 +339,9 @@ func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string, ri R
 	}
 
 	if err := s.allow(ctx, "reset:"+email); err != nil {
+		return "", err
+	}
+	if err := s.allowIP(ctx, "reset:", ri); err != nil {
 		return "", err
 	}
 

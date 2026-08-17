@@ -35,7 +35,7 @@ type Config struct {
 	MinPasswordLength              int           // minimum accepted password length in bytes (default: 8)
 	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
-	Limiter                        Limiter // rate limiter consulted at guessable choke points (default: nil, disabled)
+	Limiter                        Limiter // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
 }
 
 // Option is a functional option for configuring Sulis.
@@ -53,6 +53,7 @@ func defaultConfig() Config {
 		RequireVerifiedEmail:           true,
 		MinPasswordLength:              8,
 		MaxPasswordLength:              1024,
+		Limiter:                        NewMemoryLimiter(),
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -115,9 +116,24 @@ func WithRequireVerifiedEmail(require bool) Option {
 	return func(c *Config) { c.RequireVerifiedEmail = require }
 }
 
-// WithLimiter sets the rate limiter consulted at guessable authentication
-// choke points (password verification, and password reset / magic link
-// token issuance). A nil limiter (the default) disables rate limiting.
+// WithLimiter replaces the rate limiter consulted at guessable authentication
+// choke points: password verification, and password reset / magic link token
+// issuance. The default is an in-process MemoryLimiter; supply a shared
+// implementation (Redis or similar) when running more than one instance, since
+// the default enforces its budget per process.
+//
+// Passing nil disables rate limiting, but prefer WithoutRateLimiting, which
+// says so in code.
 func WithLimiter(l Limiter) Option {
 	return func(c *Config) { c.Limiter = l }
+}
+
+// WithoutRateLimiting disables rate limiting entirely.
+//
+// Rate limiting is on by default because a library that has to ask for it in
+// its documentation mostly runs without it. Turning it off should therefore be
+// a visible, greppable line in your code rather than the consequence of not
+// writing one — for instance when an upstream gateway already enforces limits.
+func WithoutRateLimiting() Option {
+	return func(c *Config) { c.Limiter = nil }
 }
