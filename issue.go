@@ -93,36 +93,34 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 		return &LoginResult{User: user, NeedsSecondFactor: true, PendingToken: pending}, nil
 	}
 
-	session, err := s.createSession(ctx, user.ID)
+	session, token, err := s.createSession(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
-	return &LoginResult{User: user, Session: session, SessionToken: session.Token}, nil
+	return &LoginResult{User: user, Session: session, SessionToken: token}, nil
 }
 
-// createSession creates a new session for the given user.
-func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, error) {
+// createSession creates a new session and returns it alongside the raw session
+// token. The token is a return value rather than a field on Session, so the
+// struct handed to SessionStore has no way to carry it.
+func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, string, error) {
 	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	now := time.Now()
 	session := &Session{
 		ID:        generateID(),
 		UserID:    userID,
-		Token:     token,
 		TokenHash: hashSessionToken(token),
 		ExpiresAt: now.Add(s.cfg.SessionDuration),
 		CreatedAt: now,
 	}
 
-	persisted := *session
-	persisted.Token = ""
-
-	if err := s.sessions.CreateSession(ctx, &persisted); err != nil {
-		return nil, err
+	if err := s.sessions.CreateSession(ctx, session); err != nil {
+		return nil, "", err
 	}
 
-	return session, nil
+	return session, token, nil
 }

@@ -142,7 +142,7 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, _, err := s.Register(ctx, "alice@example.com", "short12", RequestInfo{}) // 7 bytes
+	_, _, _, err := s.Register(ctx, "alice@example.com", "short12", RequestInfo{}) // 7 bytes
 	if err != ErrPasswordTooShort {
 		t.Fatalf("expected ErrPasswordTooShort, got %v", err)
 	}
@@ -153,7 +153,7 @@ func TestRegisterRejectsHugePassword(t *testing.T) {
 	ctx := context.Background()
 
 	huge := strings.Repeat("a", 1025) // 1 byte over the default max
-	_, _, err := s.Register(ctx, "alice@example.com", huge, RequestInfo{})
+	_, _, _, err := s.Register(ctx, "alice@example.com", huge, RequestInfo{})
 	if err != ErrPasswordTooLong {
 		t.Fatalf("expected ErrPasswordTooLong, got %v", err)
 	}
@@ -169,7 +169,7 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 
 	t.Run("ChangePassword", func(t *testing.T) {
 		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
-		user, _, err := s.Register(ctx, "alice@example.com", "good-password", RequestInfo{})
+		user, _, _, err := s.Register(ctx, "alice@example.com", "good-password", RequestInfo{})
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
@@ -185,7 +185,7 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 			t.Fatalf("CreateMagicLinkToken: %v", err)
 		}
 		// The user is only created at redemption time (deferred user creation).
-		bob, _, err := redeemMagicLink(t, s, ctx, rawToken)
+		bob, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 		if err != nil {
 			t.Fatalf("RedeemMagicLink: %v", err)
 		}
@@ -196,7 +196,7 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 
 	t.Run("ResetPassword", func(t *testing.T) {
 		s, _, _, tokens := newTestEnv(WithArgon2Params(testArgon2Params))
-		if _, _, err := s.Register(ctx, "carol@example.com", "good-password", RequestInfo{}); err != nil {
+		if _, _, _, err := s.Register(ctx, "carol@example.com", "good-password", RequestInfo{}); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
 		rawToken, err := s.CreatePasswordResetToken(ctx, "carol@example.com", RequestInfo{})

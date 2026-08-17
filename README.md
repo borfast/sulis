@@ -35,7 +35,7 @@ Password hashes use Argon2id. Reset, magic-link, two-factor, and email-verificat
 
 ### Register
 
-`Register(ctx, email, password, requestInfo)` normalizes and validates the email, checks the password against the length policy, hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, and `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
+`Register(ctx, email, password, requestInfo)` returns `(*User, *Session, string, error)` — the third value is the raw session token. It normalizes and validates the email, checks the password against the length policy, hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, and `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
 
 ### Login and VerifyPassword
 
@@ -62,7 +62,7 @@ If the checker returns an error, `Login` fails closed: no session, no pending to
 
 Both equalize response timing for unknown-user and passwordless-user cases by running the same Argon2 work against an internal dummy hash, and both return `ErrInvalidCredentials` for any of: unknown email, passwordless account, or wrong password — the error never reveals which. If a `Limiter` is configured (see [Operational requirements](#operational-requirements)), it is consulted before the store lookup, keyed by `"password:"+<normalized email>`.
 
-`IssueSession(ctx, userID)` creates a new session for an already-authenticated user. It loads the user first (returning `ErrUserNotFound` for an unknown ID), then — by default — `ErrEmailNotVerified` if the account's email isn't verified yet, before creating the session; see [Operational requirements](#operational-requirements) for the `RequireVerifiedEmail` flag. Call it only after a fully completed authentication — a finished passkey ceremony, `CompleteTwoFactor`, or your own trusted flow — since it performs no credential check itself. `Login` applies the same gate before consulting the second-factor checker, so a correct password for an unverified account returns `ErrEmailNotVerified` rather than a session or a pending token.
+`IssueSession(ctx, userID)` returns `(*Session, string, error)` and creates a new session for an already-authenticated user. It loads the user first (returning `ErrUserNotFound` for an unknown ID), then — by default — `ErrEmailNotVerified` if the account's email isn't verified yet, before creating the session; see [Operational requirements](#operational-requirements) for the `RequireVerifiedEmail` flag. Call it only after a fully completed authentication — a finished passkey ceremony, `CompleteTwoFactor`, or your own trusted flow — since it performs no credential check itself. `Login` applies the same gate before consulting the second-factor checker, so a correct password for an unverified account returns `ErrEmailNotVerified` rather than a session or a pending token.
 
 `IssueSession` deliberately does **not** consult the `SecondFactorChecker`: it is the primitive for a login that has already cleared every factor, which is exactly what `CompleteTwoFactor` uses it for.
 
@@ -72,7 +72,9 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 ### ValidateSession
 
-`ValidateSession(ctx, token)` hashes the presented token, loads the session by hash, rejects expired sessions with `ErrSessionExpired` (deleting the expired record as it goes), and returns the session plus its user. The returned `Session.Token` is always empty — `ValidateSession` never echoes the raw bearer token back to the caller, since stores persist only the hash.
+`ValidateSession(ctx, token)` hashes the presented token, loads the session by hash, rejects expired sessions with `ErrSessionExpired` (deleting the expired record as it goes), and returns the session plus its user.
+
+**`Session` has no `Token` field.** The raw token exists only as a return value at issue time — `LoginResult.SessionToken`, or the third result of `Register` and `IssueSession` — so the struct handed to `SessionStore` has no way to carry it and no store can persist a live bearer token by accident. Stores see `TokenHash` and nothing else.
 
 ### Password Reset
 

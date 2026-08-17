@@ -39,24 +39,27 @@ func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string
 // request. The token is consumed first and then checked against userID,
 // rejecting with ErrTokenInvalid on a mismatch; either way the token is
 // burned, so a mismatched userID cannot be retried against the same token.
-func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string) (*User, *Session, error) {
+func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, ri RequestInfo) (*LoginResult, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeTwoFactor)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if token.UserID != userID {
-		return nil, nil, ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	user, err := s.users.GetUserByID(ctx, token.UserID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := s.requireVerifiedEmail(user); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	session, err := s.createSession(ctx, user.ID)
+	// Both factors are done, so this issues a session directly rather than
+	// going through completeFirstFactor — asking the checker again here would
+	// demand a second factor immediately after verifying one.
+	session, sessionToken, err := s.createSession(ctx, user.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return user, session, nil
+	return &LoginResult{User: user, Session: session, SessionToken: sessionToken}, nil
 }

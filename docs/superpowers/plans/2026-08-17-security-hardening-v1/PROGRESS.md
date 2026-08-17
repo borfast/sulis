@@ -60,8 +60,8 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001, T002, T101–T103 done. Phase 1 in progress.
-**Next task:** T104 — remove `Session.Token`.
+**Status:** T001, T002, T101–T104 done. Phase 1 in progress.
+**Next task:** T105 — require WebAuthn user verification.
 **Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
@@ -79,7 +79,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 - [x] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
 - [x] **T102** · A1 · Make session issuance aware of second factors
 - [x] **T103** · A1 · Close the magic-link 2FA bypass
-- [ ] **T104** · B5 · Remove `Session.Token`
+- [x] **T104** · B5 · Remove `Session.Token`
 - [ ] **T105** · A2 · Require WebAuthn user verification
 - [ ] **T106** · B1 · Rate limiting on by default, with an IP dimension
 - [ ] **T107** · C1 · Own the email-change flow
@@ -176,6 +176,8 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 | T102 | `RequestInfo` threaded in this task rather than T106 | Otherwise T106 re-touches the same ~35 call sites for no benefit. The parameters are accepted and documented now, and consumed by the limiter in T106 |
 | T102 | `New` also validates `MinPasswordLength <= MaxPasswordLength` | Free to add now that it returns an error; an inverted range would otherwise reject every password |
 | T102 | `LoginResult.SessionToken` populated from `Session.Token` until T104 | Keeps `LoginResult` correct from the start, so T104 is a pure deletion of the struct field |
+| T104 | `CompleteTwoFactor` returns `*LoginResult` and takes `RequestInfo` (Appendix A shape, landed early) | It had to change anyway to surface the raw token; returning `LoginResult` avoids a fourth return value and a second churn |
+| T104 | `Register` returns `(*User, *Session, string, error)` rather than a `LoginResult` | Registration is exempt from the second-factor gate by design, so a result type implying a 2FA branch would mislead |
 
 ---
 
@@ -201,6 +203,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-18 | T101 | `User.Version` optimistic concurrency + `ErrConcurrentUpdate`; `updateUserWithRetry` helper; `setPassword` and `stampEmailVerified` no longer write whole rows from stale reads; `setPassword` takes a re-checked guard; regression test proves the resurrection bug is fixed |
 | 2026-08-18 | T102 | `SecondFactorChecker` (required by `New`), `NoSecondFactors`, `LoginResult`, `AuthMethod`, `RequestInfo`; `New` returns an error; `Login` returns `*LoginResult` and fails closed on checker errors; `createSession` moved to `issue.go`. Mutation-tested: the A1 regression test fails if the check is bypassed |
 | 2026-08-18 | T103 | `RedeemMagicLink` returns `*LoginResult` and routes through `completeFirstFactor`, closing the mailbox-access-defeats-2FA bypass. Verification is stamped before the branch so a 2FA user can still verify by magic link |
+| 2026-08-18 | T104 | `Session.Token` removed; raw token returned beside the session by `createSession`, `Register`, `IssueSession`. `CompleteTwoFactor` now returns `*LoginResult`. Reflection test guards the field |
 
 ---
 

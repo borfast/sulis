@@ -62,19 +62,19 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 
 // Register creates a new user with the given email and password, and returns
 // a new session. Returns ErrUserAlreadyExists if the email is already taken.
-func (s *Sulis) Register(ctx context.Context, email, password string, ri RequestInfo) (*User, *Session, error) {
+func (s *Sulis) Register(ctx context.Context, email, password string, ri RequestInfo) (*User, *Session, string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	if err := s.checkPasswordPolicy(password); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	hash, err := hashPassword(password, s.cfg.Argon2)
 	if err != nil {
-		return nil, nil, fmt.Errorf("sulis: hashing password: %w", err)
+		return nil, nil, "", fmt.Errorf("sulis: hashing password: %w", err)
 	}
 
 	now := time.Now()
@@ -87,15 +87,15 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 	}
 
 	if err := s.users.CreateUser(ctx, user); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	session, err := s.createSession(ctx, user.ID)
+	session, token, err := s.createSession(ctx, user.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	return user, session, nil
+	return user, session, token, nil
 }
 
 // Login authenticates a user with email and password.
@@ -168,10 +168,10 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 //
 // Callers MUST invoke this only after fully authenticating the user (e.g. a
 // finished passkey ceremony or completed 2FA).
-func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, error) {
+func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, string, error) {
 	user, err := s.users.GetUserByID(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	return s.issueSessionForUser(ctx, user)
 }
@@ -179,9 +179,9 @@ func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, erro
 // issueSessionForUser gates and creates a session for an already-loaded user,
 // avoiding a redundant store round-trip for callers (like Login) that already
 // have the user in hand.
-func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, error) {
+func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, string, error) {
 	if err := s.requireVerifiedEmail(user); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	return s.createSession(ctx, user.ID)
 }

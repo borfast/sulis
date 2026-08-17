@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -289,16 +290,16 @@ func mustNew(users UserStore, sessions SessionStore, tokens TokenStore, opts ...
 // (user, session) shape most tests assert on. It fails the test if a second
 // factor is unexpectedly demanded; tests covering that branch call
 // RedeemMagicLink directly.
-func redeemMagicLink(t *testing.T, s *Sulis, ctx context.Context, rawToken string) (*User, *Session, error) {
+func redeemMagicLink(t *testing.T, s *Sulis, ctx context.Context, rawToken string) (*User, *Session, string, error) {
 	t.Helper()
 	res, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if res.NeedsSecondFactor {
 		t.Fatal("this test does not expect a second-factor demand")
 	}
-	return res.User, res.Session, nil
+	return res.User, res.Session, res.SessionToken, nil
 }
 
 // newTestEnv builds a Sulis instance wired to fresh in-memory stores and
@@ -373,14 +374,14 @@ func TestRegisterAndLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if user.Email != "alice@example.com" {
 		t.Fatalf("expected email alice@example.com, got %s", user.Email)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 	// Verification is incidental to this test; the gate is covered elsewhere.
@@ -394,11 +395,11 @@ func TestRegisterAndLogin(t *testing.T) {
 	if res2.NeedsSecondFactor {
 		t.Fatal("no second factor is enrolled, so Login should return a session")
 	}
-	user2, session2 := res2.User, res2.Session
+	user2, _, session2Tok := res2.User, res2.Session, res2.SessionToken
 	if user2.ID != user.ID {
 		t.Fatal("login returned different user ID")
 	}
-	if session2.Token == session.Token {
+	if session2Tok == sessionTok {
 		t.Fatal("login should create a new session token")
 	}
 
@@ -419,12 +420,12 @@ func TestRegisterDuplicate(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	_, _, err = s.Register(ctx, "alice@example.com", "password456", RequestInfo{})
+	_, _, _, err = s.Register(ctx, "alice@example.com", "password456", RequestInfo{})
 	if err != ErrUserAlreadyExists {
 		t.Fatalf("expected ErrUserAlreadyExists, got %v", err)
 	}
@@ -434,7 +435,7 @@ func TestChangePassword(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, _, _ := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	user, _, _, _ := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	// Verification is incidental to this test; the gate is covered elsewhere.
 	verifyUserEmail(t, users, user.ID)
 
@@ -460,10 +461,10 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, session, _ := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, _ := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 
 	// Validate the session.
-	sess, user, err := s.ValidateSession(ctx, session.Token)
+	sess, user, err := s.ValidateSession(ctx, sessionTok)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -477,7 +478,7 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	}
 
 	// Session should no longer be valid.
-	_, _, err = s.ValidateSession(ctx, session.Token)
+	_, _, err = s.ValidateSession(ctx, sessionTok)
 	if err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound after revoke, got %v", err)
 	}
@@ -487,7 +488,7 @@ func TestPasswordResetFlow(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, _, _ := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	user, _, _, _ := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	// Verification is incidental to this test; the gate is covered elsewhere.
 	verifyUserEmail(t, users, user.ID)
 
@@ -530,14 +531,14 @@ func TestMagicLinkFlow(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, session, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
 	if user.Email != "bob@example.com" {
 		t.Fatalf("expected bob@example.com, got %s", user.Email)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 	if user.PasswordHash != "" {
@@ -705,27 +706,24 @@ func TestCreateSessionStoresOnlyTokenHash(t *testing.T) {
 	sessions := newObservingSessionStore()
 	s := mustNew(users, sessions, newMemTokenStore())
 
-	user, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if user.ID == "" {
 		t.Fatal("expected created user")
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected issued session to include raw token")
 	}
 	if session.TokenHash == "" {
 		t.Fatal("expected issued session to include token hash")
 	}
-	if session.TokenHash != hashSessionToken(session.Token) {
+	if session.TokenHash != hashSessionToken(sessionTok) {
 		t.Fatal("expected issued session token hash to match raw token")
 	}
 	if sessions.created == nil {
 		t.Fatal("expected session store create call")
-	}
-	if sessions.created.Token != "" {
-		t.Fatalf("expected persisted session token to be blank, got %q", sessions.created.Token)
 	}
 	if sessions.created.TokenHash != session.TokenHash {
 		t.Fatal("expected persisted session to store token hash")
@@ -793,15 +791,9 @@ func TestValidateSessionDoesNotMutateStoredSession(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
-	validated, _, err := s.ValidateSession(ctx, rawToken)
+	_, _, err := s.ValidateSession(ctx, rawToken)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
-	}
-	if validated.Token != "" {
-		t.Fatalf("expected validated session token to be blank, got %q", validated.Token)
-	}
-	if store.session.Token != "" {
-		t.Fatalf("expected stored session token to remain blank, got %q", store.session.Token)
 	}
 }
 
@@ -814,7 +806,7 @@ func TestChangePasswordRejectsPasswordlessUser(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 	// The user is only created at redemption time (deferred user creation).
-	user, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -834,7 +826,7 @@ func TestSetInitialPassword(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 	// The user is only created at redemption time (deferred user creation).
-	user, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -856,7 +848,7 @@ func TestSetInitialPasswordRejectsExistingPassword(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -911,7 +903,7 @@ func TestResetPasswordConsumesTokenBeforePasswordChange(t *testing.T) {
 	users := &failUpdateUserStore{memUserStore: newMemUserStore(), updateErr: updateErr}
 	s := mustNew(users, newMemSessionStore(), newMemTokenStore())
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -937,7 +929,7 @@ func TestConcurrentResetPasswordSingleWinner(t *testing.T) {
 	ctx := context.Background()
 	s := newTestSulis()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -977,7 +969,7 @@ func TestConsumeTokenWrongPurposeIsInvalid(t *testing.T) {
 	ctx := context.Background()
 	s := newTestSulis()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -1003,7 +995,7 @@ func TestResetPasswordRevokesAllSessions(t *testing.T) {
 	s, _, sessions, _ := newTestEnv()
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1018,7 +1010,7 @@ func TestResetPasswordRevokesAllSessions(t *testing.T) {
 	}
 
 	// The pre-reset session must be invalidated.
-	if _, _, err := s.ValidateSession(ctx, session.Token); err != ErrSessionNotFound {
+	if _, _, err := s.ValidateSession(ctx, sessionTok); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound for pre-reset session, got %v", err)
 	}
 	if len(sessions.sessions) != 0 {
@@ -1030,7 +1022,7 @@ func TestChangePasswordRevokesAllSessions(t *testing.T) {
 	s, _, sessions, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, session, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1040,7 +1032,7 @@ func TestChangePasswordRevokesAllSessions(t *testing.T) {
 	}
 
 	// The pre-change session must be invalidated.
-	if _, _, err := s.ValidateSession(ctx, session.Token); err != ErrSessionNotFound {
+	if _, _, err := s.ValidateSession(ctx, sessionTok); err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound for pre-change session, got %v", err)
 	}
 	if len(sessions.sessions) != 0 {
@@ -1052,7 +1044,7 @@ func TestResetPasswordDeletesOutstandingResetTokens(t *testing.T) {
 	s, _, _, tokens := newTestEnv()
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -1086,7 +1078,7 @@ func TestResetPasswordRevokesTwoFactorTokens(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1106,7 +1098,7 @@ func TestResetPasswordRevokesTwoFactorTokens(t *testing.T) {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, pending); err != ErrTokenInvalid {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, pending, RequestInfo{}); err != ErrTokenInvalid {
 		t.Fatalf("expected ErrTokenInvalid for 2FA token surviving password reset, got %v", err)
 	}
 }
@@ -1115,7 +1107,7 @@ func TestWithRevokeSessionsOnPasswordChangeFalseKeepsSessions(t *testing.T) {
 	s, _, sessions, tokens := newTestEnv(WithRevokeSessionsOnPasswordChange(false))
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1130,7 +1122,7 @@ func TestWithRevokeSessionsOnPasswordChangeFalseKeepsSessions(t *testing.T) {
 	}
 
 	// Session revocation opted out: the pre-reset session should still validate.
-	if _, _, err := s.ValidateSession(ctx, session.Token); err != nil {
+	if _, _, err := s.ValidateSession(ctx, sessionTok); err != nil {
 		t.Fatalf("expected session to remain valid, got %v", err)
 	}
 	if len(sessions.sessions) != 1 {
@@ -1147,17 +1139,13 @@ func TestValidateSessionDoesNotEchoRawToken(t *testing.T) {
 	s, _, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	validated, _, err := s.ValidateSession(ctx, session.Token)
-	if err != nil {
+	if _, _, err := s.ValidateSession(ctx, sessionTok); err != nil {
 		t.Fatalf("ValidateSession: %v", err)
-	}
-	if validated.Token != "" {
-		t.Fatalf("expected validated session token to be blank, got %q", validated.Token)
 	}
 }
 
@@ -1169,7 +1157,7 @@ func TestLoginUnknownUserStillRunsArgon2(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "correct-password", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "correct-password", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -1228,7 +1216,7 @@ func TestEmailsAreNormalized(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "Foo@X.com ", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "Foo@X.com ", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1254,7 +1242,7 @@ func TestRegisterRejectsInvalidEmail(t *testing.T) {
 	}
 
 	for _, email := range cases {
-		_, _, err := s.Register(ctx, email, "password123", RequestInfo{})
+		_, _, _, err := s.Register(ctx, email, "password123", RequestInfo{})
 		if err != ErrInvalidEmail {
 			t.Fatalf("Register(%q): expected ErrInvalidEmail, got %v", email, err)
 		}
@@ -1289,7 +1277,7 @@ func TestRedeemMagicLinkCreatesPasswordlessUser(t *testing.T) {
 		t.Fatalf("expected no user before redemption, got %d", len(users.users))
 	}
 
-	user, session, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1299,7 +1287,7 @@ func TestRedeemMagicLinkCreatesPasswordlessUser(t *testing.T) {
 	if user.PasswordHash != "" {
 		t.Fatal("expected passwordless user")
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 	if len(users.users) != 1 {
@@ -1318,12 +1306,12 @@ func TestRedeemMagicLinkRacesWithRegister(t *testing.T) {
 
 	// Someone registers a full account for this email between token issuance
 	// and redemption (e.g. via a concurrent request on another path).
-	registeredUser, _, err := s.Register(ctx, "bob@example.com", "some-password", RequestInfo{})
+	registeredUser, _, _, err := s.Register(ctx, "bob@example.com", "some-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	user, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1366,7 +1354,7 @@ func TestGetOrCreatePasswordlessUserFallsBackAfterCreateUserRace(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1385,7 +1373,7 @@ func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Register creates its own session; clear it so we can observe
@@ -1410,7 +1398,7 @@ func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -1431,22 +1419,22 @@ func TestIssueSessionReturnsValidatableSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Verification is incidental to this test; the gate is covered elsewhere.
 	verifyUserEmail(t, users, user.ID)
 
-	session, err := s.IssueSession(ctx, user.ID)
+	session, sessionTok, err := s.IssueSession(ctx, user.ID)
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 
-	gotSession, gotUser, err := s.ValidateSession(ctx, session.Token)
+	gotSession, gotUser, err := s.ValidateSession(ctx, sessionTok)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -1464,7 +1452,7 @@ func TestLoginStillReturnsUserAndSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1475,15 +1463,15 @@ func TestLoginStillReturnsUserAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	loggedInUser, session := res.User, res.Session
+	loggedInUser, session, loginTok := res.User, res.Session, res.SessionToken
 	if loggedInUser.ID != user.ID {
 		t.Fatalf("expected user ID %s, got %s", user.ID, loggedInUser.ID)
 	}
-	if session.Token == "" {
+	if loginTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 
-	gotSession, gotUser, err := s.ValidateSession(ctx, session.Token)
+	gotSession, gotUser, err := s.ValidateSession(ctx, loginTok)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
@@ -1504,7 +1492,7 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1527,14 +1515,17 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 		t.Fatalf("expected no sessions before CompleteTwoFactor, got %d", len(sessions.sessions))
 	}
 
-	completedUser, session2, err := s.CompleteTwoFactor(ctx, gotUser.ID, rawToken)
+	twoFactorRes, err := s.CompleteTwoFactor(ctx, gotUser.ID, rawToken, RequestInfo{})
 	if err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
-	if completedUser.ID != user.ID {
-		t.Fatalf("expected user ID %s, got %s", user.ID, completedUser.ID)
+	if twoFactorRes.NeedsSecondFactor {
+		t.Fatal("the second factor was just completed, so no further factor may be demanded")
 	}
-	if session2.Token == "" {
+	if twoFactorRes.User.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, twoFactorRes.User.ID)
+	}
+	if twoFactorRes.SessionToken == "" {
 		t.Fatal("expected non-empty session token")
 	}
 	if len(sessions.sessions) != 1 {
@@ -1548,7 +1539,7 @@ func TestTwoFactorTokenIsSingleUse(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1560,11 +1551,11 @@ func TestTwoFactorTokenIsSingleUse(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != nil {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken, RequestInfo{}); err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != ErrTokenAlreadyUsed {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken, RequestInfo{}); err != ErrTokenAlreadyUsed {
 		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
 	}
 }
@@ -1579,11 +1570,11 @@ func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	userA, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	userA, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register (A): %v", err)
 	}
-	userB, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	userB, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register (B): %v", err)
 	}
@@ -1595,13 +1586,13 @@ func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, userB.ID, rawToken); err != ErrTokenInvalid {
+	if _, err := s.CompleteTwoFactor(ctx, userB.ID, rawToken, RequestInfo{}); err != ErrTokenInvalid {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
 
 	// The token must be consumed by the mismatched attempt, so even the
 	// rightful owner (userA) can no longer complete it afterward.
-	if _, _, err := s.CompleteTwoFactor(ctx, userA.ID, rawToken); err != ErrTokenAlreadyUsed {
+	if _, err := s.CompleteTwoFactor(ctx, userA.ID, rawToken, RequestInfo{}); err != ErrTokenAlreadyUsed {
 		t.Fatalf("expected ErrTokenAlreadyUsed after mismatched attempt consumed the token, got %v", err)
 	}
 }
@@ -1612,7 +1603,7 @@ func TestTwoFactorTokenExpires(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTwoFactorTokenDuration(-time.Second))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1624,7 +1615,7 @@ func TestTwoFactorTokenExpires(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: %v", err)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken); err != ErrTokenExpired {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, rawToken, RequestInfo{}); err != ErrTokenExpired {
 		t.Fatalf("expected ErrTokenExpired, got %v", err)
 	}
 }
@@ -1636,7 +1627,7 @@ func TestTwoFactorTokenRejectedByOtherFlows(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1660,7 +1651,7 @@ func TestRegisterLeavesEmailUnverified(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1676,7 +1667,7 @@ func TestVerifyEmailStampsEmailVerifiedAt(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1709,7 +1700,7 @@ func TestVerifyEmailTokenIsSingleUse(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1737,7 +1728,7 @@ func TestVerifyEmailRejectsTokenForChangedEmail(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1774,7 +1765,7 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "victim@example.com", "attacker-password", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "victim@example.com", "attacker-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1787,7 +1778,7 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	verifiedUser, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	verifiedUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1800,7 +1791,7 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken (second): %v", err)
 	}
-	secondUser, _, err := redeemMagicLink(t, s, ctx, rawToken2)
+	secondUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken2)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink (second): %v", err)
 	}
@@ -1822,7 +1813,7 @@ func TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification(t *testing.T) 
 
 	// Attacker seeds the account with the victim's email and their own
 	// password, obtaining a session.
-	_, attackerSession, err := s.Register(ctx, "victim@example.com", "attacker-password", RequestInfo{})
+	_, _, attackerSessionTok, err := s.Register(ctx, "victim@example.com", "attacker-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1832,7 +1823,7 @@ func TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification(t *testing.T) 
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	victimUser, victimSession, err := redeemMagicLink(t, s, ctx, rawToken)
+	victimUser, _, victimSessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1841,13 +1832,13 @@ func TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification(t *testing.T) 
 	}
 
 	// The attacker's session, created before verification, must be revoked.
-	if _, _, err := s.ValidateSession(ctx, attackerSession.Token); err != ErrSessionNotFound {
+	if _, _, err := s.ValidateSession(ctx, attackerSessionTok); err != ErrSessionNotFound {
 		t.Fatalf("expected attacker session revoked, got %v", err)
 	}
 
 	// The victim's session, created by RedeemMagicLink AFTER the revocation,
 	// must survive.
-	if _, _, err := s.ValidateSession(ctx, victimSession.Token); err != nil {
+	if _, _, err := s.ValidateSession(ctx, victimSessionTok); err != nil {
 		t.Fatalf("expected victim's new session to validate, got %v", err)
 	}
 	if len(sessions.sessions) != 1 {
@@ -1904,7 +1895,7 @@ func TestChangePasswordConsultsLimiterBeforeVerifyingOldPassword(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1931,7 +1922,7 @@ func TestNilLimiterIsNoOp(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "carol@example.com", "correct-password", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "carol@example.com", "correct-password", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1958,11 +1949,11 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected Register's auto-session to still be issued")
 	}
 
@@ -1974,7 +1965,7 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: expected ErrEmailNotVerified, got %v", err)
 	}
 
-	if _, err := s.IssueSession(ctx, user.ID); err != ErrEmailNotVerified {
+	if _, _, err := s.IssueSession(ctx, user.ID); err != ErrEmailNotVerified {
 		t.Fatalf("IssueSession: expected ErrEmailNotVerified, got %v", err)
 	}
 
@@ -1989,7 +1980,7 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 	}
 	unverifyUserEmail(t, users, user.ID)
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, pending); err != ErrEmailNotVerified {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, pending, RequestInfo{}); err != ErrEmailNotVerified {
 		t.Fatalf("CompleteTwoFactor: expected ErrEmailNotVerified, got %v", err)
 	}
 }
@@ -2000,7 +1991,7 @@ func TestLoginSucceedsAfterEmailVerification(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2031,11 +2022,11 @@ func TestRedeemMagicLinkStillSignsInUnverifiedUser(t *testing.T) {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, session, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: expected success despite default RequireVerifiedEmail, got %v", err)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
 	}
 	if user.EmailVerifiedAt == nil {
@@ -2049,11 +2040,11 @@ func TestRegisterStillReturnsSession(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: expected success under default RequireVerifiedEmail, got %v", err)
 	}
-	if session.Token == "" {
+	if sessionTok == "" {
 		t.Fatal("expected Register's auto-session to be issued despite the unverified email")
 	}
 }
@@ -2065,7 +2056,7 @@ func TestWithRequireVerifiedEmailFalseRestoresOldBehavior(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithRequireVerifiedEmail(false))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2085,7 +2076,7 @@ func TestIssueSessionUnknownUserReturnsErrUserNotFound(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, err := s.IssueSession(ctx, "unknown-user-id"); err != ErrUserNotFound {
+	if _, _, err := s.IssueSession(ctx, "unknown-user-id"); err != ErrUserNotFound {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 }
@@ -2106,7 +2097,7 @@ func TestConcurrentResetAndVerifyDoesNotResurrectOldHash(t *testing.T) {
 		newPassword = "new-password-456"
 	)
 
-	user, _, err := s.Register(ctx, email, oldPassword, RequestInfo{})
+	user, _, _, err := s.Register(ctx, email, oldPassword, RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2162,7 +2153,7 @@ func TestLoginWithSecondFactorReturnsPendingTokenNotSession(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2190,7 +2181,7 @@ func TestLoginWithSecondFactorReturnsPendingTokenNotSession(t *testing.T) {
 
 	// The pending token is what CompleteTwoFactor consumes once the
 	// application has checked the second factor itself.
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken); err != nil {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken, RequestInfo{}); err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
 }
@@ -2199,7 +2190,7 @@ func TestLoginWithoutSecondFactorReturnsSession(t *testing.T) {
 	s, users, _, _, _ := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2223,7 +2214,7 @@ func TestLoginFailsClosedWhenCheckerErrors(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "carol@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "carol@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2266,7 +2257,7 @@ func TestRedeemMagicLinkWithSecondFactorRequiresSecondFactor(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2297,7 +2288,7 @@ func TestRedeemMagicLinkWithSecondFactorRequiresSecondFactor(t *testing.T) {
 		t.Errorf("a session was created despite the pending factor: %d -> %d", before, got)
 	}
 
-	if _, _, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken); err != nil {
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken, RequestInfo{}); err != nil {
 		t.Fatalf("CompleteTwoFactor: %v", err)
 	}
 }
@@ -2310,7 +2301,7 @@ func TestRedeemMagicLinkStampsVerifiedEvenWhenSecondFactorPending(t *testing.T) 
 	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, err := s.Register(ctx, "dave@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "dave@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2336,5 +2327,22 @@ func TestRedeemMagicLinkStampsVerifiedEvenWhenSecondFactorPending(t *testing.T) 
 	}
 	if stored.EmailVerifiedAt == nil {
 		t.Error("redeeming a magic link proves mailbox control, so it must stamp verification even when a factor is still pending")
+	}
+}
+
+// TestSessionStructHasNoRawTokenField guards audit finding B5. The raw session
+// token is returned beside the *Session at issue time and nowhere else, so a
+// store implementation written from the struct's shape cannot persist a live
+// bearer token. Expressed as a test rather than a comment, so reintroducing
+// the field fails CI.
+func TestSessionStructHasNoRawTokenField(t *testing.T) {
+	typ := reflect.TypeOf(Session{})
+	for i := range typ.NumField() {
+		if name := typ.Field(i).Name; name == "Token" {
+			t.Fatal("Session must not carry the raw token: return it beside the session instead")
+		}
+	}
+	if _, ok := typ.FieldByName("TokenHash"); !ok {
+		t.Error("Session should still carry TokenHash, which is what stores persist")
 	}
 }

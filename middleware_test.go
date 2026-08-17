@@ -11,7 +11,7 @@ func TestAuthenticateAttachesUserAndSession(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestAuthenticateAttachesUserAndSession(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Authorization", "Bearer "+session.Token)
+	req.Header.Set("Authorization", "Bearer "+sessionTok)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -52,7 +52,7 @@ func TestAuthenticateAcceptsSessionCookie(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestAuthenticateAcceptsSessionCookie(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: session.Token})
+	req.AddCookie(&http.Cookie{Name: "session", Value: sessionTok})
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -127,7 +127,7 @@ func TestAuthenticateBearerTakesPrecedenceOverCookie(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestAuthenticateBearerTakesPrecedenceOverCookie(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: session.Token})
+	req.AddCookie(&http.Cookie{Name: "session", Value: sessionTok})
 	req.Header.Set("Authorization", "Bearer garbage-invalid-token")
 	rec := httptest.NewRecorder()
 

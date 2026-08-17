@@ -11,10 +11,12 @@ import (
 
 // Session represents a server-side authentication session.
 type Session struct {
-	ID        string
-	UserID    string
-	Token     string // raw token exposed to callers; stores should persist only TokenHash
-	TokenHash string // SHA-256 hash of the raw token; raw token is never persisted
+	ID     string
+	UserID string
+	// TokenHash is the SHA-256 hash of the session token. The raw token is
+	// never a field on this struct: it is returned beside the *Session at
+	// issue time and nowhere else, so no store can persist it by accident.
+	TokenHash string
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	Metadata  map[string]any
