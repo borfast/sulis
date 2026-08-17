@@ -9,7 +9,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	// HMAC-SHA1 is the RFC 6238 default and the only algorithm every
+	// authenticator app supports. SHA-1 collision attacks do not affect HMAC,
+	// so this use is sound; SHA-256 and SHA-512 are offered as options.
+	"crypto/sha1" // #nosec G505 -- required by RFC 6238; HMAC-SHA1 is unaffected by SHA-1 collisions
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base32"
@@ -271,16 +274,33 @@ func (s *Service) allow(ctx context.Context, key string) error {
 // returns the time-step counter of the matched window.
 func (s *Service) matchCode(secret, code string, t time.Time) (counter uint64, ok bool) {
 	for i := -int(s.cfg.Skew); i <= int(s.cfg.Skew); i++ {
-		shifted := t.Add(time.Duration(i) * time.Duration(s.cfg.Period) * time.Second)
+		// NewService validates Period to 15..300, so the widening below cannot
+		// overflow time.Duration's int64.
+		shifted := t.Add(time.Duration(i) * time.Duration(s.cfg.Period) * time.Second) // #nosec G115 -- Period validated to 15..300 in NewService
 		expected, err := generateCode(secret, shifted, s.cfg)
 		if err != nil {
 			continue
 		}
 		if subtle(code, expected) {
-			return uint64(shifted.Unix()) / s.cfg.Period, true
+			shiftedCounter, ok := counterAt(shifted, s.cfg.Period)
+			if !ok {
+				continue
+			}
+			return shiftedCounter, true
 		}
 	}
 	return 0, false
+}
+
+// counterAt returns the RFC 6238 time-step counter for t, reporting false for
+// times before the Unix epoch, where the counter is undefined. Callers must
+// pass a period validated as non-zero (NewService enforces 15..300).
+func counterAt(t time.Time, period uint64) (uint64, bool) {
+	secs := t.Unix()
+	if secs < 0 {
+		return 0, false
+	}
+	return uint64(secs) / period, true
 }
 
 // generateCode implements the TOTP algorithm per RFC 6238.
@@ -292,7 +312,10 @@ func generateCode(secret string, t time.Time, cfg Config) (string, error) {
 		return "", fmt.Errorf("totp: decoding secret: %w", err)
 	}
 
-	counter := uint64(t.Unix()) / cfg.Period
+	counter, ok := counterAt(t, cfg.Period)
+	if !ok {
+		return "", fmt.Errorf("totp: time %s precedes the Unix epoch", t)
+	}
 
 	// Encode counter as 8-byte big-endian.
 	buf := make([]byte, 8)

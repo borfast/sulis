@@ -83,13 +83,11 @@ func decodeHash(encoded string) (params Argon2Params, salt, hash []byte, err err
 	if err != nil {
 		return params, nil, nil, fmt.Errorf("sulis: decoding salt: %w", err)
 	}
-	params.SaltLength = uint32(len(salt))
 
 	hash, err = base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
 		return params, nil, nil, fmt.Errorf("sulis: decoding hash: %w", err)
 	}
-	params.KeyLength = uint32(len(hash))
 
 	switch {
 	case params.Parallelism == 0,
@@ -99,6 +97,11 @@ func decodeHash(encoded string) (params Argon2Params, salt, hash []byte, err err
 		len(hash) < 16 || len(hash) > 128:
 		return params, nil, nil, fmt.Errorf("sulis: hash parameters out of bounds")
 	}
+
+	// Widened only after the bounds check above, so both lengths are known to
+	// fit (salt <= 64, hash <= 128) and the conversion cannot truncate.
+	params.SaltLength = uint32(len(salt)) // #nosec G115 -- bounded to 64 by the check above
+	params.KeyLength = uint32(len(hash))  // #nosec G115 -- bounded to 128 by the check above
 
 	return params, salt, hash, nil
 }

@@ -59,10 +59,11 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 
 ## Current position
 
-**Status:** Not started — plan written, no code changed.
-**Next task:** T001 (harden CI).
-**Tree:** GREEN. Baseline at commit `bf18c6e`: build, vet, and `go test -race -cover ./...` all pass. Coverage 84.1% root, 59.0% passkey, 92.1% recovery, 87.6% totp.
-**Blockers:** None.
+**Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
+**Status:** T001 done. T002 is next.
+**Next task:** T002 — ratify the target API surface into "Ratified API" below. No code; answer the four questions, then start T101.
+**Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
+**Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
 ---
 
@@ -71,7 +72,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 38 tasks, 7 phases. `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ### Phase 0 — Foundations
-- [ ] **T001** · D2 · Harden CI (pin tools, scope token, add staticcheck/gosec/gofmt gates)
+- [x] **T001** · D2 · Harden CI (pin tools, scope token, add staticcheck/gosec/gofmt gates)
 - [ ] **T002** · Ratify the target API surface into "Ratified API" below
 
 ### Phase 1 — Close the bypasses
@@ -149,6 +150,14 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 |---|---|---|
 | — | Commits use no trailers | User preference, 2026-08-17 |
 | — | Plan split into `PLAN.md` (stable) + `PROGRESS.md` (state) | Sessions restart often; one state file avoids divergence |
+| — | Work on branch `security-hardening-v1`, not `main` | Long breaking-change series; keeps `main` releasable |
+| — | `git config user.name/email` set repo-locally to match existing history | No identity was configured; used `Raúl Santos <4837+borfast@users.noreply.github.com>` from prior commits |
+| T001 | Actions upgraded v4/v5 → v7, SHA-pinned | Pinning stale majors trades one risk for another; Dependabot keeps them current |
+| T001 | Analyzers run in a separate `analyze` job, not the test matrix | Avoids running them twice per Go version |
+| T001 | `decodeHash` widens salt/hash lengths *after* the bounds check | Real fix for gosec G115: the conversion is now provably in range |
+| T001 | Added `counterAt` epoch guard in `totp` | Real fix: `Generate` is public and takes an arbitrary time; pre-1970 times wrapped `uint64` |
+| T001 | 3 `#nosec` suppressions, each with an inline reason | G115 ×2 (bounds enforced 3 lines above, invisible to gosec), G101 (purpose enum, not a credential), G505 (HMAC-SHA1 is required by RFC 6238 and unaffected by SHA-1 collisions) |
+| T001 | `GO-2026-5932` (x/crypto/openpgp) accepted, not actioned | Unreachable — sulis imports only `x/crypto/argon2`; no fix exists upstream |
 
 ---
 
@@ -169,6 +178,7 @@ Newest last. One line per commit: date, task, what landed.
 | Date | Task | What landed |
 |---|---|---|
 | 2026-08-17 | — | Audit written (`docs/security-audit-2026-08-17.html`), plan and progress files created |
+| 2026-08-17 | T001 | CI hardened: SHA-pinned actions, `permissions: contents: read`, Go matrix (1.25.x + stable), gofmt gate, pinned staticcheck/gosec/govulncheck, atomic coverage, Dependabot. Fixed 7 gosec findings (2 real fixes in `password.go` and `totp/totp.go`, 3 suppressed with reasons) |
 
 ---
 

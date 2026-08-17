@@ -1,15 +1,62 @@
 name: CI
+
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
   pull_request:
+
+# Least privilege: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: test (go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The go.mod floor and the current release.
+        go: ['1.25.x', 'stable']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - run: go build ./...
       - run: go vet ./...
-      - run: go test -race -cover ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
+
+  analyze:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      # All three tools are pinned. An unpinned @latest would execute whatever
+      # that resolves to on the day CI runs. Dependabot proposes the bumps.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+
+      - name: gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...

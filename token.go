@@ -15,7 +15,7 @@ const (
 	TokenPurposePasswordReset     TokenPurpose = "password_reset"
 	TokenPurposeMagicLink         TokenPurpose = "magic_link"
 	TokenPurposeTwoFactor         TokenPurpose = "two_factor"
-	TokenPurposeEmailVerification TokenPurpose = "email_verification"
+	TokenPurposeEmailVerification TokenPurpose = "email_verification" // #nosec G101 -- a purpose label, not a credential
 )
 
 // Token represents a single-use, time-limited token for password resets or magic links.
