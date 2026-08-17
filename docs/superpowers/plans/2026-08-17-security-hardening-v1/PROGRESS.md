@@ -60,8 +60,8 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001 done. T002 is next.
-**Next task:** T002 — ratify the target API surface into "Ratified API" below. No code; answer the four questions, then start T101.
+**Status:** T001, T002 done. Phase 1 in progress.
+**Next task:** T101 — narrow user writes with optimistic concurrency.
 **Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
@@ -73,7 +73,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 
 ### Phase 0 — Foundations
 - [x] **T001** · D2 · Harden CI (pin tools, scope token, add staticcheck/gosec/gofmt gates)
-- [ ] **T002** · Ratify the target API surface into "Ratified API" below
+- [x] **T002** · Ratify the target API surface into "Ratified API" below
 
 ### Phase 1 — Close the bypasses
 - [ ] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
@@ -129,16 +129,27 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 
 ## Ratified API
 
-*Filled by T002. Until then, `PLAN.md` Appendix A is the working proposal.*
+**Ratified 2026-08-18 (T002): `PLAN.md` Appendix A is adopted as written, with the four questions answered below.**
 
-Four questions to answer in T002:
+Appendix A stays the single source of truth for signatures — it is not copied here, so there is nothing to drift. Any later amendment goes in the Decisions table below, marked as overriding Appendix A.
 
-| # | Question | Recommendation | Decided |
+| # | Question | Decision | Reason |
 |---|---|---|---|
-| 1 | `RequestInfo` explicit param or context value? | Explicit param | — |
-| 2 | `User.Version` optimistic concurrency or per-column setters? | `Version` | — |
-| 3 | `store/sql` separate module or same module? | Separate | — |
-| 4 | Should `New` return an error? | Yes | — |
+| 1 | `RequestInfo` explicit param or context value? | **Explicit param** | Per-IP rate limiting must be visible in the signature. A context value is silently droppable, and the failure is invisible — the limiter just never sees an IP. |
+| 2 | `User.Version` optimistic concurrency or per-column setters? | **`Version`** | One concept instead of seven interface methods. Protects fields added later (T502's `DisabledAt`, T107's `PendingEmail`) without further interface churn, and fails loudly rather than silently losing a write. |
+| 3 | `store/sql` separate module or same module? | **Separate nested module** | SQL drivers must not enter the dependency graph of someone using their own store. Preserves the no-new-dependencies rule for the core. |
+| 4 | Should `New` return an error? | **Yes** | It now validates config (nil `SecondFactorChecker`, bad Argon2 params). A panic in a constructor is worse, and returning an error matches `totp.NewService` and `passkey.NewService`. |
+
+### Consequences to hold across sessions
+
+- `New` gains a required 4th argument before `opts`. Applications with no second factor pass `sulis.NoSecondFactors{}` — an explicit, greppable declaration rather than a default.
+- Every store implementing `UserStore` must honour the version precondition. `storetest` (T401) enforces it.
+- `RequestInfo` is threaded through `Login`, `VerifyPassword`, `ChangePassword`, `CreatePasswordResetToken`, `CreateMagicLinkToken`, `RedeemMagicLink`, `CompleteTwoFactor`, and `ReAuthenticate`. Zero value is valid, so tests stay short.
+- Raw session tokens are returned beside the `*Session`, never on it (T104).
+
+### Known deferrals
+
+- **NFKC password normalization (T505)** needs `golang.org/x/text`, which the no-new-dependencies rule forbids. Not decided here — surface it at T505 and ask.
 
 ---
 
@@ -179,6 +190,7 @@ Newest last. One line per commit: date, task, what landed.
 |---|---|---|
 | 2026-08-17 | — | Audit written (`docs/security-audit-2026-08-17.html`), plan and progress files created |
 | 2026-08-17 | T001 | CI hardened: SHA-pinned actions, `permissions: contents: read`, Go matrix (1.25.x + stable), gofmt gate, pinned staticcheck/gosec/govulncheck, atomic coverage, Dependabot. Fixed 7 gosec findings (2 real fixes in `password.go` and `totp/totp.go`, 3 suppressed with reasons) |
+| 2026-08-18 | T002 | Appendix A ratified as written; four open questions answered (explicit `RequestInfo`, `User.Version`, separate `store/sql` module, `New` returns an error). NFKC dependency question deferred to T505 |
 
 ---
 
