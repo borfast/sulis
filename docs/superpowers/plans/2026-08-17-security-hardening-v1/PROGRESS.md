@@ -60,8 +60,8 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001, T002, T101, T102 done. Phase 1 in progress.
-**Next task:** T103 — close the magic-link 2FA bypass.
+**Status:** T001, T002, T101–T103 done. Phase 1 in progress.
+**Next task:** T104 — remove `Session.Token`.
 **Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
@@ -78,7 +78,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ### Phase 1 — Close the bypasses
 - [x] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
 - [x] **T102** · A1 · Make session issuance aware of second factors
-- [ ] **T103** · A1 · Close the magic-link 2FA bypass
+- [x] **T103** · A1 · Close the magic-link 2FA bypass
 - [ ] **T104** · B5 · Remove `Session.Token`
 - [ ] **T105** · A2 · Require WebAuthn user verification
 - [ ] **T106** · B1 · Rate limiting on by default, with an IP dimension
@@ -200,6 +200,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-18 | T002 | Appendix A ratified as written; four open questions answered (explicit `RequestInfo`, `User.Version`, separate `store/sql` module, `New` returns an error). NFKC dependency question deferred to T505 |
 | 2026-08-18 | T101 | `User.Version` optimistic concurrency + `ErrConcurrentUpdate`; `updateUserWithRetry` helper; `setPassword` and `stampEmailVerified` no longer write whole rows from stale reads; `setPassword` takes a re-checked guard; regression test proves the resurrection bug is fixed |
 | 2026-08-18 | T102 | `SecondFactorChecker` (required by `New`), `NoSecondFactors`, `LoginResult`, `AuthMethod`, `RequestInfo`; `New` returns an error; `Login` returns `*LoginResult` and fails closed on checker errors; `createSession` moved to `issue.go`. Mutation-tested: the A1 regression test fails if the check is bypassed |
+| 2026-08-18 | T103 | `RedeemMagicLink` returns `*LoginResult` and routes through `completeFirstFactor`, closing the mailbox-access-defeats-2FA bypass. Verification is stamped before the branch so a 2FA user can still verify by magic link |
 
 ---
 

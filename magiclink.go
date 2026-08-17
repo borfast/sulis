@@ -13,7 +13,7 @@ import (
 // requesting magic links for arbitrary addresses cannot be used to flood the
 // user store before anything is ever delivered. The raw token is returned so
 // the consumer can deliver it (e.g. via email).
-func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string) (string, error) {
+func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri RequestInfo) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return "", err
@@ -59,13 +59,19 @@ func (s *Sulis) createMagicLinkTokenForEmail(ctx context.Context, email string) 
 	return raw, nil
 }
 
-// RedeemMagicLink validates a magic link token and returns the user and a new
-// session. If the token was issued before the user existed, the user is
-// created now, as a passwordless account.
-func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *Session, error) {
+// RedeemMagicLink validates a magic link token. If the token was issued before
+// the user existed, the user is created now, as a passwordless account.
+//
+// A magic link is a FULL first factor — proving control of the mailbox is
+// equivalent to knowing the password — so it is gated by two-factor
+// authentication exactly like Login. If the account has a second factor
+// enrolled, the returned LoginResult carries a PendingToken rather than a
+// session. Without this, anyone able to read the mailbox would bypass 2FA
+// entirely, which is precisely the attacker a second factor exists to stop.
+func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string, ri RequestInfo) (*LoginResult, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeMagicLink)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var user *User
@@ -75,21 +81,18 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string) (*User, *S
 		user, err = s.getOrCreatePasswordlessUser(ctx, token.Email)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Redeeming a magic link proves control of the mailbox, so treat it as
-	// email verification too.
+	// email verification too. This must happen BEFORE the second-factor
+	// branch: completeFirstFactor enforces RequireVerifiedEmail, so a
+	// 2FA-enabled user could otherwise never verify their address this way.
 	if err := s.stampEmailVerified(ctx, user); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	session, err := s.createSession(ctx, user.ID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return user, session, nil
+	return s.completeFirstFactor(ctx, user, AuthMethodMagicLink)
 }
 
 // getOrCreatePasswordlessUser looks up a user by email, creating a

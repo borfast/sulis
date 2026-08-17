@@ -180,12 +180,12 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 
 	t.Run("SetInitialPassword", func(t *testing.T) {
 		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
-		rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com")
+		rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 		if err != nil {
 			t.Fatalf("CreateMagicLinkToken: %v", err)
 		}
 		// The user is only created at redemption time (deferred user creation).
-		bob, _, err := s.RedeemMagicLink(ctx, rawToken)
+		bob, _, err := redeemMagicLink(t, s, ctx, rawToken)
 		if err != nil {
 			t.Fatalf("RedeemMagicLink: %v", err)
 		}

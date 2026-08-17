@@ -84,9 +84,11 @@ By default, both `ChangePassword` and `ResetPassword` revoke every session belon
 
 ### Magic Link
 
-`CreateMagicLinkToken(ctx, email)` creates a magic-link token and returns the raw token for delivery. If no user exists for the email yet, **no user row is created at this point** — only the token, carrying the email — so that requesting magic links for arbitrary addresses can't be used to flood the user store. The user is created lazily at redemption. This also means `CreateMagicLinkToken` never returns `ErrUserNotFound`, unlike `CreatePasswordResetToken`.
+`CreateMagicLinkToken(ctx, email, requestInfo)` creates a magic-link token and returns the raw token for delivery. If no user exists for the email yet, **no user row is created at this point** — only the token, carrying the email — so that requesting magic links for arbitrary addresses can't be used to flood the user store. The user is created lazily at redemption. This also means `CreateMagicLinkToken` never returns `ErrUserNotFound`, unlike `CreatePasswordResetToken`.
 
-`RedeemMagicLink(ctx, rawToken)` atomically consumes the token, loads the user (creating a passwordless one now if the token predates the account), stamps `EmailVerifiedAt` (redeeming a magic link proves control of the mailbox), and creates a new session.
+`RedeemMagicLink(ctx, rawToken, requestInfo)` atomically consumes the token, loads the user (creating a passwordless one now if the token predates the account), stamps `EmailVerifiedAt` (redeeming a magic link proves control of the mailbox), and then returns a `*LoginResult` on exactly the same terms as `Login`.
+
+**A magic link is a full first factor, not a shortcut past 2FA.** Proving control of the mailbox is equivalent to knowing the password, so if the account has a second factor enrolled the result carries a `PendingToken` and no session. Verification is stamped *before* that branch, so a 2FA-enabled user with an unverified address can still verify it by following a magic link.
 
 ### Two-Factor
 
