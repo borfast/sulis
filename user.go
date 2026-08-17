@@ -17,6 +17,11 @@ type User struct {
 	// reachable (e.g. via VerifyEmail or a redeemed magic link). Nil means
 	// the address has not been verified.
 	EmailVerifiedAt *time.Time
+	// Version guards against lost updates. It is set by the store on read and
+	// must be passed back unchanged in UpdateUser, which applies the write
+	// only if it still matches the persisted row. Callers outside the store
+	// never set it themselves.
+	Version uint64
 }
 
 // UserStore defines the persistence operations for users.
@@ -25,6 +30,17 @@ type UserStore interface {
 	CreateUser(ctx context.Context, user *User) error
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	// UpdateUser persists user, but ONLY if the stored row's version still
+	// equals user.Version. On success the stored version MUST be incremented;
+	// on mismatch the write MUST be discarded and ErrConcurrentUpdate
+	// returned. Without this, two flows that each read-modify-write the whole
+	// row can clobber each other — and the dangerous direction restores a
+	// password hash the user just rotated away from.
+	//
+	//	UPDATE users SET ..., version = version + 1
+	//	 WHERE id = $1 AND version = $2
+	//
+	// Zero rows affected means another writer won: return ErrConcurrentUpdate.
 	UpdateUser(ctx context.Context, user *User) error
 	DeleteUser(ctx context.Context, id string) error
 }

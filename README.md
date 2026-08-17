@@ -146,7 +146,14 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<user
 
 `sulis` does not ship a database layer. Consumers own persistence and implement these interfaces:
 
-- `UserStore`: create, fetch, update, and delete users by ID/email.
+- `UserStore`: create, fetch, update, and delete users by ID/email. `UpdateUser` must apply the write **only** if the stored row's `version` still equals `user.Version`, incrementing it on success and returning `ErrConcurrentUpdate` otherwise:
+
+  ```sql
+  UPDATE users SET ..., version = version + 1
+   WHERE id = $1 AND version = $2
+  ```
+
+  Zero rows affected means another writer won. Without this check, two flows that each read-modify-write the whole row can clobber each other, and the dangerous direction restores a password hash the user just rotated away from — silently undoing a reset. The library reloads and retries on `ErrConcurrentUpdate`, so a correct store makes the race invisible to callers.
 - `SessionStore`: create sessions, load them by token-hash lookup, revoke one session, revoke all sessions for a user, and `CleanExpired`. `CleanExpired` is never called by the library itself — see [Operational requirements](#operational-requirements).
 - `TokenStore`:
   - `CreateToken` persists a new token.

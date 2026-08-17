@@ -177,19 +177,24 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		return err
 	}
 
-	if user.PasswordHash == "" {
-		return ErrInvalidCredentials
+	// Checked inside the update, so it re-runs against current state on a
+	// retry: a password changed by another request between this read and the
+	// write must not be replaced on the strength of a stale check.
+	verifyOld := func(u *User) error {
+		if u.PasswordHash == "" {
+			return ErrInvalidCredentials
+		}
+		ok, err := verifyPassword(oldPassword, u.PasswordHash)
+		if err != nil {
+			return fmt.Errorf("sulis: verifying old password: %w", err)
+		}
+		if !ok {
+			return ErrInvalidCredentials
+		}
+		return nil
 	}
 
-	ok, err := verifyPassword(oldPassword, user.PasswordHash)
-	if err != nil {
-		return fmt.Errorf("sulis: verifying old password: %w", err)
-	}
-	if !ok {
-		return ErrInvalidCredentials
-	}
-
-	return s.setPassword(ctx, user, newPassword)
+	return s.setPassword(ctx, user.ID, newPassword, verifyOld)
 }
 
 // SetInitialPassword sets the first password for a passwordless user.
@@ -198,14 +203,14 @@ func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword stri
 		return err
 	}
 
-	user, err := s.users.GetUserByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if user.PasswordHash != "" {
-		return ErrInvalidCredentials
-	}
-	return s.setPassword(ctx, user, newPassword)
+	// The passwordless check runs inside the update so two concurrent
+	// bootstrap attempts cannot both succeed.
+	return s.setPassword(ctx, userID, newPassword, func(u *User) error {
+		if u.PasswordHash != "" {
+			return ErrInvalidCredentials
+		}
+		return nil
+	})
 }
 
 // checkPasswordPolicy enforces the configured minimum and maximum password
@@ -220,15 +225,61 @@ func (s *Sulis) checkPasswordPolicy(password string) error {
 	return nil
 }
 
-func (s *Sulis) setPassword(ctx context.Context, user *User, newPassword string) error {
+// maxUserUpdateAttempts bounds updateUserWithRetry. Conflicts are rare and
+// resolve on the first retry in practice; the bound stops a pathological
+// writer from spinning.
+const maxUserUpdateAttempts = 3
+
+// updateUserWithRetry loads the user, applies mutate, and persists the result,
+// retrying from a fresh read if another writer won the race. mutate runs again
+// on every attempt, so any invariant it checks is re-established against
+// current state rather than the state the caller first read. A non-nil error
+// from mutate aborts immediately and is returned unchanged.
+func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate func(*User) error) (*User, error) {
+	var lastErr error
+	for range maxUserUpdateAttempts {
+		user, err := s.users.GetUserByID(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if err := mutate(user); err != nil {
+			return nil, err
+		}
+		if err := s.users.UpdateUser(ctx, user); err != nil {
+			if !errors.Is(err, ErrConcurrentUpdate) {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		return user, nil
+	}
+	return nil, lastErr
+}
+
+// setPassword writes a new password hash for userID. guard, if non-nil, is
+// re-checked against the freshly loaded user on every attempt, so a concurrent
+// change cannot slip past a check the caller made before calling.
+func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, guard func(*User) error) error {
+	// Hashed once, outside the retry loop: a conflict should not make the
+	// caller pay for Argon2 again.
 	hash, err := hashPassword(newPassword, s.cfg.Argon2)
 	if err != nil {
 		return fmt.Errorf("sulis: hashing new password: %w", err)
 	}
 
-	user.PasswordHash = hash
-	user.UpdatedAt = time.Now()
-	if err := s.users.UpdateUser(ctx, user); err != nil {
+	now := time.Now()
+	user, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
+		if guard != nil {
+			if err := guard(u); err != nil {
+				return err
+			}
+		}
+		u.PasswordHash = hash
+		u.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
@@ -280,12 +331,7 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 		return err
 	}
 
-	user, err := s.users.GetUserByID(ctx, token.UserID)
-	if err != nil {
-		return err
-	}
-
-	return s.setPassword(ctx, user, newPassword)
+	return s.setPassword(ctx, token.UserID, newPassword, nil)
 }
 
 // ValidateSession validates a session token and returns the session and user.

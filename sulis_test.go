@@ -15,6 +15,11 @@ import (
 type memUserStore struct {
 	mu    sync.Mutex
 	users map[string]*User
+	// beforeUpdate, if set, fires once at the start of the next UpdateUser
+	// call and is then cleared. It lets a test interleave another complete
+	// flow between a caller's read of the user and its write, so
+	// lost-update races are deterministic instead of timing-dependent.
+	beforeUpdate func(*User)
 }
 
 func newMemUserStore() *memUserStore {
@@ -58,12 +63,30 @@ func (s *memUserStore) GetUserByEmail(_ context.Context, email string) (*User, e
 }
 
 func (s *memUserStore) UpdateUser(_ context.Context, u *User) error {
+	// Take and clear the hook before locking, so the hook can call back into
+	// the store without deadlocking.
+	s.mu.Lock()
+	hook := s.beforeUpdate
+	s.beforeUpdate = nil
+	s.mu.Unlock()
+	if hook != nil {
+		hook(u)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.users[u.ID]; !ok {
+	existing, ok := s.users[u.ID]
+	if !ok {
 		return ErrUserNotFound
 	}
+	// Optimistic concurrency, as UserStore.UpdateUser requires: a write built
+	// from a stale read must be rejected rather than silently clobbering the
+	// newer row.
+	if existing.Version != u.Version {
+		return ErrConcurrentUpdate
+	}
 	cp := *u
+	cp.Version = existing.Version + 1
 	s.users[u.ID] = &cp
 	return nil
 }
@@ -1982,5 +2005,69 @@ func TestIssueSessionUnknownUserReturnsErrUserNotFound(t *testing.T) {
 
 	if _, err := s.IssueSession(ctx, "unknown-user-id"); err != ErrUserNotFound {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+// TestConcurrentResetAndVerifyDoesNotResurrectOldHash is the regression test
+// for audit finding A3. setPassword and stampEmailVerified both did a
+// read-modify-write of the entire user row, so interleaving them let the
+// second write land with stale data. The dangerous direction restores a
+// password hash the user just rotated away from — silently undoing a reset
+// and re-enabling the credential an attacker may already hold.
+func TestConcurrentResetAndVerifyDoesNotResurrectOldHash(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	const (
+		email       = "race@example.com"
+		oldPassword = "old-password-123"
+		newPassword = "new-password-456"
+	)
+
+	user, _, err := s.Register(ctx, email, oldPassword)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	verifyToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	// Land a complete password reset between VerifyEmail's read of the user
+	// and its write. The hook fires once, so the reset's own UpdateUser is
+	// unaffected.
+	users.beforeUpdate = func(*User) {
+		resetToken, err := s.CreatePasswordResetToken(ctx, email)
+		if err != nil {
+			t.Errorf("CreatePasswordResetToken: %v", err)
+			return
+		}
+		if err := s.ResetPassword(ctx, resetToken, newPassword); err != nil {
+			t.Errorf("ResetPassword: %v", err)
+		}
+	}
+
+	if _, err := s.VerifyEmail(ctx, verifyToken); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+
+	stored, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	if ok, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+		t.Error("the reset was silently undone: the old password still verifies")
+	}
+	ok, err := verifyPassword(newPassword, stored.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Error("the new password does not verify after the reset")
+	}
+	if stored.EmailVerifiedAt == nil {
+		t.Error("EmailVerifiedAt was not stamped")
 	}
 }

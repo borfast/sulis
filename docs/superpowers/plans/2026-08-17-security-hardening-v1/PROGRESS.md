@@ -60,8 +60,8 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001, T002 done. Phase 1 in progress.
-**Next task:** T101 — narrow user writes with optimistic concurrency.
+**Status:** T001, T002, T101 done. Phase 1 in progress.
+**Next task:** T102 — make session issuance aware of second factors.
 **Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
 
@@ -76,7 +76,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 - [x] **T002** · Ratify the target API surface into "Ratified API" below
 
 ### Phase 1 — Close the bypasses
-- [ ] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
+- [x] **T101** · A3 · Stop whole-row user writes resurrecting old credentials
 - [ ] **T102** · A1 · Make session issuance aware of second factors
 - [ ] **T103** · A1 · Close the magic-link 2FA bypass
 - [ ] **T104** · B5 · Remove `Session.Token`
@@ -169,6 +169,9 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 | T001 | Added `counterAt` epoch guard in `totp` | Real fix: `Generate` is public and takes an arbitrary time; pre-1970 times wrapped `uint64` |
 | T001 | 3 `#nosec` suppressions, each with an inline reason | G115 ×2 (bounds enforced 3 lines above, invisible to gosec), G101 (purpose enum, not a credential), G505 (HMAC-SHA1 is required by RFC 6238 and unaffected by SHA-1 collisions) |
 | T001 | `GO-2026-5932` (x/crypto/openpgp) accepted, not actioned | Unreachable — sulis imports only `x/crypto/argon2`; no fix exists upstream |
+| T101 | `setPassword` signature changed to `(ctx, userID, newPassword string, guard func(*User) error)` | Extends Appendix A (internal, so not a public break). The guard re-runs on each retry, so `ChangePassword`'s old-password check and `SetInitialPassword`'s passwordless check hold against current state, not the caller's first read |
+| T101 | `ChangePassword` re-verifies the old password inside the update | A concurrent change must not be overwritten on the strength of a stale check. Costs an extra Argon2 run only on an actual conflict |
+| T101 | `stampEmailVerified` reads `hadPassword` from the reloaded row | A password set between the caller's read and this write still triggers the session revocation it is there to guarantee |
 
 ---
 
@@ -191,6 +194,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-17 | — | Audit written (`docs/security-audit-2026-08-17.html`), plan and progress files created |
 | 2026-08-17 | T001 | CI hardened: SHA-pinned actions, `permissions: contents: read`, Go matrix (1.25.x + stable), gofmt gate, pinned staticcheck/gosec/govulncheck, atomic coverage, Dependabot. Fixed 7 gosec findings (2 real fixes in `password.go` and `totp/totp.go`, 3 suppressed with reasons) |
 | 2026-08-18 | T002 | Appendix A ratified as written; four open questions answered (explicit `RequestInfo`, `User.Version`, separate `store/sql` module, `New` returns an error). NFKC dependency question deferred to T505 |
+| 2026-08-18 | T101 | `User.Version` optimistic concurrency + `ErrConcurrentUpdate`; `updateUserWithRetry` helper; `setPassword` and `stampEmailVerified` no longer write whole rows from stale reads; `setPassword` takes a re-checked guard; regression test proves the resurrection bug is fixed |
 
 ---
 
