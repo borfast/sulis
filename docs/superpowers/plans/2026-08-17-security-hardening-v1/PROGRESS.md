@@ -62,8 +62,13 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
 **Status:** T001, T002, T101–T106 done. Phase 1 is one task from complete.
 **Next task:** T107 — own the email-change flow (last task in Phase 1).
-**Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally.
-**Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only.
+**Tree:** GREEN at `2f91c0d`. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally. Coverage: 84.6% root, 61.6% passkey, 92.1% recovery, 86.1% totp.
+**Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only. Push and confirm the workflow is green before relying on it.
+
+**Carry-forward for whoever picks this up:**
+- All 8 completed tasks are committed; the working tree is clean apart from pre-existing untracked files (`.claude/`, `.codegraph/`, `AGENTS.md`, `CLAUDE.md`).
+- **T206 owes an end-to-end test.** T105 verified that user verification is requested and recorded in session data, not that a UV-absent assertion is rejected. That needs a forging test authenticator, which T206 must build. Do not close T206 without it.
+- Every finding fixed so far was mutation-tested — the regression test was confirmed to fail when the fix is reverted. Keep doing that for the security-critical ones; a test that cannot fail is decoration.
 
 ---
 
