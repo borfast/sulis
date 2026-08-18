@@ -533,6 +533,35 @@ func TestSearchPathDSN(t *testing.T) {
 			t.Fatal("SearchPathDSN accepted an empty schema")
 		}
 	})
+
+	// A DSN is a credential. url.Parse reports a failure by returning a
+	// *url.Error that embeds the URL it failed on verbatim, so wrapping that
+	// error with %w — which this function used to do — put the database
+	// password into the message, and from there into whatever the caller
+	// logged. The trigger is ordinary, not adversarial: a password
+	// containing a bare '%' is not valid percent-escaping, and neither is a
+	// stray control character.
+	//
+	// Both the whole password and the fragment a url.EscapeError would quote
+	// back ("%ss") are asserted absent, because the obvious partial fix —
+	// unwrapping to url.Error.Err — still leaks three characters of it.
+	t.Run("NeverPutsTheDSNOrThePasswordInTheErrorMessage", func(t *testing.T) {
+		for _, dsn := range []string{
+			"postgres://app:p%ssword@db.internal:5432/sulis",
+			"postgres://app:sup3rSecret@db.internal:5432/sulis\n",
+		} {
+			_, err := postgres.SearchPathDSN(dsn, "tenant_7")
+			if err == nil {
+				t.Fatalf("SearchPathDSN(%q) parsed, so this case no longer exercises the error path", dsn)
+			}
+			msg := err.Error()
+			for _, secret := range []string{"p%ssword", "sup3rSecret", "%ss", "db.internal", dsn} {
+				if strings.Contains(msg, secret) {
+					t.Fatalf("SearchPathDSN error = %q, which contains %q — a DSN carries the database password and must never reach an error string", msg, secret)
+				}
+			}
+		}
+	})
 }
 
 // TestEveryMethodFailsClosedOnAnUnavailableDatabase walks every store method

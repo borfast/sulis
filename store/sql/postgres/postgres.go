@@ -158,9 +158,23 @@ func SearchPathDSN(dsn, schema string) (string, error) {
 		return "", errors.New("sulis/postgres: the search_path schema is empty")
 	}
 
+	// The parse error is deliberately NOT wrapped, and the DSN deliberately
+	// not quoted into the message. url.Parse fails by returning a *url.Error
+	// whose Error() embeds the URL it failed on verbatim, and this URL is a
+	// DSN carrying the database password — wrapping it puts that password
+	// into whatever the caller logs, which is the one place a credential
+	// most reliably outlives the process. It is not a hypothetical path: a
+	// password containing a bare '%' not followed by two hex digits
+	// ("p%ssword") is enough to reach here, and so is any control character.
+	// Even url.Error's wrapped cause leaks — a url.EscapeError renders as
+	// invalid URL escape "%ss", three characters of the password.
+	//
+	// Nothing is lost by dropping it. The caller passed the DSN in and can
+	// see it; the only information in the parse error is "this is not a
+	// URL", which is what this says.
 	parsed, err := url.Parse(dsn)
 	if err != nil {
-		return "", fmt.Errorf("sulis/postgres: parsing the DSN: %w", err)
+		return "", errors.New("sulis/postgres: the DSN is not a parseable URL")
 	}
 	switch parsed.Scheme {
 	case "postgres", "postgresql":
