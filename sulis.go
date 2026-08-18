@@ -164,6 +164,17 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, ErrInvalidCredentials
 	}
 
+	// The password just verified against a hash weaker than the currently
+	// configured Argon2Params (e.g. an operator raised the cost since this
+	// user last logged in) — upgrade the stored hash now, while the
+	// plaintext is still in hand. Only a successful verification reaches
+	// this point, so a failed or unknown-user/passwordless login never
+	// rehashes anything, and this runs after the ok check above rather than
+	// changing its timing.
+	if needsRehash(user.PasswordHash, s.cfg.Argon2) {
+		s.rehashPassword(ctx, user, password)
+	}
+
 	// The password just verified, so from here on the caller has proven
 	// they know it — only now is it safe to reveal disabled/locked status.
 	// Checking this any earlier (e.g. before the password comparison, or on
@@ -185,6 +196,61 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 
 	return user, nil
 }
+
+// rehashPassword upgrades user's stored hash to the currently configured
+// Argon2 parameters, now that password has just been verified against the
+// hash it is about to replace. Called only from VerifyPassword's
+// successful-verification path, after needsRehash reports the stored hash
+// is weaker than s.cfg.Argon2.
+//
+// The write goes through updateUserWithRetry with a guard — re-checked
+// against the freshly loaded row on every attempt — that only applies the
+// upgrade while u.PasswordHash still equals the hash that was just
+// verified: the same discipline ChangePassword's verifyOld guard uses. A
+// password changed by another request between VerifyPassword's read and
+// this write must not be silently overwritten with a rehash of the
+// password it just replaced.
+//
+// Any failure — the guard losing the race, a store error, or hashPassword
+// itself failing — is deliberately swallowed. The caller already
+// authenticated correctly by the time this runs; only the cost of the next
+// verification is at stake, not correctness, so a failed upgrade here must
+// never fail the login. The next successful login against a still-weak
+// hash simply tries again.
+func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string) {
+	verifiedHash := user.PasswordHash
+
+	newHash, err := hashPassword(password, s.cfg.Argon2)
+	if err != nil {
+		// TODO(T509): emit rehash event
+		return
+	}
+
+	now := time.Now()
+	_, err = s.updateUserWithRetry(ctx, user.ID, func(u *User) error {
+		if u.PasswordHash != verifiedHash {
+			return errRehashPasswordChanged
+		}
+		u.PasswordHash = newHash
+		u.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		// Best-effort: see the doc comment above. errRehashPasswordChanged,
+		// ErrConcurrentUpdate exhausting its retries, and any store error
+		// all land here and are all equally fine to drop.
+		// TODO(T509): emit rehash event
+		return
+	}
+	// TODO(T509): emit rehash event
+}
+
+// errRehashPasswordChanged aborts rehashPassword's update when a concurrent
+// request has changed the password since it was verified. It never
+// escapes rehashPassword, which swallows every failure — the return type
+// exists only to make the abort explicit at the point it happens, rather
+// than smuggling a sentinel string through fmt.Errorf.
+var errRehashPasswordChanged = errors.New("sulis: password changed during rehash")
 
 // ChangePassword changes a user's password after verifying the old password.
 // The length policy applies only to the new password; the old one was

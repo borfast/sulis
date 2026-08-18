@@ -478,6 +478,19 @@ var testArgon2Params = Argon2Params{
 	KeyLength:   32,
 }
 
+// weakerArgon2Params are deliberately weaker than testArgon2Params (which is
+// already weak-for-speed), so a user registered against weakerArgon2Params
+// and then logged in through a Sulis configured with testArgon2Params
+// reproduces "an operator raised Argon2Params" cheaply — for the rehash-on-
+// login tests (T504) — without needing a second real hashing-cost tier.
+var weakerArgon2Params = Argon2Params{
+	Memory:      8,
+	Iterations:  1,
+	Parallelism: 1,
+	SaltLength:  16,
+	KeyLength:   32,
+}
+
 func TestRegisterAndLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
@@ -4178,5 +4191,338 @@ func TestReAuthenticateRejectsDisabledAccount(t *testing.T) {
 	sessions.mu.Unlock()
 	if !got.Equal(old) {
 		t.Fatalf("AuthenticatedAt changed on a ReAuthenticate against a disabled account: got %v, want unchanged %v", got, old)
+	}
+}
+
+// --- T504: rehash on login --------------------------------------------------
+//
+// verifyPassword read cost parameters out of a stored hash but never
+// compared them to the currently configured Argon2Params, so raising
+// Argon2Params was silently cosmetic for the installed base: an operator
+// could raise the memory/time/parallelism cost and no existing user's
+// stored hash would ever actually get stronger, only newly-registered ones.
+// needsRehash (password.go) closes that: VerifyPassword now compares the
+// just-verified hash's params against s.cfg.Argon2 and, if the stored hash
+// is weaker, re-derives the hash from the just-verified plaintext with the
+// current params and writes it back through updateUserWithRetry, guarded so
+// a concurrent password change is never clobbered by the upgrade.
+
+// updateCountingUserStore wraps a real memUserStore and counts calls to
+// UpdateUser, so a test can assert a login that should not trigger a rehash
+// writes nothing at all — not even a no-op update.
+type updateCountingUserStore struct {
+	*memUserStore
+	updates int
+}
+
+func (s *updateCountingUserStore) UpdateUser(ctx context.Context, u *User) error {
+	s.updates++
+	return s.memUserStore.UpdateUser(ctx, u)
+}
+
+// TestLoginUpgradesWeakStoredHash is the regression test for C3: a user
+// whose stored hash was produced with weaker Argon2 parameters than are
+// currently configured gets it transparently upgraded on a successful
+// login, with no caller-visible change beyond the stored row.
+func TestLoginUpgradesWeakStoredHash(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, _, _, err := weak.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	before, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if !needsRehash(before.PasswordHash, testArgon2Params) {
+		t.Fatal("test setup is broken: the seeded hash must be weaker than testArgon2Params, or this test proves nothing")
+	}
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+	res, err := strong.Login(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if res.Session == nil || res.SessionToken == "" {
+		t.Fatal("expected a session from a correct password, even though the stored hash needed an upgrade")
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash == before.PasswordHash {
+		t.Fatal("stored hash was not upgraded on a successful login with weaker-than-configured params")
+	}
+
+	gotParams, _, _, err := decodeHash(after.PasswordHash)
+	if err != nil {
+		t.Fatalf("decodeHash(upgraded hash): %v", err)
+	}
+	if gotParams.Memory != testArgon2Params.Memory || gotParams.Iterations != testArgon2Params.Iterations || gotParams.Parallelism != testArgon2Params.Parallelism {
+		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
+	}
+
+	ok, err := verifyPassword(password, after.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("the password no longer verifies against its own upgraded hash")
+	}
+}
+
+// TestLoginRehashRetriesOnConcurrentUpdateConflict asserts that the upgrade
+// write goes through updateUserWithRetry's real Version contract, not a
+// bare overwrite: an unrelated concurrent write landing between the
+// rehash's read and its write must make the rehash retry from a fresh read
+// (preserving the interleaved write) rather than lose the upgrade or clobber
+// the concurrent change.
+func TestLoginRehashRetriesOnConcurrentUpdateConflict(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, _, _, err := weak.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	before, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	// Land an unrelated write (something else touching this row, e.g. a
+	// profile update) between the rehash's read and its write. The hook
+	// fires once, so this concurrent write's own UpdateUser is unaffected.
+	users.beforeUpdate = func(*User) {
+		concurrent, err := users.GetUserByID(ctx, user.ID)
+		if err != nil {
+			t.Errorf("GetUserByID (concurrent write): %v", err)
+			return
+		}
+		concurrent.Metadata = map[string]any{"unrelated": "concurrent write"}
+		if err := users.UpdateUser(ctx, concurrent); err != nil {
+			t.Errorf("UpdateUser (concurrent write): %v", err)
+		}
+	}
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+	if _, err := strong.Login(ctx, email, password, RequestInfo{}); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash == before.PasswordHash {
+		t.Fatal("the rehash's write was lost rather than retried after the concurrent-update conflict")
+	}
+	if after.Version < before.Version+2 {
+		t.Fatalf("Version advanced from %d to %d, want at least +2 (one for the concurrent write, one for the rehash's successful retry) — the write is not going through the versioned UpdateUser contract", before.Version, after.Version)
+	}
+	if got := after.Metadata["unrelated"]; got != "concurrent write" {
+		t.Fatalf("the concurrent write's Metadata was lost: the rehash's retry re-read stale data instead of the fresh row (got %v)", after.Metadata)
+	}
+}
+
+// TestFailedLoginNeverRehashes asserts that a wrong password never
+// rehashes the stored credential: a login that fails must not touch the
+// row at all, including its cost parameters.
+func TestFailedLoginNeverRehashes(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, _, _, err := weak.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	before, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+	if _, err := strong.Login(ctx, email, "wrong-password", RequestInfo{}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login with wrong password: error = %v, want ErrInvalidCredentials", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash != before.PasswordHash {
+		t.Fatal("a failed login rehashed the stored password; only a successful verification may trigger a rehash")
+	}
+}
+
+// TestLoginRehashWriteFailureDoesNotFailLogin asserts that the rehash write
+// is best-effort: the caller already proved they know the password by the
+// time the write is attempted, so a store error while persisting the
+// upgraded hash must not turn a successful login into a failure. The
+// upgrade is simply deferred to a later login, not lost forever — the
+// stored hash is unchanged and still weaker than configured.
+func TestLoginRehashWriteFailureDoesNotFailLogin(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	mem := newMemUserStore()
+	users := &failUpdateUserStore{memUserStore: mem}
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, _, _, err := weak.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, mem, user.ID)
+
+	before, err := mem.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	users.updateErr = errors.New("store unavailable")
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+	res, err := strong.Login(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login: %v, want nil — a failed rehash write must not fail an otherwise-correct login", err)
+	}
+	if res.Session == nil {
+		t.Fatal("expected a session despite the rehash write failing")
+	}
+
+	after, err := mem.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash != before.PasswordHash {
+		t.Fatal("the stored hash changed even though the update was configured to fail")
+	}
+}
+
+// TestLoginDoesNotRehashWhenStoredParamsAreStrongEnough asserts that a login
+// against a hash already at the configured cost writes nothing back — not
+// even a no-op update. Gratuitous writes on every login would cost every
+// store implementation a write it never needed.
+func TestLoginDoesNotRehashWhenStoredParamsAreStrongEnough(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	users := &updateCountingUserStore{memUserStore: newMemUserStore()}
+	s := mustNew(users, newMemSessionStore(), newMemTokenStore(), WithArgon2Params(testArgon2Params))
+
+	user, _, _, err := s.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users.memUserStore, user.ID)
+	users.updates = 0 // verifyUserEmail's own write is not what this test measures
+
+	if _, err := s.Login(ctx, email, password, RequestInfo{}); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if users.updates != 0 {
+		t.Fatalf("Login wrote to the user store %d time(s) for a hash already at the configured params; want 0", users.updates)
+	}
+}
+
+// TestRehashDoesNotClobberConcurrentPasswordChange is the regression test
+// for the binding TOCTOU constraint: the rehash write's guard must only
+// apply the upgrade if the row's PasswordHash is still exactly the hash
+// VerifyPassword just verified. If a second request changes the password
+// between that verification and the rehash's write — the same race
+// TestConcurrentResetAndVerifyDoesNotResurrectOldHash covers for
+// ResetPassword/VerifyEmail — the rehash must back off rather than
+// resurrect the password the user just replaced.
+func TestRehashDoesNotClobberConcurrentPasswordChange(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email       = "alice@example.com"
+		oldPassword = "correct-horse-battery-staple"
+		newPassword = "totally-different-password"
+	)
+
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, _, _, err := weak.Register(ctx, email, oldPassword, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+
+	// Land a complete password change between the rehash's read of the row
+	// and its write. The hook fires once, so the concurrent ChangePassword's
+	// own UpdateUser is unaffected.
+	users.beforeUpdate = func(*User) {
+		if err := strong.ChangePassword(ctx, user.ID, oldPassword, newPassword, RequestInfo{}); err != nil {
+			t.Errorf("racing ChangePassword: %v", err)
+		}
+	}
+
+	if _, err := strong.Login(ctx, email, oldPassword, RequestInfo{}); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	stored, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	if ok, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+		t.Fatal("the rehash resurrected the old password: it still verifies after a concurrent ChangePassword")
+	}
+	ok, err := verifyPassword(newPassword, stored.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("the concurrently-set new password does not verify; it was overwritten by the rehash")
 	}
 }

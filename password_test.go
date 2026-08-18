@@ -138,6 +138,71 @@ func TestDecodeHashRejectsBadSaltOrKeySize(t *testing.T) {
 	})
 }
 
+// TestNeedsRehash covers needsRehash's cost-dimension comparison in
+// isolation, decoupled from any Sulis/Login plumbing. Sulis-level coverage
+// (a real weak-hash-gets-upgraded-on-login flow) lives in sulis_test.go.
+func TestNeedsRehash(t *testing.T) {
+	const password = "correct-horse-battery-staple"
+	weak := Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 16}
+	strong := Argon2Params{Memory: 16, Iterations: 2, Parallelism: 1, SaltLength: 16, KeyLength: 16}
+
+	weakHash, err := hashPassword(password, weak)
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+	strongHash, err := hashPassword(password, strong)
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+
+	t.Run("LessMemoryNeedsRehash", func(t *testing.T) {
+		if !needsRehash(weakHash, strong) {
+			t.Fatal("a hash using less memory than configured must need a rehash")
+		}
+	})
+
+	t.Run("FewerIterationsNeedsRehash", func(t *testing.T) {
+		sameMemoryFewerIterations := Argon2Params{Memory: strong.Memory, Iterations: 1, Parallelism: strong.Parallelism, SaltLength: 16, KeyLength: 16}
+		h, err := hashPassword(password, sameMemoryFewerIterations)
+		if err != nil {
+			t.Fatalf("hashPassword: %v", err)
+		}
+		if !needsRehash(h, strong) {
+			t.Fatal("a hash using fewer iterations than configured must need a rehash")
+		}
+	})
+
+	t.Run("LessParallelismNeedsRehash", func(t *testing.T) {
+		sameCostLessParallel := Argon2Params{Memory: strong.Memory, Iterations: strong.Iterations, Parallelism: 1, SaltLength: 16, KeyLength: 16}
+		twiceParallel := Argon2Params{Memory: strong.Memory, Iterations: strong.Iterations, Parallelism: 2, SaltLength: 16, KeyLength: 16}
+		h, err := hashPassword(password, sameCostLessParallel)
+		if err != nil {
+			t.Fatalf("hashPassword: %v", err)
+		}
+		if !needsRehash(h, twiceParallel) {
+			t.Fatal("a hash using less parallelism than configured must need a rehash")
+		}
+	})
+
+	t.Run("EqualParamsDoNotNeedRehash", func(t *testing.T) {
+		if needsRehash(strongHash, strong) {
+			t.Fatal("a hash already at the configured params must not need a rehash")
+		}
+	})
+
+	t.Run("StrongerStoredParamsDoNotNeedRehash", func(t *testing.T) {
+		if needsRehash(strongHash, weak) {
+			t.Fatal("a hash stronger than configured must not need a rehash")
+		}
+	})
+
+	t.Run("MalformedHashDoesNotNeedRehash", func(t *testing.T) {
+		if needsRehash("not-a-valid-hash", strong) {
+			t.Fatal("a hash that fails to decode must not be reported as needing a rehash — verifyPassword already rejects it")
+		}
+	})
+}
+
 func TestRegisterRejectsShortPassword(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()

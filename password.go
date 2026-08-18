@@ -57,6 +57,32 @@ func verifyPassword(password, encoded string) (bool, error) {
 	return subtle.ConstantTimeCompare(hash, otherHash) == 1, nil
 }
 
+// needsRehash reports whether encoded — a stored password hash that has
+// already been successfully verified against — was produced with weaker
+// Argon2 parameters than want and should be regenerated from the plaintext
+// now that it's available. Only the cost dimensions matter: memory,
+// iterations, and parallelism. SaltLength/KeyLength are fixed by the hash
+// that already exists and are not compared here; a hash weaker in any of
+// the three cost dimensions is considered to need an upgrade, and a hash
+// that's equal or stronger in all three does not — there is never a reason
+// to downgrade a hash the operator hasn't asked to weaken.
+//
+// A hash that fails to decode is treated as NOT needing a rehash, not as
+// needing one. verifyPassword already rejects a malformed hash before this
+// is ever consulted (VerifyPassword only reaches needsRehash on a
+// successful verification), so this can only be reached with a hash that
+// decoded fine moments ago; a decode failure here is not a plausible path
+// to a bypass, just a safe default in case it's ever called differently.
+func needsRehash(encoded string, want Argon2Params) bool {
+	got, _, _, err := decodeHash(encoded)
+	if err != nil {
+		return false
+	}
+	return got.Memory < want.Memory ||
+		got.Iterations < want.Iterations ||
+		got.Parallelism < want.Parallelism
+}
+
 func decodeHash(encoded string) (params Argon2Params, salt, hash []byte, err error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 {
