@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -319,6 +320,45 @@ func TestFileDSNEscapesThePath(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the database was not created at the path asked for: %v", err)
+	}
+}
+
+// TestOpenNeverPutsTheDSNInTheErrorMessage is the SQLite half of the ruling
+// its Postgres sibling records as
+// TestSearchPathDSN/NeverPutsTheDSNOrThePasswordInTheErrorMessage: a DSN
+// never reaches an error string, not even wrapped.
+//
+// A SQLite DSN is a file path and a set of pragmas rather than a URL with a
+// password in it, which is why this was the last place the rule was not
+// applied — but the rule is deliberately absolute rather than
+// scheme-by-scheme. A path is deployment topology, an encrypted build's key
+// pragma would be a credential outright, and the value of a rule like this
+// comes entirely from never having to decide case by case whether this
+// particular DSN is the sensitive kind. Open used to interpolate it with
+// %q into both of its errors; the sibling package interpolates nothing.
+//
+// What the driver's own wrapped error says is not this package's to
+// control — modernc.org/sqlite reports a URL-escape failure by quoting the
+// offending escape back, the same residual the Postgres sibling carries
+// from pgx — so this asserts on the message sulis composes, using a failure
+// (a database file under a directory that does not exist) whose driver
+// error names nothing at all.
+func TestOpenNeverPutsTheDSNInTheErrorMessage(t *testing.T) {
+	const marker = "sup3rSecretDirectory"
+	path := filepath.Join(t.TempDir(), marker, "sulis.db")
+	dsn := sqlite.FileDSN(path)
+
+	db, err := sqlite.Open(context.Background(), dsn)
+	if err == nil {
+		_ = db.Close()
+		t.Fatalf("Open(%q) succeeded, so this test no longer exercises the error path", dsn)
+	}
+
+	msg := err.Error()
+	for _, secret := range []string{dsn, path, marker} {
+		if strings.Contains(msg, secret) {
+			t.Fatalf("Open error = %q, which contains %q — a DSN must never reach an error string", msg, secret)
+		}
 	}
 }
 

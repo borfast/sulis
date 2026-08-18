@@ -127,6 +127,14 @@ func FileDSN(path string) string {
 // Open opens the database named by dsn, configures the connection pool, and
 // applies Schema. Build dsn with FileDSN or MemoryDSN, or write your own.
 //
+// Neither error below names dsn, matching the Postgres sibling: a DSN never
+// reaches an error string, not even wrapped. A SQLite DSN carries a file
+// path rather than a password, but the rule is absolute on purpose — a path
+// is deployment topology, an encrypted build's key pragma would be a
+// credential outright, and a rule applied case by case is a rule somebody
+// eventually decides wrong. Nothing is lost: the caller passed dsn in and
+// still has it.
+//
 // The pool is pinned to a single connection, never retired: see the package
 // documentation for why one connection is the honest configuration for a
 // store whose contracts are about atomicity, and note that an in-memory
@@ -136,7 +144,7 @@ func FileDSN(path string) string {
 func Open(ctx context.Context, dsn string) (*DB, error) {
 	db, err := sql.Open(DriverName, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("sulis/sqlite: opening %q: %w", dsn, err)
+		return nil, fmt.Errorf("sulis/sqlite: opening the database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
@@ -145,7 +153,7 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("sulis/sqlite: connecting to %q: %w", dsn, err)
+		return nil, fmt.Errorf("sulis/sqlite: connecting to the database: %w", err)
 	}
 	if err := Migrate(ctx, db); err != nil {
 		_ = db.Close()
