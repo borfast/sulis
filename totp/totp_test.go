@@ -185,21 +185,13 @@ func TestEnrollAndValidate(t *testing.T) {
 	// rejection.
 	period := time.Duration(svc.cfg.Period) * time.Second
 	code, _ = svc.Generate(secret, time.Now().Add(period))
-	ok, err := svc.Validate(ctx, "user1", code)
-	if err != nil {
+	if err := svc.Validate(ctx, "user1", code); err != nil {
 		t.Fatalf("Validate: %v", err)
-	}
-	if !ok {
-		t.Fatal("Validate returned false for valid code")
 	}
 
-	// Wrong code should fail.
-	ok, err = svc.Validate(ctx, "user1", "000000")
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if ok {
-		t.Fatal("Validate returned true for wrong code")
+	// Wrong code should fail with ErrTOTPInvalid.
+	if err := svc.Validate(ctx, "user1", "000000"); !errors.Is(err, ErrTOTPInvalid) {
+		t.Fatalf("expected ErrTOTPInvalid, got %v", err)
 	}
 }
 
@@ -211,7 +203,7 @@ func TestValidateBeforeConfirm(t *testing.T) {
 	secret, _, _ := svc.Enroll(ctx, "user1", "alice@example.com")
 	code, _ := svc.Generate(secret, time.Now())
 
-	_, err := svc.Validate(ctx, "user1", code)
+	err := svc.Validate(ctx, "user1", code)
 	if err != ErrTOTPNotVerified {
 		t.Fatalf("expected ErrTOTPNotVerified, got %v", err)
 	}
@@ -225,9 +217,40 @@ func TestUnenroll(t *testing.T) {
 	svc.Enroll(ctx, "user1", "alice@example.com")
 	svc.Unenroll(ctx, "user1")
 
-	_, err := svc.Validate(ctx, "user1", "123456")
+	err := svc.Validate(ctx, "user1", "123456")
 	if err != ErrTOTPNotEnrolled {
 		t.Fatalf("expected ErrTOTPNotEnrolled, got %v", err)
+	}
+}
+
+// TestValidateRejectsWrongCodeWithError proves the bypass described in the
+// task brief is unwritable: an incorrect code must return a non-nil error
+// distinguishable as ErrTOTPInvalid via errors.Is, not (false, nil). Calling
+// code that only checks `err != nil` before granting access must reject a
+// wrong code, not silently let it through.
+func TestValidateRejectsWrongCodeWithError(t *testing.T) {
+	store := newMemTOTPStore()
+	svc := mustService(t, store, "TestApp")
+	ctx := context.Background()
+
+	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	code, err := svc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+		t.Fatalf("ConfirmEnrollment: %v", err)
+	}
+
+	err = svc.Validate(ctx, "user1", "000000")
+	if err == nil {
+		t.Fatal("Validate returned a nil error for a wrong code")
+	}
+	if !errors.Is(err, ErrTOTPInvalid) {
+		t.Fatalf("expected ErrTOTPInvalid, got %v", err)
 	}
 }
 
@@ -251,10 +274,7 @@ func TestValidateRejectsReplayedCode(t *testing.T) {
 
 	// ConfirmEnrollment already consumed this counter, so the same code
 	// must not be replayable as a login code.
-	ok, err := svc.Validate(ctx, "user1", code)
-	if ok {
-		t.Fatal("Validate returned true for replayed code")
-	}
+	err = svc.Validate(ctx, "user1", code)
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
 	}
@@ -285,12 +305,8 @@ func TestValidateAcceptsNextWindowCode(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	ok, err := svc.Validate(ctx, "user1", codeNext)
-	if err != nil {
+	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
 		t.Fatalf("Validate: %v", err)
-	}
-	if !ok {
-		t.Fatal("Validate returned false for next-window code")
 	}
 }
 
@@ -318,17 +334,13 @@ func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	ok, err := svc.Validate(ctx, "user1", codeNext)
-	if err != nil || !ok {
-		t.Fatalf("Validate(next) = (%v, %v), want (true, nil)", ok, err)
+	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+		t.Fatalf("Validate(next) = %v, want nil", err)
 	}
 
 	// Once the newer window's code has been used, the older code's
 	// counter is superseded and must be rejected as a replay.
-	ok, err = svc.Validate(ctx, "user1", codeT)
-	if ok {
-		t.Fatal("Validate returned true for superseded older code")
-	}
+	err = svc.Validate(ctx, "user1", codeT)
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
 	}
@@ -359,9 +371,8 @@ func TestValidatePersistsLastUsedCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	ok, err := svc.Validate(ctx, "user1", codeNext)
-	if err != nil || !ok {
-		t.Fatalf("Validate(next) = (%v, %v), want (true, nil)", ok, err)
+	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+		t.Fatalf("Validate(next) = %v, want nil", err)
 	}
 
 	wantCounter := uint64(next.Unix()) / svc.cfg.Period
@@ -402,10 +413,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	ok, err := svc.Validate(ctx, "user1", codeNext)
-	if ok {
-		t.Fatal("Validate returned true despite a persist failure")
-	}
+	err = svc.Validate(ctx, "user1", codeNext)
 	if err == nil {
 		t.Fatal("expected an error when persisting LastUsedCounter fails")
 	}
@@ -458,10 +466,7 @@ func TestConfirmEnrollmentDoesNotRollBackCounter(t *testing.T) {
 	}
 
 	// The older code must still be rejected as a replay.
-	ok, err := svc.Validate(ctx, "user1", codeT)
-	if ok {
-		t.Fatal("Validate returned true for a code superseded before re-confirmation")
-	}
+	err = svc.Validate(ctx, "user1", codeT)
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
 	}
@@ -590,10 +595,7 @@ func TestValidateConsultsLimiterBeforeCheckingCode(t *testing.T) {
 	svc := mustService(t, store, "TestApp", WithLimiter(limiter))
 	ctx := context.Background()
 
-	ok, err := svc.Validate(ctx, "user1", "000000")
-	if ok {
-		t.Fatal("Validate returned true despite a denying limiter")
-	}
+	err := svc.Validate(ctx, "user1", "000000")
 	if !errors.Is(err, ErrTOTPRateLimited) {
 		t.Fatalf("expected ErrTOTPRateLimited, got %v", err)
 	}
@@ -644,11 +646,7 @@ func TestTOTPNilLimiterIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	ok, err := svc.Validate(ctx, "user1", codeNext)
-	if err != nil {
+	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
 		t.Fatalf("Validate: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected Validate to succeed with a nil limiter")
 	}
 }

@@ -123,16 +123,12 @@ if err != nil {
 // `pending`) so the follow-up request doesn't have to trust the client for it.
 
 // On the follow-up request:
-ok, err := totpSvc.Validate(ctx, user.ID, submittedCode)
-if err != nil {
-    // totp.ErrTOTPNotEnrolled, totp.ErrTOTPNotVerified, totp.ErrTOTPReplayed,
-    // or totp.ErrTOTPRateLimited; consider falling back to a recovery code
+if err := totpSvc.Validate(ctx, user.ID, submittedCode); err != nil {
+    // totp.ErrTOTPInvalid (wrong code), totp.ErrTOTPNotEnrolled,
+    // totp.ErrTOTPNotVerified, totp.ErrTOTPReplayed, or
+    // totp.ErrTOTPRateLimited; consider falling back to a recovery code
     // via recoverySvc.Consume(ctx, user.ID, submittedRecoveryCode).
     return err
-}
-if !ok {
-    // Wrong code: Validate returns (false, nil), not an error.
-    return errors.New("invalid code")
 }
 
 // user.ID here comes from server-side state established above, never from
@@ -154,6 +150,8 @@ The *first* time an account with a password gets verified (via either `VerifyEma
 `totp` implements RFC 6238 TOTP without external dependencies. `NewService(store, issuer, opts...)` returns an error if the resolved config is out of bounds (empty/`:`-containing issuer, digits outside 6-8, period outside 15-300s, skew above 4, or secret size below 16 bytes).
 
 It supports enrollment (`Enroll`, unverified until `ConfirmEnrollment`), validation (`Validate`), unenrollment (`Unenroll`), configurable HMAC algorithms (`SHA1`, `SHA256`, `SHA512`), configurable digit/period/skew settings, and `otpauth://` URI generation for authenticator apps.
+
+`Validate(ctx, userID, code) error` returns nil if and only if the code is valid; every rejection is a distinct, non-nil error, so a caller that only checks `err != nil` before granting access rejects a wrong code correctly. A wrong code returns `ErrTOTPInvalid`, distinguishable via `errors.Is` from the other rejections below.
 
 `Validate` and `ConfirmEnrollment` enforce replay protection: each accepted code's time-step counter is persisted as `Credential.LastUsedCounter`, and a code is only accepted if its counter is strictly greater than the last one accepted for that credential. Reusing a code, or presenting an older one after a newer counter has already been accepted, returns `ErrTOTPReplayed`.
 

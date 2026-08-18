@@ -210,40 +210,45 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 	return s.store.SaveTOTP(ctx, cred)
 }
 
-// Validate checks a TOTP code for an enrolled, verified user.
+// Validate checks a TOTP code for an enrolled, verified user. It returns nil
+// if and only if the code is valid; every rejection reason is a distinct,
+// non-nil error, so callers that only branch on `err != nil` reject a wrong
+// code correctly instead of treating a (false, nil)-shaped "not valid, but
+// no error" result as success.
 //
 // To prevent replay, a code is only accepted once: its time-step counter
 // must be strictly greater than the last accepted counter for this
 // credential. Reusing a previously accepted code (or an older one, once a
-// newer counter has been accepted) returns ErrTOTPReplayed.
-func (s *Service) Validate(ctx context.Context, userID, code string) (bool, error) {
+// newer counter has been accepted) returns ErrTOTPReplayed, distinguishable
+// from a wrong code (ErrTOTPInvalid) via errors.Is.
+func (s *Service) Validate(ctx context.Context, userID, code string) error {
 	if err := s.allow(ctx, "totp:"+userID); err != nil {
-		return false, err
+		return err
 	}
 
 	cred, err := s.store.GetTOTPByUserID(ctx, userID)
 	if err != nil {
-		return false, ErrTOTPNotEnrolled
+		return ErrTOTPNotEnrolled
 	}
 	if !cred.Verified {
-		return false, ErrTOTPNotVerified
+		return ErrTOTPNotVerified
 	}
 
 	counter, ok := s.matchCode(cred.Secret, code, time.Now())
 	if !ok {
-		return false, nil
+		return ErrTOTPInvalid
 	}
 	if counter <= cred.LastUsedCounter {
-		return false, ErrTOTPReplayed
+		return ErrTOTPReplayed
 	}
 
 	cred.LastUsedCounter = counter
 	if err := s.store.SaveTOTP(ctx, cred); err != nil {
 		// Fail closed: if we can't persist the counter, we can't guarantee
 		// the code won't be replayed, so don't accept it.
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 // Unenroll removes TOTP enrollment for a user.
