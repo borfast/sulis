@@ -27,6 +27,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
+          check-latest: true
 
       # gofmt walks the directory tree rather than the module graph, so this
       # already covers the nested store/sql module below. The other gates do
@@ -97,6 +98,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
+          check-latest: true
 
       # -race, like every other run of this suite: the concurrency subtests are
       # the point of running it against a real database at all. Every test
@@ -117,6 +119,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
+          check-latest: true
 
       # All three tools are pinned. An unpinned @latest would execute whatever
       # that resolves to on the day CI runs. Dependabot proposes the bumps.
@@ -150,6 +153,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
+          check-latest: true
 
       # A short, deterministic smoke check, not a fuzzing budget: 10s per
       # hand-rolled parser is enough to catch a regression the checked-in
