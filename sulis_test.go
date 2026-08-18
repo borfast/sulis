@@ -571,6 +571,91 @@ func TestPasswordResetFlow(t *testing.T) {
 	}
 }
 
+// TestCreatePasswordResetTokenUnknownEmailReturnsEmptyResult asserts that an
+// unregistered address gets ("", nil), not ErrUserNotFound — the endpoint
+// must not let a caller distinguish a registered address from an
+// unregistered one by its return value.
+func TestCreatePasswordResetTokenUnknownEmailReturnsEmptyResult(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	token, err := s.CreatePasswordResetToken(ctx, "nobody@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("expected nil error for an unknown address, got %v", err)
+	}
+	if token != "" {
+		t.Fatalf("expected an empty token for an unknown address, got %q", token)
+	}
+}
+
+// TestCreatePasswordResetTokenUnknownEmailPerformsEquivalentWork asserts that
+// the unknown-user path burns the same token-generation work the known-user
+// path spends, then discards it rather than persisting it: a wrapped
+// resetTokenGenerator proves the generation call actually happened, and the
+// token store's row count proves nothing was written. An implementation that
+// short-circuits before generating (returning ("", nil) immediately) already
+// satisfies the return-value test above but must fail this one.
+func TestCreatePasswordResetTokenUnknownEmailPerformsEquivalentWork(t *testing.T) {
+	s, _, _, tokens := newTestEnv()
+	ctx := context.Background()
+
+	var calls int
+	orig := resetTokenGenerator
+	resetTokenGenerator = func(nBytes int) (string, string, error) {
+		calls++
+		return orig(nBytes)
+	}
+	defer func() { resetTokenGenerator = orig }()
+
+	if _, err := s.CreatePasswordResetToken(ctx, "nobody@example.com", RequestInfo{}); err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("expected the unknown-user path to generate a token exactly once, got %d calls", calls)
+	}
+	if len(tokens.tokens) != 0 {
+		t.Fatalf("expected the generated token to be discarded rather than persisted; store has %d rows", len(tokens.tokens))
+	}
+}
+
+// TestCreatePasswordResetTokenStrictReturnsErrUserNotFound asserts that the
+// Strict variant, meant for admin tooling that has already authenticated an
+// operator, still returns ErrUserNotFound verbatim for an unknown address —
+// unlike the public CreatePasswordResetToken, which must not leak that.
+func TestCreatePasswordResetTokenStrictReturnsErrUserNotFound(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, err := s.CreatePasswordResetTokenStrict(ctx, "nobody@example.com", RequestInfo{}); err != ErrUserNotFound {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+// TestCreatePasswordResetTokenStrictKnownEmailReturnsToken asserts that the
+// Strict variant's known-user path is unaffected by the strict flag: it
+// still generates and returns a usable reset token.
+func TestCreatePasswordResetTokenStrictKnownEmailReturnsToken(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "old-password", RequestInfo{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetTokenStrict(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreatePasswordResetTokenStrict: %v", err)
+	}
+	if rawToken == "" {
+		t.Fatal("expected a non-empty reset token for a known address")
+	}
+
+	if err := s.ResetPassword(ctx, rawToken, "new-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+}
+
 func TestMagicLinkFlow(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()

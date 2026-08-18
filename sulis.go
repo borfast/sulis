@@ -329,10 +329,51 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeTwoFactor)
 }
 
-// CreatePasswordResetToken generates a password reset token for the given email.
-// The raw token is returned so the consumer can deliver it (e.g. via email).
-// Returns ErrUserNotFound if the email does not exist.
+// resetTokenGenerator produces the raw/hashed token pair burned on the
+// unknown-user path of CreatePasswordResetToken. It is a package variable —
+// rather than a direct call to generateRawToken — purely so tests can prove
+// that generation work actually happens on that path (via a counting
+// wrapper), without needing a real user or a token-store write to observe
+// it. Production code never reassigns it.
+var resetTokenGenerator = generateRawToken
+
+// CreatePasswordResetToken generates a password reset token for the given
+// email and returns the raw token so the consumer can deliver it (e.g. via
+// email).
+//
+// If no account exists for email, it returns ("", nil) rather than
+// ErrUserNotFound: this endpoint must not let a caller learn whether an
+// address is registered. The unknown-user path still generates and hashes a
+// token of the same size the known-user path would create — burning the
+// same randomness and hashing work — before discarding it, so the two paths
+// can't be told apart by the work they perform either. What can't be
+// equalized is the store round trip: the known-user path writes a token row
+// and the unknown-user path never does, since there is no user to attach one
+// to. That residual asymmetry is the same kind VerifyPassword documents for
+// its dummy-hash equalization above — perfect timing equality across a
+// storage boundary isn't a claim this library can make.
+//
+// Admin tooling that has already authenticated an operator and genuinely
+// needs to know whether the address is registered should call
+// CreatePasswordResetTokenStrict instead; it must never back a public-facing
+// endpoint, or it reopens the user-enumeration oracle this method closes.
 func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string, ri RequestInfo) (string, error) {
+	return s.createPasswordResetToken(ctx, email, ri, false)
+}
+
+// CreatePasswordResetTokenStrict behaves exactly like CreatePasswordResetToken
+// except that it returns ErrUserNotFound verbatim for an unknown address
+// instead of silently returning ("", nil). It exists for admin tooling that
+// needs the truth about whether an address is registered; wiring it to a
+// public-facing endpoint reintroduces the enumeration oracle
+// CreatePasswordResetToken exists to close.
+func (s *Sulis) CreatePasswordResetTokenStrict(ctx context.Context, email string, ri RequestInfo) (string, error) {
+	return s.createPasswordResetToken(ctx, email, ri, true)
+}
+
+// createPasswordResetToken implements both CreatePasswordResetToken and
+// CreatePasswordResetTokenStrict; strict selects which of them the caller is.
+func (s *Sulis) createPasswordResetToken(ctx context.Context, email string, ri RequestInfo, strict bool) (string, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return "", err
@@ -347,6 +388,19 @@ func (s *Sulis) CreatePasswordResetToken(ctx context.Context, email string, ri R
 
 	user, err := s.users.GetUserByEmail(ctx, email)
 	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			if strict {
+				return "", err
+			}
+			// Burn the same generation and hashing work a real issuance
+			// would spend, then discard the result: there is no user row to
+			// attach a stored token to, and persisting one anyway would
+			// leave an orphaned, unredeemable row behind. crypto/rand cannot
+			// fail on Go >= 1.24 (see New), so the error is safe to ignore
+			// here too.
+			_, _, _ = resetTokenGenerator(s.cfg.ResetTokenBytes)
+			return "", nil
+		}
 		return "", err
 	}
 

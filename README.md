@@ -23,7 +23,7 @@ The root package owns the auth logic and data types:
 - `User`, `Session`, and `Token`
 - `Register`, `Login`, `VerifyPassword`, `IssueSession`, `ChangePassword`, `SetInitialPassword`
 - `ValidateSession`, `RevokeSession`, `RevokeAllSessions`
-- `CreatePasswordResetToken`, `ResetPassword`
+- `CreatePasswordResetToken`, `CreatePasswordResetTokenStrict`, `ResetPassword`
 - `CreateMagicLinkToken`, `RedeemMagicLink`
 - `CreateTwoFactorToken`, `CompleteTwoFactor`
 - `CreateEmailVerificationToken`, `VerifyEmail`
@@ -80,7 +80,9 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 ### Password Reset
 
-`CreatePasswordResetToken(ctx, email, requestInfo)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. Unlike `Login`/`VerifyPassword`, it returns `ErrUserNotFound` verbatim when the email doesn't exist — see [Operational requirements](#operational-requirements) for why that means your HTTP handler, not this method, must equalize the response.
+`CreatePasswordResetToken(ctx, email, requestInfo)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. If no account exists for `email`, it returns `("", nil)` rather than `ErrUserNotFound` — like `Login`/`VerifyPassword`, the response can't be used to tell a registered address from an unregistered one. The unknown-address path still generates and hashes a token of the same size the known-address path would create, then discards it, so the two paths can't be distinguished by the work they perform either; see [Operational requirements](#operational-requirements) for the one residual asymmetry (a store write) this can't equalize away.
+
+`CreatePasswordResetTokenStrict(ctx, email, requestInfo)` is the same call with the safe default turned off: it returns `ErrUserNotFound` verbatim for an unknown address. It exists for admin tooling that has already authenticated an operator and genuinely needs to know whether the address is registered — never wire it to a public-facing endpoint, or you reopen the enumeration oracle `CreatePasswordResetToken` exists to close.
 
 `ResetPassword(ctx, rawToken, newPassword)` checks the password policy first (so a policy failure doesn't burn the token), then atomically consumes the token (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token and `ErrTokenExpired` for an expired one. A replay's error depends on timing: redeeming the same still-live token twice (e.g. a concurrent racing request) returns `ErrTokenAlreadyUsed` for the loser; redeeming it again *after* a successful reset returns `ErrTokenInvalid` instead, because a successful reset purges the user's outstanding password-reset tokens, so the replay finds nothing to consume rather than an already-used row.
 
@@ -88,7 +90,7 @@ By default, both `ChangePassword` and `ResetPassword` revoke every session belon
 
 ### Magic Link
 
-`CreateMagicLinkToken(ctx, email, requestInfo)` creates a magic-link token and returns the raw token for delivery. If no user exists for the email yet, **no user row is created at this point** — only the token, carrying the email — so that requesting magic links for arbitrary addresses can't be used to flood the user store. The user is created lazily at redemption. This also means `CreateMagicLinkToken` never returns `ErrUserNotFound`, unlike `CreatePasswordResetToken`.
+`CreateMagicLinkToken(ctx, email, requestInfo)` creates a magic-link token and returns the raw token for delivery. If no user exists for the email yet, **no user row is created at this point** — only the token, carrying the email — so that requesting magic links for arbitrary addresses can't be used to flood the user store. The user is created lazily at redemption. This also means `CreateMagicLinkToken` never returns `ErrUserNotFound` — unlike `CreatePasswordResetTokenStrict`, which does; `CreatePasswordResetToken` itself, like `CreateMagicLinkToken`, never leaks that distinction to a public caller.
 
 `RedeemMagicLink(ctx, rawToken, requestInfo)` atomically consumes the token, loads the user (creating a passwordless one now if the token predates the account), stamps `EmailVerifiedAt` (redeeming a magic link proves control of the mailbox), and then returns a `*LoginResult` on exactly the same terms as `Login`.
 
@@ -256,7 +258,9 @@ Token-redemption calls (`ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`,
 
 **Encrypt TOTP secrets at rest.** `totp.Service` hands your `totp.Store` a plaintext base32 secret (`Credential.Secret`) — there is no application-layer encryption. Encrypt it at rest (e.g. envelope encryption via a KMS) in your store implementation, since a database compromise would otherwise hand an attacker every enrolled user's shared secret, usable to generate valid codes indefinitely.
 
-**Respond identically regardless of `CreatePasswordResetToken`'s `ErrUserNotFound`.** Unlike `Login`/`VerifyPassword`, which normalize unknown-email and wrong-password into the same `ErrInvalidCredentials` with equalized timing, `CreatePasswordResetToken` returns `ErrUserNotFound` verbatim when the email doesn't exist. Your HTTP handler must not let that distinction reach the caller — return the same generic response ("if that address is registered, we've sent a reset link") whether or not the account exists, or the endpoint becomes a user-enumeration oracle. (`CreateMagicLinkToken` doesn't have this problem: it never returns a not-found error, since it defers user creation to redemption.)
+**`CreatePasswordResetToken` cannot be used to enumerate registered addresses.** Like `Login`/`VerifyPassword`, it normalizes the unknown-address case away: an unregistered `email` returns `("", nil)`, the same shape a genuine issuance takes from the caller's perspective, rather than `ErrUserNotFound`. The unknown-address path also performs the same token generation and hashing work the known-address path does before discarding the result, so the two paths can't be distinguished by the work they perform either — only by a residual asymmetry this can't remove: the known-address path writes a token row and the unknown-address path never does, since there's no user to attach one to (the same kind of documented gap as `VerifyPassword`'s dummy-hash equalization — equal work, not a provable-equal-latency guarantee across a storage boundary). Your HTTP handler can safely return the same generic response ("if that address is registered, we've sent a reset link") unconditionally, with no flattening of its own required.
+
+Admin tooling that has already authenticated an operator and genuinely needs to know whether an address is registered should call `CreatePasswordResetTokenStrict` instead, which returns `ErrUserNotFound` verbatim. Never wire it to a public-facing endpoint — that reopens the exact oracle `CreatePasswordResetToken` exists to close. (`CreateMagicLinkToken` doesn't have this problem at all: it never returns a not-found error, since it defers user creation to redemption.)
 
 **Sessions are revoked on password change by default.** `RevokeSessionsOnPasswordChange` defaults to `true`, so both `ChangePassword` and `ResetPassword` delete every session belonging to the user (and purge any other outstanding password-reset tokens) as part of applying the new password. Pass `WithRevokeSessionsOnPasswordChange(false)` to opt out. Because this revokes the caller's own current session too, `ChangePassword` does not return a new one — call `IssueSession` yourself immediately afterward if you want the calling client to stay logged in.
 
