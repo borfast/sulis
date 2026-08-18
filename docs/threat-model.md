@@ -212,6 +212,47 @@ named here; this document only asserts what each one is *for*.
   unclonable hardware, and a sign-count anomaly is the signal that this
   may no longer hold for a given credential.
 
+### Email change and account takeover
+
+An email address is an identity and, on most products, also the password-
+reset channel — so changing one in a single step is an account-takeover
+primitive, and recovering from a compromised mailbox means invalidating
+everything that mailbox could still reach.
+
+- **A change is staged, never applied in one step.** `ChangeEmail` writes
+  `User.PendingEmail` and returns a single-use token; `User.Email` and
+  `User.EmailVerifiedAt` are untouched until `ConfirmEmailChange`
+  redeems it. An attacker with a session but no access to the new
+  address gets no further than a staged value nothing reads as live.
+- **The new address must be re-proved.** The token is delivered to the
+  *new* address, so confirming requires receiving there; the token is
+  bound to the address it was issued for and is rejected if a later
+  `ChangeEmail` has since staged a different one. `EmailVerifiedAt` is
+  re-stamped fresh on the swap rather than carried over — the old stamp
+  proved control of the old address, not this one.
+- **Confirming revokes every session and purges the account's outstanding
+  tokens** — password-reset, two-factor, and magic-link. The magic-link
+  purge is the one that closes the takeover rather than tidying up after
+  it: a link requested while the attacker still held the mailbox is
+  stored against the account's user ID with no record of the address it
+  went to, so `RedeemMagicLink` would resolve and honour it after the
+  swap. A mailbox-compromise recovery has to burn every outstanding
+  mailbox-derived credential, not most of them. Every password-setting
+  path (`ChangePassword`, `ResetPassword`, `SetInitialPassword`) performs
+  the same purge, for the same reason.
+- **The old address is the victim's tripwire, and notifying it is the
+  application's job.** sulis sends no mail. The token goes to the new
+  address, but the *old* address must be notified twice — once when a
+  change is staged, once when it is confirmed. That is the only message
+  reaching an address the attacker does not control: the first arrives
+  while the pending change can still be undone, the second at least in
+  time to start recovery. An application that skips it has a takeover
+  flow with no victim-visible signal at all, which is why this is listed
+  as an operational requirement in the README rather than as advice.
+- **Gate `ChangeEmail` behind `RequireRecentAuth`.** A stolen but
+  long-idle session should not be able to start an address change on the
+  strength of an authentication that happened days ago.
+
 ### CSRF on the cookie path
 
 - **`SameSite=Lax`** on the session cookie, set unconditionally by
