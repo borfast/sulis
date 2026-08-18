@@ -166,3 +166,19 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzRecoveryCanonical$' -fuzztime=10s ./recovery
       - name: fuzz FuzzGenerateCode
         run: go test -run='^$' -fuzz='^FuzzGenerateCode$' -fuzztime=10s ./totp
+
+      # If any target above found a failing input, `go test -fuzz` already
+      # wrote it under that package's testdata/fuzz/<FuzzName>/ before
+      # failing the step. Upload whatever exists across all four targets'
+      # packages so the crasher can be pulled down and replayed locally
+      # instead of re-derived from the CI log.
+      - name: upload failing fuzz corpus
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-failure-corpus
+          path: |
+            testdata/fuzz
+            recovery/testdata/fuzz
+            totp/testdata/fuzz
+          if-no-files-found: ignore
