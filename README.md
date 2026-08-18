@@ -310,9 +310,17 @@ if err != nil {
 if err := totpSvc.Validate(ctx, user.ID, submittedCode); err != nil {
     // totp.ErrTOTPInvalid (wrong code), totp.ErrTOTPNotEnrolled,
     // totp.ErrTOTPNotVerified, totp.ErrTOTPReplayed, or
-    // totp.ErrTOTPRateLimited; consider falling back to a recovery code
-    // via recoverySvc.Consume(ctx, user.ID, submittedRecoveryCode).
-    return err
+    // totp.ErrTOTPRateLimited; consider falling back to a recovery code.
+    remaining, rerr := recoverySvc.Consume(ctx, user.ID, submittedRecoveryCode)
+    if rerr != nil {
+        return rerr // recovery.ErrCodeInvalid or recovery.ErrCodeRateLimited
+    }
+    // A recovery code is a full bypass of every other factor. Your app,
+    // not recovery, must now revoke the user's other sessions, and once
+    // remaining reaches 0, push them to re-enroll a real second factor —
+    // see "Recovery codes and the 2FA lifecycle" under the recovery
+    // subpackage below.
+    _ = remaining
 }
 
 // user.ID here comes from server-side state established above, never from
@@ -432,7 +440,7 @@ These are the one place sulis derives a `RequestInfo` itself, from `r.RemoteAddr
 
 #### Scope
 
-The taxonomy covers the root package. The `totp`, `passkey`, and `recovery` subpackages have their own services and stores and do not emit events; `Authenticate`'s 401 is not its own kind either — the decisions behind it (`session.expired`, `session.idle_expired`) already emit, and a kind for "a request arrived with no valid token" would make this a request log rather than a security-decision log.
+This taxonomy (`EventKind`/`Event`/`EventSink`/`WithEventSink`) covers the root package only. `totp` and `passkey` have their own services and stores and do not emit events. `recovery` is the one exception: it ships its own, independent `EventKind`/`Event`/`EventSink`/`WithEventSink` — see "Recovery codes and the 2FA lifecycle" under the `recovery` subpackage below for its three-kind taxonomy and for why it can't just reuse this one. `Authenticate`'s 401 is not its own kind either — the decisions behind it (`session.expired`, `session.idle_expired`) already emit, and a kind for "a request arrived with no valid token" would make this a request log rather than a security-decision log.
 
 ## Subpackages
 
@@ -530,9 +538,19 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
 
 `recovery` implements one-time recovery codes as a fallback second factor for when a user loses their TOTP device or passkey. `NewService(store, opts...)` defaults to generating 10 codes (`WithCount` to change it); each code is 10 bytes of `crypto/rand`, base32-encoded and displayed as `xxxx-xxxx-xxxx-xxxx`.
 
-`Generate(ctx, userID)` atomically replaces the user's entire code set and returns the plaintext codes for one-time display — only their SHA-256 hashes are persisted, so the plaintext cannot be recovered later. `Consume(ctx, userID, code)` normalizes the input (case, whitespace, and dash-grouping insensitive) and atomically consumes a single matching code, returning `ErrCodeInvalid` if none matches. `Remaining` reports the unused count (useful for prompting a user to regenerate); `Disable` removes all codes for a user.
+`Generate(ctx, userID)` atomically replaces the user's entire code set and returns the plaintext codes for one-time display — only their SHA-256 hashes are persisted, so the plaintext cannot be recovered later. `Consume(ctx, userID, code) (remaining int, err error)` normalizes the input (case, whitespace, and dash-grouping insensitive) and atomically consumes a single matching code, returning how many unused codes are left afterward, or `ErrCodeInvalid` (`remaining` is always 0 on error) if none matches. `Remaining(ctx, userID)` reports the unused count without consuming anything. `Disable(ctx, userID)` removes all codes for a user — see "Recovery codes and the 2FA lifecycle" below for its second job.
 
-`recovery` has no built-in rate limiter — see [Operational requirements](#operational-requirements).
+`recovery.WithLimiter(l Limiter)` configures a rate limiter Consume consults, keyed by `"recovery:"+userID`, before it ever hashes or looks up the submitted code — the interface is structurally identical to the root package's `Limiter` and `totp.Limiter` (`Allow(ctx, key) error`), so a single `sulis.MemoryLimiter` instance guards all three. A denied attempt returns `ErrCodeRateLimited`. The default (no limiter) is unchanged from before this option existed — recovery codes are 80 bits of `crypto/rand`, far larger than a TOTP code's 10^6 space, but still a value worth throttling if you don't already rate-limit this endpoint at another layer.
+
+#### Recovery codes and the 2FA lifecycle
+
+`recovery` only validates and consumes a code — it has no session store, no notification mechanism, and no idea what your product looks like, so it cannot do the following three things for you. A real integration should do all three itself, immediately after a successful `Consume`:
+
+1. **Revoke every other active session for the user** (e.g. the root package's `RevokeAllSessions`). A recovery-code login means the primary factor was lost, so a session an attacker already holds should not survive it — the same reasoning behind `sulis`'s own session revocation on a password change.
+2. **Record the event somewhere auditable.** `recovery.WithEventSink(sink)` routes `EventCodeConsumed` (carries the new `Remaining` count), `EventCodeRejected`, and `EventCodesExhausted` (emitted alongside `EventCodeConsumed` when `Remaining` hits 0) to an `EventSink` you configure — `Emit(ctx, Event)`, same shape as the root package's `EventSink`, but **not** wire-compatible with it: `Event`'s payload is a distinct type per package, so (unlike `Limiter`) one implementation cannot satisfy both interfaces. Write a small adapter if you want one unified event stream. As with the root taxonomy, no event field can hold the code or its hash.
+3. **Push the user toward re-enrolling a real second factor**, especially once `Consume`'s returned `remaining` reaches 0 (also reported as `EventCodesExhausted`). Recovery codes are a bridge back to a working TOTP credential or passkey, not a permanent substitute for one.
+
+Symmetrically, when the user's **last other second factor is removed** (their only TOTP credential unenrolled, their last passkey deleted), call `Disable(ctx, userID)` to purge whatever recovery codes are left over — a recovery code that outlives the factor it was meant to back up is no longer a fallback, it's the account's *only* remaining guard, silently. `recovery` cannot detect this moment itself (it has no visibility into `totp.Store` or `passkey.Store`), so this call is the calling application's responsibility, at the same point it would otherwise disable the 2FA setting on the account.
 
 ## Store Contracts
 
@@ -634,11 +652,11 @@ These are things the library deliberately leaves to the consumer. Skipping them 
 
 **Rate limiting is on by default.** `sulis.New` installs an in-process `MemoryLimiter` — a token bucket that resists password guessing, reset flooding, and magic-link flooding without any wiring. It is consulted on two dimensions: per account (`"password:"+email`, `"reset:"+email`, `"magic:"+email`) and, when you pass a `RequestInfo` carrying an IP, per client address (`"password:ip:"+ip`, and so on). Per-account budgets are deliberately generous and per-IP budgets tight, so an attacker can neither rotate the email to escape throttling nor lock a victim out by exhausting the victim's own allowance.
 
-The default is **per process**: with several instances behind a load balancer each enforces its own budget. Supply a shared implementation with `WithLimiter` for a multi-instance deployment — the interface is one method, `Allow(ctx, key) error`. `MemoryLimiter` also satisfies `totp.Limiter` structurally, so one instance can guard both packages; the totp service still needs it passed explicitly via `totp.WithLimiter`.
+The default is **per process**: with several instances behind a load balancer each enforces its own budget. Supply a shared implementation with `WithLimiter` for a multi-instance deployment — the interface is one method, `Allow(ctx, key) error`. `MemoryLimiter` also satisfies `totp.Limiter` and `recovery.Limiter` structurally, so one instance can guard all three; each subpackage's service still needs it passed explicitly, via `totp.WithLimiter`/`recovery.WithLimiter`, since neither imports the root package.
 
 To turn throttling off — for instance when an upstream gateway already enforces limits — call `WithoutRateLimiting()`. That is deliberately a visible line of code rather than the consequence of not writing one.
 
-Token-redemption calls (`ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`, `VerifyEmail`) are deliberately **not** throttled: the guessable space there is a 256-bit random token, not a password or a six-digit code, so rate limiting does not meaningfully raise the cost of an attack. `recovery.Consume` likewise relies on its 80-bit codes.
+Token-redemption calls (`ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`, `VerifyEmail`) are deliberately **not** throttled: the guessable space there is a 256-bit random token, not a password or a six-digit code, so rate limiting does not meaningfully raise the cost of an attack. `recovery.Consume` has an 80-bit code space of its own — larger still — but, unlike these token-redemption calls, it does accept an optional `recovery.WithLimiter`, since a recovery code is meant to be a rarely-used fallback rather than a value a legitimate caller ever needs to present at volume.
 
 **Schedule cleanup yourself.** `TokenStore.DeleteExpiredTokens` and `SessionStore.CleanExpired` exist so expired rows don't accumulate forever, but `sulis` never calls either — it runs no background workers. Run them on a periodic job (cron, a ticker goroutine, etc.). `ValidateSession` does delete a session it discovers is expired at validation time, but that's incidental to the read path, not a substitute for sweeping sessions and tokens that are never revisited.
 

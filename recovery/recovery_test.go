@@ -117,10 +117,10 @@ func TestGenerateReplacesPreviousSet(t *testing.T) {
 		t.Fatalf("Generate (second): %v", err)
 	}
 
-	if err := svc.Consume(ctx, "user1", oldCodes[0]); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, "user1", oldCodes[0]); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(old code): expected ErrCodeInvalid, got %v", err)
 	}
-	if err := svc.Consume(ctx, "user1", newCodes[0]); err != nil {
+	if _, err := svc.Consume(ctx, "user1", newCodes[0]); err != nil {
 		t.Fatalf("Consume(new code): expected nil, got %v", err)
 	}
 }
@@ -136,7 +136,7 @@ func TestConsumeAcceptsSloppyInput(t *testing.T) {
 	}
 	sloppy := "  " + strings.ToUpper(strings.ReplaceAll(codes[0], "-", "")) + "  "
 
-	if err := svc.Consume(ctx, "user1", sloppy); err != nil {
+	if _, err := svc.Consume(ctx, "user1", sloppy); err != nil {
 		t.Fatalf("Consume(sloppy): expected nil, got %v", err)
 	}
 }
@@ -175,10 +175,10 @@ func TestConsumeIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
 		t.Fatalf("first Consume: expected nil, got %v", err)
 	}
-	if err := svc.Consume(ctx, "user1", codes[0]); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, "user1", codes[0]); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("second Consume: expected ErrCodeInvalid, got %v", err)
 	}
 }
@@ -200,7 +200,7 @@ func TestConcurrentConsumeSingleWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = svc.Consume(ctx, "user1", code)
+			_, errs[i] = svc.Consume(ctx, "user1", code)
 		}(i)
 	}
 	wg.Wait()
@@ -238,7 +238,7 @@ func TestRemainingCounts(t *testing.T) {
 		t.Fatalf("expected 5 remaining, got %d", remaining)
 	}
 
-	if err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 	remaining, err = svc.Remaining(ctx, "user1")
@@ -295,5 +295,233 @@ func TestWithCountIgnoresNonPositiveValues(t *testing.T) {
 	}
 	if len(codes) != defaultCount {
 		t.Fatalf("expected default %d codes, got %d", defaultCount, len(codes))
+	}
+}
+
+// --- Consume's remaining count -----------------------------------------
+
+func TestConsumeReportsRemainingCount(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store, WithCount(2))
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	if err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("first Consume: remaining = %d, want 1", remaining)
+	}
+
+	remaining, err = svc.Consume(ctx, "user1", codes[1])
+	if err != nil {
+		t.Fatalf("second (last) Consume: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("second (last) Consume: remaining = %d, want 0", remaining)
+	}
+}
+
+func TestConsumeReturnsZeroRemainingOnRejection(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store)
+	ctx := context.Background()
+
+	if _, err := svc.Generate(ctx, "user1"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", "not-a-real-code")
+	if !errors.Is(err, ErrCodeInvalid) {
+		t.Fatalf("Consume(wrong code) error = %v, want ErrCodeInvalid", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("Consume(wrong code) remaining = %d, want 0", remaining)
+	}
+}
+
+// failingConsumeStore wraps memStore and, on demand, fails ConsumeCode or
+// CountCodes with a generic store error — distinct from ErrCodeNotFound,
+// the store's normal "no such code" signal — used to exercise Consume's
+// fail-closed propagation when the store itself misbehaves.
+type failingConsumeStore struct {
+	*memStore
+	failConsume bool
+	failCount   bool
+}
+
+func (f *failingConsumeStore) ConsumeCode(ctx context.Context, userID, hash string) error {
+	if f.failConsume {
+		return errors.New("simulated store failure")
+	}
+	return f.memStore.ConsumeCode(ctx, userID, hash)
+}
+
+func (f *failingConsumeStore) CountCodes(ctx context.Context, userID string) (int, error) {
+	if f.failCount {
+		return 0, errors.New("simulated store failure")
+	}
+	return f.memStore.CountCodes(ctx, userID)
+}
+
+// TestConsumePropagatesConsumeCodeStoreError pins that a generic
+// ConsumeCode failure (not ErrCodeNotFound) is returned to the caller
+// unchanged, rather than being folded into ErrCodeInvalid.
+func TestConsumePropagatesConsumeCodeStoreError(t *testing.T) {
+	store := &failingConsumeStore{memStore: newMemStore(), failConsume: true}
+	svc := NewService(store)
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	if err == nil || errors.Is(err, ErrCodeInvalid) {
+		t.Fatalf("Consume error = %v, want the raw store error propagated unchanged", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("Consume remaining = %d, want 0", remaining)
+	}
+}
+
+// TestConsumePropagatesCountCodesStoreError pins that Consume fails closed
+// — propagating the error rather than guessing a remaining count or
+// pretending the consumption never happened — if the code was
+// successfully consumed but the follow-up CountCodes call fails.
+func TestConsumePropagatesCountCodesStoreError(t *testing.T) {
+	store := &failingConsumeStore{memStore: newMemStore(), failCount: true}
+	svc := NewService(store)
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	if err == nil {
+		t.Fatal("Consume error = nil, want the CountCodes store error propagated")
+	}
+	if remaining != 0 {
+		t.Fatalf("Consume remaining = %d, want 0", remaining)
+	}
+}
+
+// --- The purge hook (Disable) -------------------------------------------
+
+// TestConsumeAfterDisablePurgesTheCode pins Disable as the purge hook an
+// application calls when the user's last OTHER second factor is removed
+// (see Disable's doc comment): once called, no code from the purged set may
+// authenticate anyone, and Consume must report zero remaining alongside
+// ErrCodeInvalid rather than some stale prior count.
+func TestConsumeAfterDisablePurgesTheCode(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store)
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if err := svc.Disable(ctx, "user1"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	if !errors.Is(err, ErrCodeInvalid) {
+		t.Fatalf("Consume after Disable error = %v, want ErrCodeInvalid — a purged code must not authenticate anyone", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("Consume after Disable remaining = %d, want 0", remaining)
+	}
+}
+
+// --- The rate limiter ----------------------------------------------------
+
+// fakeLimiter records every key it is asked about and denies (returning a
+// generic error) whenever denied is true. Mirrors totp's own fakeLimiter
+// test double exactly (totp/totp_test.go).
+type fakeLimiter struct {
+	mu     sync.Mutex
+	keys   []string
+	denied bool
+}
+
+func (f *fakeLimiter) Allow(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = append(f.keys, key)
+	if f.denied {
+		return errors.New("denied")
+	}
+	return nil
+}
+
+func (f *fakeLimiter) sawKey(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, k := range f.keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestConsumeConsultsLimiterBeforeCheckingCode mirrors totp's
+// TestValidateConsultsLimiterBeforeCheckingCode: a denied limiter refuses
+// the attempt — normalized to ErrCodeRateLimited — before the store is
+// ever touched, so the code is still there to use once the limiter allows.
+func TestConsumeConsultsLimiterBeforeCheckingCode(t *testing.T) {
+	store := newMemStore()
+	limiter := &fakeLimiter{denied: true}
+	svc := NewService(store, WithLimiter(limiter))
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	if !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("Consume error = %v, want ErrCodeRateLimited", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("Consume remaining = %d, want 0", remaining)
+	}
+	if !limiter.sawKey("recovery:user1") {
+		t.Fatalf("limiter keys = %v, want %q among them", limiter.keys, "recovery:user1")
+	}
+
+	// The limiter denied the attempt before the store was ever touched:
+	// the code must still be there, unconsumed, once the limiter allows.
+	limiter.denied = false
+	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+		t.Fatalf("Consume after limiter allows: %v", err)
+	}
+}
+
+// TestConsumeNilLimiterIsNoOp asserts that omitting WithLimiter (the
+// default) never denies anything.
+func TestConsumeNilLimiterIsNoOp(t *testing.T) {
+	store := newMemStore()
+	svc := NewService(store) // no WithLimiter
+	ctx := context.Background()
+
+	codes, err := svc.Generate(ctx, "user1")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+		t.Fatalf("Consume with no limiter configured: %v", err)
 	}
 }
