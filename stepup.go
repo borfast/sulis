@@ -49,6 +49,15 @@ func (s *Sulis) RequireRecentAuth(ctx context.Context, session *Session, maxAge 
 // returning early. Returns ErrInvalidCredentials for a passwordless account
 // or a wrong password — in neither case is AuthenticatedAt touched.
 //
+// A successful verification here can also upgrade the stored hash, exactly
+// like VerifyPassword's success path: if the hash is weaker than the
+// currently configured Argon2Params, it is re-hashed with the plaintext
+// just verified and written back, best-effort (see password.go's
+// needsRehash and sulis.go's rehashPassword). This is deliberate, not an
+// oversight left over from T504: ReAuthenticate is a real password
+// comparison against a real stored hash, so it upgrades the same as any
+// other one — see the T504 (fix round 1) Decisions row.
+//
 // Also returns ErrAccountDisabled/ErrAccountLocked via accountStatus,
 // checked right after loading the user and before spending an Argon2
 // verification on a call that cannot succeed either way. Unlike
@@ -91,6 +100,16 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 	}
 	if !ok {
 		return ErrInvalidCredentials
+	}
+
+	// The password just verified, so this is exactly the same
+	// weaker-than-configured-hash opportunity VerifyPassword's success path
+	// upgrades (see password.go's needsRehash and sulis.go's rehashPassword)
+	// — best-effort and swallowed on failure for the same reason: the caller
+	// already proved they know the password, so only the cost of the next
+	// comparison is at stake, not this call's correctness.
+	if needsRehash(user.PasswordHash, s.cfg.Argon2) {
+		s.rehashPassword(ctx, user, password)
 	}
 
 	now := time.Now()

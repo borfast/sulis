@@ -2986,6 +2986,67 @@ func TestReAuthenticateCorrectPasswordRefreshesAuthenticatedAt(t *testing.T) {
 	}
 }
 
+// TestReAuthenticateUpgradesWeakStoredHash is the regression test for the
+// T504 (fix round 1) Decisions row: ReAuthenticate is a real password
+// comparison against a real stored hash, so — like Login/VerifyPassword — a
+// successful call upgrades a hash weaker than the currently configured
+// Argon2Params, using the same needsRehash/rehashPassword path.
+func TestReAuthenticateUpgradesWeakStoredHash(t *testing.T) {
+	ctx := context.Background()
+	const (
+		email    = "alice@example.com"
+		password = "correct-horse-battery-staple"
+	)
+
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params))
+	user, session, _, err := weak.Register(ctx, email, password, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	before, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+	if !needsRehash(before.PasswordHash, testArgon2Params) {
+		t.Fatal("test setup is broken: the seeded hash must be weaker than testArgon2Params, or this test proves nothing")
+	}
+
+	if err := strong.ReAuthenticate(ctx, session, password, RequestInfo{}); err != nil {
+		t.Fatalf("ReAuthenticate: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash == before.PasswordHash {
+		t.Fatal("stored hash was not upgraded on a successful ReAuthenticate with a weaker-than-configured stored hash")
+	}
+
+	gotParams, _, _, err := decodeHash(after.PasswordHash)
+	if err != nil {
+		t.Fatalf("decodeHash(upgraded hash): %v", err)
+	}
+	if gotParams.Memory != testArgon2Params.Memory || gotParams.Iterations != testArgon2Params.Iterations || gotParams.Parallelism != testArgon2Params.Parallelism {
+		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
+	}
+
+	ok, err := verifyPassword(password, after.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("the password no longer verifies against its own upgraded hash")
+	}
+}
+
 // TestReAuthenticateWrongPasswordDoesNotRefreshStamp asserts that a wrong
 // password returns ErrInvalidCredentials and leaves AuthenticatedAt
 // untouched.

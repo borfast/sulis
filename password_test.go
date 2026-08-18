@@ -184,6 +184,24 @@ func TestNeedsRehash(t *testing.T) {
 		}
 	})
 
+	// TestNeedsRehash/HigherMemoryButFewerIterationsStillNeedsRehash pins the
+	// OR-not-AND rule explicitly: needsRehash must trigger if the stored hash
+	// is weaker in ANY single cost dimension, even when it is simultaneously
+	// stronger in another. A hash with more memory but fewer iterations than
+	// configured is not "on balance stronger" — it is weaker in the
+	// dimension that matters (an attacker's brute-force cost is bounded by
+	// the weakest dimension actually used), so it must still be upgraded.
+	t.Run("HigherMemoryButFewerIterationsStillNeedsRehash", func(t *testing.T) {
+		moreMemoryFewerIterations := Argon2Params{Memory: strong.Memory * 2, Iterations: 1, Parallelism: strong.Parallelism, SaltLength: 16, KeyLength: 16}
+		h, err := hashPassword(password, moreMemoryFewerIterations)
+		if err != nil {
+			t.Fatalf("hashPassword: %v", err)
+		}
+		if !needsRehash(h, strong) {
+			t.Fatal("a hash with more memory but fewer iterations than configured must still need a rehash — needsRehash is an OR across dimensions, not an AND")
+		}
+	})
+
 	t.Run("EqualParamsDoNotNeedRehash", func(t *testing.T) {
 		if needsRehash(strongHash, strong) {
 			t.Fatal("a hash already at the configured params must not need a rehash")
