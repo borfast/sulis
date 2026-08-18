@@ -240,6 +240,8 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
 
 These stores are part of the security boundary. They should enforce uniqueness where needed and persist enough data for expiry and revocation. Only some flows depend on specific sentinel errors from stores, such as `ErrUserNotFound`, `ErrUserAlreadyExists`, `ErrTokenNotFound`, and `recovery.ErrCodeNotFound`; other store errors are propagated or normalized by the service.
 
+**No store may share mutable state with its callers, in either direction.** `User.Metadata` and `Session.Metadata` are maps and `User.EmailVerifiedAt` is a pointer, so copying one of those structs with a plain `cp := *user` copies a map header and an address rather than the map and the time — which leaves the caller holding a live handle on the stored row and able to rewrite it without going through `UpdateUser` at all, stepping around the `Version` precondition rather than violating it. Copy the map (one level is enough; values inside it are the caller's business) and the pointed-to time both when storing and when returning. A store that reconstructs rows from a database read gets this for free; an in-memory or caching one does not. `storetest` checks it.
+
 ## Proving your stores correct
 
 Everything above is prose, and none of it is checked by the compiler: a store that returns the wrong error, or splits an atomic check-and-mutate into a read followed by a write, satisfies every interface in this module and still breaks the guarantees the library is built on. The `storetest` package turns those contracts into an executable suite you run against your own implementation. It is supported public API, and it is the intended integration path — not an internal test helper.

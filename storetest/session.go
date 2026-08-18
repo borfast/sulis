@@ -166,6 +166,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 	t.Run("ReturnedSessionsAreIndependentOfStoredState", func(t *testing.T) {
 		store := factory()
 		sess := newSession(uniqueID("user"))
+		sess.Metadata = map[string]any{"device": "laptop"}
 		wantUser := sess.UserID
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
@@ -176,6 +177,10 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 			t.Fatalf("GetSessionByTokenHash: %v", err)
 		}
 		read.UserID = uniqueID("hijacked")
+		// A struct copy copies a map header, not the map, so a store that
+		// does not clone Metadata hands every reader a live handle on the
+		// stored session.
+		mutateMetadata(read.Metadata)
 
 		after, err := store.GetSessionByTokenHash(ctx, sess.TokenHash)
 		if err != nil {
@@ -185,8 +190,11 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 			t.Fatalf("mutating the value returned by GetSessionByTokenHash changed the stored UserID to %q — a session whose owner a caller can rewrite is an account takeover",
 				after.UserID)
 		}
+		assertMetadataUnchanged(t, "GetSessionByTokenHash", after.Metadata, "device", "laptop")
 
 		sess.UserID = uniqueID("hijacked")
+		mutateMetadata(sess.Metadata)
+
 		final, err := store.GetSessionByTokenHash(ctx, after.TokenHash)
 		if err != nil {
 			t.Fatalf("GetSessionByTokenHash: %v", err)
@@ -194,6 +202,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		if final.UserID != wantUser {
 			t.Fatalf("mutating the *Session passed to CreateSession changed the stored UserID to %q", final.UserID)
 		}
+		assertMetadataUnchanged(t, "CreateSession", final.Metadata, "device", "laptop")
 	})
 
 	t.Run("ConcurrentDeleteSessionHasExactlyOneWinner", func(t *testing.T) {

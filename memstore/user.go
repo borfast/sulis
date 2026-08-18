@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"maps"
 	"sync"
 
 	"github.com/borfast/sulis"
@@ -46,8 +47,7 @@ func (s *UserStore) CreateUser(_ context.Context, user *sulis.User) error {
 		return sulis.ErrUserAlreadyExists
 	}
 
-	cp := *user
-	s.users[user.ID] = &cp
+	s.users[user.ID] = cloneUser(user)
 	return nil
 }
 
@@ -60,8 +60,7 @@ func (s *UserStore) GetUserByID(_ context.Context, id string) (*sulis.User, erro
 	if !ok {
 		return nil, sulis.ErrUserNotFound
 	}
-	cp := *u
-	return &cp, nil
+	return cloneUser(u), nil
 }
 
 // GetUserByEmail returns a copy of the user whose live e-mail address is
@@ -74,8 +73,7 @@ func (s *UserStore) GetUserByEmail(_ context.Context, email string) (*sulis.User
 
 	for _, u := range s.users {
 		if u.Email == email {
-			cp := *u
-			return &cp, nil
+			return cloneUser(u), nil
 		}
 	}
 	return nil, sulis.ErrUserNotFound
@@ -105,9 +103,9 @@ func (s *UserStore) UpdateUser(_ context.Context, user *sulis.User) error {
 		return sulis.ErrUserAlreadyExists
 	}
 
-	cp := *user
+	cp := cloneUser(user)
 	cp.Version = existing.Version + 1
-	s.users[user.ID] = &cp
+	s.users[user.ID] = cp
 	return nil
 }
 
@@ -119,6 +117,29 @@ func (s *UserStore) DeleteUser(_ context.Context, id string) error {
 
 	delete(s.users, id)
 	return nil
+}
+
+// cloneUser copies a user deeply enough that nothing mutable is shared across
+// the store boundary in either direction. A plain struct copy is not enough:
+// Metadata is a map and EmailVerifiedAt is a pointer, so a shallow copy leaves
+// the caller holding a live handle on the store's own state — able to rewrite
+// a persisted row without going through UpdateUser, which is exactly what
+// Version exists to make impossible.
+//
+// The map is cloned one level deep. Values inside it are copied as-is, so a
+// caller that puts a map or a slice in Metadata still shares that inner value
+// with the store; documented rather than chased, since sulis never reads
+// Metadata and cannot know how to copy an arbitrary any.
+func cloneUser(u *sulis.User) *sulis.User {
+	cp := *u
+	if u.Metadata != nil {
+		cp.Metadata = maps.Clone(u.Metadata)
+	}
+	if u.EmailVerifiedAt != nil {
+		when := *u.EmailVerifiedAt
+		cp.EmailVerifiedAt = &when
+	}
+	return &cp
 }
 
 // emailTakenLocked reports whether a user other than exceptID holds email.

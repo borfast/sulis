@@ -124,6 +124,47 @@ func uniqueHash(prefix string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// mutateMetadata rewrites a caller-held Metadata map the way an application
+// naturally would — overwriting an existing key and adding a new one. If a
+// store kept the caller's map rather than copying it, this reaches straight
+// into the persisted row. A nil map is left alone: a store is not obliged to
+// persist Metadata at all.
+func mutateMetadata(m map[string]any) {
+	if m == nil {
+		return
+	}
+	for k := range m {
+		m[k] = "mutated-by-the-caller"
+	}
+	m["injected-by-the-caller"] = true
+}
+
+// assertMetadataUnchanged checks that a Metadata map a store handed back still
+// holds the value it was stored with and gained nothing a caller added
+// afterwards.
+//
+// A store that does not persist Metadata at all returns nil (or an empty map)
+// and is not failed for it: the interfaces promise nothing about the field.
+// What they cannot allow is persisting it and then sharing the map, which
+// would let a caller rewrite a stored row without going through the write
+// path — the same lost-update problem Version exists to prevent, reached by a
+// different route.
+func assertMetadataUnchanged(t *testing.T, op string, got map[string]any, key string, want any) {
+	t.Helper()
+
+	if len(got) == 0 {
+		return
+	}
+	if v, ok := got[key]; ok && v != want {
+		t.Fatalf("%s: Metadata[%q] = %v, want %v — the store shares its map with the caller, so mutating the caller's copy rewrote a persisted row",
+			op, key, v, want)
+	}
+	if _, ok := got["injected-by-the-caller"]; ok {
+		t.Fatalf("%s: a key the caller added to its own map after handing it over appeared in the stored Metadata — the store must copy the map, not keep it",
+			op)
+	}
+}
+
 // race runs fn in racers goroutines that all block on one start gate and are
 // released together, so the calls overlap as tightly as the runtime allows.
 // It returns each goroutine's error, indexed by goroutine number.

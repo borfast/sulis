@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -26,8 +27,7 @@ func (s *SessionStore) CreateSession(_ context.Context, session *sulis.Session) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cp := *session
-	s.sessions[session.ID] = &cp
+	s.sessions[session.ID] = cloneSession(session)
 	return nil
 }
 
@@ -40,8 +40,7 @@ func (s *SessionStore) GetSessionByTokenHash(_ context.Context, tokenHash string
 
 	for _, sess := range s.sessions {
 		if sess.TokenHash == tokenHash {
-			cp := *sess
-			return &cp, nil
+			return cloneSession(sess), nil
 		}
 	}
 	return nil, sulis.ErrSessionNotFound
@@ -92,6 +91,22 @@ func (s *SessionStore) CleanExpired(_ context.Context) error {
 		}
 	}
 	return nil
+}
+
+// cloneSession copies a session deeply enough that nothing mutable is shared
+// across the store boundary in either direction. Metadata is a map, so a plain
+// struct copy would leave the caller holding a live handle on the stored
+// session — and a session a caller can rewrite outside CreateSession is a
+// session whose owner a caller can rewrite.
+//
+// The map is cloned one level deep; values inside it are copied as-is. See
+// cloneUser for why that line is drawn there.
+func cloneSession(sess *sulis.Session) *sulis.Session {
+	cp := *sess
+	if sess.Metadata != nil {
+		cp.Metadata = maps.Clone(sess.Metadata)
+	}
+	return &cp
 }
 
 // Len reports how many sessions are stored. It is not part of

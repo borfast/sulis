@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"sync"
@@ -44,8 +45,7 @@ func (s *memUserStore) CreateUser(_ context.Context, u *User) error {
 			return ErrUserAlreadyExists
 		}
 	}
-	cp := *u
-	s.users[u.ID] = &cp
+	s.users[u.ID] = cloneTestUser(u)
 	return nil
 }
 
@@ -56,8 +56,7 @@ func (s *memUserStore) GetUserByID(_ context.Context, id string) (*User, error) 
 	if !ok {
 		return nil, ErrUserNotFound
 	}
-	cp := *u
-	return &cp, nil
+	return cloneTestUser(u), nil
 }
 
 func (s *memUserStore) GetUserByEmail(_ context.Context, email string) (*User, error) {
@@ -65,8 +64,7 @@ func (s *memUserStore) GetUserByEmail(_ context.Context, email string) (*User, e
 	defer s.mu.Unlock()
 	for _, u := range s.users {
 		if u.Email == email {
-			cp := *u
-			return &cp, nil
+			return cloneTestUser(u), nil
 		}
 	}
 	return nil, ErrUserNotFound
@@ -105,10 +103,26 @@ func (s *memUserStore) UpdateUser(_ context.Context, u *User) error {
 			return ErrUserAlreadyExists
 		}
 	}
-	cp := *u
+	cp := cloneTestUser(u)
 	cp.Version = existing.Version + 1
-	s.users[u.ID] = &cp
+	s.users[u.ID] = cp
 	return nil
+}
+
+// cloneTestUser mirrors memstore's cloneUser: UserStore's contract forbids a
+// store from sharing mutable state with its callers, and a plain struct copy
+// shares Metadata's map and EmailVerifiedAt's pointer. Kept here so this
+// double is not weaker than the contract storetest holds real stores to.
+func cloneTestUser(u *User) *User {
+	cp := *u
+	if u.Metadata != nil {
+		cp.Metadata = maps.Clone(u.Metadata)
+	}
+	if u.EmailVerifiedAt != nil {
+		when := *u.EmailVerifiedAt
+		cp.EmailVerifiedAt = &when
+	}
+	return &cp
 }
 
 func (s *memUserStore) DeleteUser(_ context.Context, id string) error {
@@ -130,9 +144,17 @@ func newMemSessionStore() *memSessionStore {
 func (s *memSessionStore) CreateSession(_ context.Context, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := *sess
-	s.sessions[sess.ID] = &cp
+	s.sessions[sess.ID] = cloneTestSession(sess)
 	return nil
+}
+
+// cloneTestSession mirrors memstore's cloneSession; see cloneTestUser.
+func cloneTestSession(sess *Session) *Session {
+	cp := *sess
+	if sess.Metadata != nil {
+		cp.Metadata = maps.Clone(sess.Metadata)
+	}
+	return &cp
 }
 
 func (s *memSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash string) (*Session, error) {
@@ -140,8 +162,7 @@ func (s *memSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash str
 	defer s.mu.Unlock()
 	for _, sess := range s.sessions {
 		if sess.TokenHash == tokenHash {
-			cp := *sess
-			return &cp, nil
+			return cloneTestSession(sess), nil
 		}
 	}
 	return nil, ErrSessionNotFound

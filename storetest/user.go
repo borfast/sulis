@@ -245,6 +245,9 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 	t.Run("ReturnedUsersAreIndependentOfStoredState", func(t *testing.T) {
 		store := factory()
 		u := newUser()
+		u.Metadata = map[string]any{"role": "member"}
+		verifiedAt := time.Now().UTC().Truncate(time.Second)
+		u.EmailVerifiedAt = &verifiedAt
 		wantHash, wantEmail := u.PasswordHash, u.Email
 		if err := store.CreateUser(ctx, u); err != nil {
 			t.Fatalf("CreateUser: %v", err)
@@ -259,6 +262,13 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 		}
 		read.PasswordHash = "not persisted"
 		read.Email = uniqueEmail("not-persisted")
+		// A struct copy copies a map header, not the map, and a pointer, not
+		// what it points at. Both leave the caller holding a live handle on
+		// the stored row.
+		mutateMetadata(read.Metadata)
+		if read.EmailVerifiedAt != nil {
+			*read.EmailVerifiedAt = time.Unix(0, 0).UTC()
+		}
 
 		after, err := store.GetUserByID(ctx, u.ID)
 		if err != nil {
@@ -268,9 +278,16 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 			t.Fatalf("mutating the value returned by GetUserByID changed stored state (hash %q, email %q)",
 				after.PasswordHash, after.Email)
 		}
+		assertMetadataUnchanged(t, "GetUserByID", after.Metadata, "role", "member")
+		if after.EmailVerifiedAt != nil && after.EmailVerifiedAt.Equal(time.Unix(0, 0).UTC()) {
+			t.Fatal("mutating *EmailVerifiedAt on the value returned by GetUserByID changed stored state — the pointer must not be shared with the store")
+		}
 
 		// The same must hold for the value handed to CreateUser.
 		u.PasswordHash = "also not persisted"
+		mutateMetadata(u.Metadata)
+		*u.EmailVerifiedAt = time.Unix(0, 0).UTC()
+
 		final, err := store.GetUserByID(ctx, u.ID)
 		if err != nil {
 			t.Fatalf("GetUserByID: %v", err)
@@ -278,6 +295,27 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 		if final.PasswordHash != wantHash {
 			t.Fatalf("mutating the *User passed to CreateUser changed stored state (hash %q)", final.PasswordHash)
 		}
+		assertMetadataUnchanged(t, "CreateUser", final.Metadata, "role", "member")
+		if final.EmailVerifiedAt != nil && final.EmailVerifiedAt.Equal(time.Unix(0, 0).UTC()) {
+			t.Fatal("mutating *EmailVerifiedAt on the *User passed to CreateUser changed stored state")
+		}
+
+		// And for the value handed to UpdateUser, the other write path.
+		toUpdate, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		toUpdate.Metadata = map[string]any{"role": "admin"}
+		if err := store.UpdateUser(ctx, toUpdate); err != nil {
+			t.Fatalf("UpdateUser: %v", err)
+		}
+		mutateMetadata(toUpdate.Metadata)
+
+		updated, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		assertMetadataUnchanged(t, "UpdateUser", updated.Metadata, "role", "admin")
 	})
 
 	t.Run("ConcurrentUpdateUserFromOneReadHasExactlyOneWinner", func(t *testing.T) {

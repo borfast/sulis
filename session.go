@@ -23,6 +23,15 @@ type Session struct {
 }
 
 // SessionStore defines the persistence operations for sessions.
+//
+// A store MUST NOT share mutable state with its callers in either direction.
+// Metadata is a map, so copying a *Session with a plain struct assignment
+// copies a map header rather than the map, leaving the caller holding a live
+// handle on the stored session — and a session a caller can rewrite outside
+// CreateSession is a session whose UserID a caller can rewrite. Copy the map
+// (one level is enough) when storing a session and when returning one. Stores
+// that reconstruct rows from a database read get this for free; in-memory ones
+// do not. storetest.RunSessionStore checks it.
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *Session) error
 	GetSessionByTokenHash(ctx context.Context, tokenHash string) (*Session, error)

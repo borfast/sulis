@@ -22,10 +22,25 @@
 // them grows without limit. Use them for tests, examples, and local
 // development.
 //
-// # Concurrency
+// # Concurrency and isolation
 //
 // Every method is safe for concurrent use. Values returned to callers are
 // always copies, and values handed in are always copied before being stored,
 // so a caller mutating a struct it passed in or got back can never reach
 // inside the store.
+//
+// "Copy" here means deep enough that nothing mutable is shared: the maps
+// (sulis.User.Metadata, sulis.Session.Metadata), the slices
+// (passkey.Credential.CredentialID, PublicKey, AAGUID, Transports, and
+// challenge session data), and the pointers (sulis.User.EmailVerifiedAt,
+// passkey.Credential.LastUsedAt) are all cloned on the way in and on the way
+// out. A plain struct copy would not be: it copies a map header, not the map,
+// which would leave a caller able to rewrite a persisted row without going
+// through UpdateUser — precisely what sulis.User.Version exists to prevent.
+// The one documented limit is that maps are cloned one level deep, so a
+// caller that stores a map or a slice as a Metadata *value* still shares that
+// inner value with the store.
+//
+// This is not a memstore quirk. storetest enforces the same property on every
+// conforming implementation.
 package memstore

@@ -31,6 +31,17 @@ type User struct {
 // UserStore defines the persistence operations for users.
 // Consumers implement this interface for their own database.
 //
+// A store MUST NOT share mutable state with its callers in either direction.
+// Metadata is a map and EmailVerifiedAt is a pointer, so copying a *User with
+// a plain struct assignment copies a map header and an address, not the map
+// and not the time — leaving the caller holding a live handle on the stored
+// row. That is a way to rewrite a persisted user without going through
+// UpdateUser at all, which defeats the Version precondition below by simply
+// stepping around it. Copy the map (one level is enough; values inside it are
+// the caller's business) and the pointed-to time when storing a user and when
+// returning one. Stores that reconstruct rows from a database read get this
+// for free; in-memory ones do not. storetest.RunUserStore checks it.
+//
 // Email uniqueness MUST be enforced at the storage layer — e.g. a SQL UNIQUE
 // index on the normalized email column — and CreateUser and UpdateUser MUST
 // return ErrUserAlreadyExists when a write would violate it. This is not
