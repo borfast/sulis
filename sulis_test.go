@@ -4001,8 +4001,9 @@ func TestValidateSessionThrottlesTheLastSeenTouch(t *testing.T) {
 func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
+	ri := RequestInfo{IP: "203.0.113.9", UserAgent: "refresh-test-agent/1.0"}
 
-	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", ri)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4034,6 +4035,15 @@ func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
 	if fresh.Method != session.Method {
 		t.Fatalf("RefreshSession Method = %q, want %q", fresh.Method, session.Method)
 	}
+	// IP/UserAgent carry over from the stale in-memory session rather than
+	// being re-derived — RefreshSession takes no RequestInfo. Both docs
+	// promise this; pin it here.
+	if fresh.IP != ri.IP {
+		t.Errorf("RefreshSession IP = %q, want %q", fresh.IP, ri.IP)
+	}
+	if fresh.UserAgent != ri.UserAgent {
+		t.Errorf("RefreshSession UserAgent = %q, want %q", fresh.UserAgent, ri.UserAgent)
+	}
 
 	// The old token must stop validating...
 	if _, _, err := s.ValidateSession(ctx, oldToken); !errors.Is(err, ErrSessionNotFound) {
@@ -4046,6 +4056,95 @@ func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
 	}
 	if !validated.AuthenticatedAt.Equal(old) {
 		t.Fatalf("validated session AuthenticatedAt = %v, want unchanged %v", validated.AuthenticatedAt, old)
+	}
+}
+
+// TestRefreshSessionAfterRevokeSessionFailsClosed pins the CRITICAL fix:
+// RefreshSession must not let a caller holding a stale *Session mint a
+// brand-new working session for one that was already revoked. Before the
+// fix, RefreshSession created the new row before deleting the old one and
+// discarded the delete's error — so this exact sequence (revoke, then
+// refresh the now-stale *Session) minted a working replacement anyway,
+// letting the holder un-evict themselves.
+func TestRefreshSessionAfterRevokeSessionFailsClosed(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := s.RevokeSession(ctx, user.ID, session.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	before := sessions.count()
+	if _, _, err := s.RefreshSession(ctx, session); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("RefreshSession after RevokeSession: error = %v, want ErrSessionNotFound", err)
+	}
+	if got := sessions.count(); got != before {
+		t.Fatalf("RefreshSession after RevokeSession changed the session count: got %d, want unchanged %d — a new row must not have been created", got, before)
+	}
+}
+
+// TestRefreshSessionAfterDisableUserFailsClosed covers the CRITICAL fix's
+// scenario as originally reported: DisableUser's normal behavior revokes
+// every session for the account, so the stale *Session's row is already
+// gone by the time RefreshSession runs — the fail-closed DeleteSession
+// check below catches it the same way a plain revocation does.
+func TestRefreshSessionAfterDisableUserFailsClosed(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := s.DisableUser(ctx, session.UserID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	before := sessions.count()
+	if _, _, err := s.RefreshSession(ctx, session); err == nil {
+		t.Fatal("RefreshSession after DisableUser: error = nil, want an error")
+	}
+	if got := sessions.count(); got != before {
+		t.Fatalf("RefreshSession after DisableUser changed the session count: got %d, want unchanged %d — a new row must not have been created", got, before)
+	}
+}
+
+// TestRefreshSessionRejectsDisabledAccountWhoseSessionSurvived isolates the
+// second half of the CRITICAL fix from the first: disableUserDirect stamps
+// DisabledAt WITHOUT revoking the session (mirroring the real-world case
+// where DisableUser's own session-revocation call errors but its status
+// write still lands), so the stale *Session's row still exists when
+// RefreshSession runs. The fail-closed DeleteSession check alone would let
+// this one through — accountStatus is what actually stops it.
+func TestRefreshSessionRejectsDisabledAccountWhoseSessionSurvived(t *testing.T) {
+	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	disableUserDirect(t, users, session.UserID, "reported for abuse")
+
+	before := sessions.count()
+	if _, _, err := s.RefreshSession(ctx, session); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("RefreshSession for a disabled account whose session survived: error = %v, want ErrAccountDisabled", err)
+	}
+	if got := sessions.count(); got != before-1 {
+		t.Fatalf("RefreshSession against a disabled account left %d sessions, want %d — the old row must still be burned even though no new one was created", got, before-1)
+	}
+	// The old row is burned on the way to the error — consistent with the
+	// fail-closed direction: a disabled-account refresh attempt costs the
+	// caller their old session too, not just a denied new one.
+	if _, _, err := s.ValidateSession(ctx, oldToken); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ValidateSession(oldToken) after a disabled-account refresh attempt: error = %v, want ErrSessionNotFound", err)
 	}
 }
 

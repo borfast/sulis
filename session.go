@@ -236,10 +236,11 @@ func (s *Sulis) ListUserSessions(ctx context.Context, userID string) ([]Session,
 	return sessions, nil
 }
 
-// RefreshSession rotates session's token: it mints a new session row with a
-// new ID and a new raw token, then retires session's old row, extending
-// ExpiresAt from now while carrying UserID, Method, AuthenticatedAt,
-// CreatedAt, IP, UserAgent, and Metadata forward unchanged.
+// RefreshSession rotates session's token: it retires session's old row
+// first and, only if that succeeds, mints a new session row with a new ID
+// and a new raw token, extending ExpiresAt from now while carrying UserID,
+// Method, AuthenticatedAt, CreatedAt, IP, UserAgent, and Metadata forward
+// unchanged.
 //
 // AuthenticatedAt is preserved deliberately: a refresh is a liveness/
 // rotation operation, not a fresh authentication proof, and must not reset
@@ -256,13 +257,55 @@ func (s *Sulis) ListUserSessions(ctx context.Context, userID string) ([]Session,
 // previously-leaked session ID stops referring to anything live the moment
 // this call succeeds.
 //
-// The new row is created before the old one is deleted, so there is no
-// window where neither validates — a request racing the rotation with the
-// old token can still succeed until the delete completes, and the delete
-// failing is not fatal to the refresh (the caller already has a working
-// new session either way; a stale old row is reclaimed by its own natural
-// ExpiresAt if the delete is never retried).
+// The OLD row is deleted FIRST, and RefreshSession only proceeds to mint a
+// new one if that delete actually succeeds — this is a fail-closed liveness
+// check, not an optimization. Without it, a caller holding a stale *Session
+// obtained before a revocation (RevokeSession, RevokeAllSessions, or a
+// device evicted through the ListUserSessions screen this package builds)
+// could call RefreshSession and mint a brand-new working session anyway,
+// un-evicting themselves: CreateSession never consults whether the old row
+// still exists, so a create-then-delete order with the delete's result
+// discarded lets exactly that happen. DeleteSession returning
+// ErrSessionNotFound (the old row is already gone) is therefore propagated
+// verbatim, before any new row is created. This is the same "burn first,
+// validate second" direction consumeToken and passkey's ConsumeChallenge
+// already take ("failures burn the token") and the reason DeleteSession's
+// own ownership-scoped delete-with-error-on-zero-rows exists in the first
+// place: the cost is a crash window between the delete and the create
+// logging the caller out, which is the safe direction to fail in, not an
+// account left refreshable after it should not be.
+//
+// For the same reason, this reloads the user and checks accountStatus
+// before minting, closing the one remaining way a stale *Session could
+// still refresh into a live one: DisableUser's own session revocation could
+// legitimately fail (store error) while its DisabledAt stamp still lands,
+// leaving the old row intact for DeleteSession to happily remove above —
+// without this check, that would be enough to mint a fresh session for a
+// disabled account, since a newly-minted row never passes back through
+// ValidateSession's own DisabledAt gate. Both checks run after the delete
+// succeeds, so a disabled-account refresh still burns the caller's old
+// session on its way to ErrAccountDisabled, consistent with the fail-closed
+// direction above.
+//
+// RefreshSession takes no RequestInfo — Appendix A gives it none — so IP
+// and UserAgent are carried forward from the caller's (possibly stale)
+// in-memory session rather than re-derived from the current request. A
+// long-lived session refreshed repeatedly from a new IP can therefore show
+// a stale IP/UserAgent in a "where you're signed in" listing even while
+// LastSeenAt looks current; see the PROGRESS.md Decisions row.
 func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session, string, error) {
+	if err := s.sessions.DeleteSession(ctx, session.UserID, session.ID); err != nil {
+		return nil, "", err
+	}
+
+	user, err := s.users.GetUserByID(ctx, session.UserID)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.accountStatus(user); err != nil {
+		return nil, "", err
+	}
+
 	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
 	if err != nil {
 		return nil, "", err
@@ -289,7 +332,6 @@ func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session,
 	if err := s.sessions.CreateSession(ctx, fresh); err != nil {
 		return nil, "", err
 	}
-	_ = s.sessions.DeleteSession(ctx, session.UserID, session.ID)
 
 	return fresh, token, nil
 }
