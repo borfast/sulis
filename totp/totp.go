@@ -32,6 +32,13 @@ var (
 	ErrTOTPNotVerified = errors.New("totp: enrollment not verified")
 	ErrTOTPReplayed    = errors.New("totp: code already used")
 	ErrTOTPRateLimited = errors.New("totp: rate limited")
+
+	// ErrTOTPAlreadyEnrolled is returned by Enroll when the user already
+	// has an active (verified) TOTP credential. Enroll refuses outright
+	// rather than silently overwriting a working second factor — see
+	// Enroll's GoDoc and ReplaceEnrollment for the explicit path to
+	// supersede one on purpose.
+	ErrTOTPAlreadyEnrolled = errors.New("totp: already enrolled")
 )
 
 // Limiter enforces a rate limit for a caller-supplied key. It is declared
@@ -157,10 +164,45 @@ func NewService(store Store, issuer string, opts ...Option) (*Service, error) {
 	return &Service{store: store, cfg: cfg}, nil
 }
 
-// Enroll generates a new TOTP secret for the user and returns the base32-encoded
-// secret and an otpauth:// URI suitable for QR code generation.
-// The enrollment is not active until ConfirmEnrollment is called.
+// Enroll generates a new TOTP secret for the user and returns the
+// base32-encoded secret and an otpauth:// URI suitable for QR code
+// generation. The enrollment is stored as pending — not active, so
+// Validate will not accept codes for it — until ConfirmEnrollment verifies
+// the first code.
+//
+// Enroll refuses with ErrTOTPAlreadyEnrolled if the user already has an
+// active (verified) TOTP credential. A single stray call — a
+// double-submitted form, a CSRF'd POST, a retried request — must not be
+// able to silently replace a working second factor with an unconfirmed
+// one; use ReplaceEnrollment when the caller explicitly intends to
+// supersede an existing factor.
+//
+// Enrollment changes a security-relevant setting for the account: callers
+// should gate this endpoint behind recent re-authentication (see the
+// forthcoming RequireRecentAuth, T501) rather than a bare session.
 func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
+	return s.enroll(ctx, userID, accountName, false)
+}
+
+// ReplaceEnrollment generates a new TOTP secret for the user and stores it
+// as a pending enrollment, exactly like Enroll — except it succeeds even
+// when the user already has an active (verified) TOTP credential. This is
+// the explicit "I mean to replace my existing factor" path: the existing
+// active credential is left completely untouched, and Validate keeps
+// accepting codes for it, until ConfirmEnrollment verifies a code for the
+// new secret and promotes it.
+//
+// Enrollment changes a security-relevant setting for the account: callers
+// should gate this endpoint behind recent re-authentication (see the
+// forthcoming RequireRecentAuth, T501) rather than a bare session.
+func (s *Service) ReplaceEnrollment(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
+	return s.enroll(ctx, userID, accountName, true)
+}
+
+// enroll implements both Enroll (forceReplace=false) and ReplaceEnrollment
+// (forceReplace=true): the two differ only in which Store method they use
+// to guard (or not) against an existing active credential.
+func (s *Service) enroll(ctx context.Context, userID, accountName string, forceReplace bool) (secret, uri string, err error) {
 	secretBytes := make([]byte, s.cfg.SecretSize)
 	if _, err := rand.Read(secretBytes); err != nil {
 		return "", "", fmt.Errorf("totp: generating secret: %w", err)
@@ -176,38 +218,45 @@ func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secre
 		CreatedAt: time.Now(),
 	}
 
-	if err := s.store.SaveTOTP(ctx, cred); err != nil {
-		return "", "", err
+	if forceReplace {
+		if err := s.store.ReplacePending(ctx, cred); err != nil {
+			return "", "", err
+		}
+	} else {
+		if err := s.store.EnrollPending(ctx, cred); err != nil {
+			return "", "", err
+		}
 	}
 
 	uri = buildOTPAuthURI(s.cfg.Issuer, accountName, secret, s.cfg)
 	return secret, uri, nil
 }
 
-// ConfirmEnrollment verifies the first TOTP code to confirm enrollment.
+// ConfirmEnrollment verifies a code against the user's pending enrollment
+// and, if it matches, atomically promotes that enrollment to the active
+// credential Validate checks codes against (Store.ConfirmEnrollment). If
+// the pending enrollment was superseded by a racing Enroll or
+// ReplaceEnrollment between the read here and that promotion, this returns
+// ErrTOTPNotEnrolled — the same as if nothing were pending at all.
 func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) error {
 	if err := s.allow(ctx, "totp:"+userID); err != nil {
 		return err
 	}
 
-	cred, err := s.store.GetTOTPByUserID(ctx, userID)
+	pending, err := s.store.GetPendingTOTP(ctx, userID)
 	if err != nil {
 		return ErrTOTPNotEnrolled
 	}
 
-	counter, ok := s.matchCode(cred.Secret, code, time.Now())
+	counter, ok := s.matchCode(pending.Secret, code, time.Now())
 	if !ok {
 		return ErrTOTPInvalid
 	}
 
-	cred.Verified = true
-	// Monotonic: don't let a re-confirmation with an older (but still
-	// skew-valid) code roll the counter backward and re-open replay of
-	// codes already superseded by a prior confirmation or validation.
-	if counter > cred.LastUsedCounter {
-		cred.LastUsedCounter = counter
+	if _, err := s.store.ConfirmEnrollment(ctx, userID, pending.ID, counter); err != nil {
+		return ErrTOTPNotEnrolled
 	}
-	return s.store.SaveTOTP(ctx, cred)
+	return nil
 }
 
 // Validate checks a TOTP code for an enrolled, verified user. It returns nil
@@ -226,12 +275,17 @@ func (s *Service) Validate(ctx context.Context, userID, code string) error {
 		return err
 	}
 
-	cred, err := s.store.GetTOTPByUserID(ctx, userID)
+	cred, err := s.store.GetActiveTOTP(ctx, userID)
 	if err != nil {
+		// No active credential. Distinguish "never enrolled at all" from
+		// "enrolled, but the only enrollment on file is still pending
+		// confirmation" so callers get a distinct, actionable error
+		// either way; a pending enrollment never lets Validate succeed
+		// (see Store's active/pending separation).
+		if _, pendingErr := s.store.GetPendingTOTP(ctx, userID); pendingErr == nil {
+			return ErrTOTPNotVerified
+		}
 		return ErrTOTPNotEnrolled
-	}
-	if !cred.Verified {
-		return ErrTOTPNotVerified
 	}
 
 	counter, ok := s.matchCode(cred.Secret, code, time.Now())
