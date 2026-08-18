@@ -52,6 +52,10 @@ jobs:
       # -race is what makes that suite's concurrency subtests worth running:
       # they exist to catch a check-and-mutate that is really a read then a
       # write.
+      #
+      # The PostgreSQL store's conformance tests SKIP here, because
+      # SULIS_POSTGRES_TEST_URL is unset — exactly what a contributor without a
+      # database sees. The postgres job below is where they actually run.
       - name: build store/sql
         working-directory: store/sql
         run: go build ./...
@@ -61,6 +65,49 @@ jobs:
       - name: test store/sql
         working-directory: store/sql
         run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
+
+  postgres:
+    name: store/sql conformance (postgres)
+    runs-on: ubuntu-latest
+
+    # A real database, because that is the whole claim: the same unmodified
+    # storetest suite that memstore and the SQLite store pass must pass against
+    # PostgreSQL, whose concurrency the other two do not have. The image is
+    # pinned by digest for the same reason every action above is pinned by SHA
+    # — a tag is a moving target — and the tag it resolved to is named beside
+    # it so the next bump is a readable diff.
+    services:
+      postgres:
+        image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 # 17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sulis_test
+        ports:
+          - 5432:5432
+        # The job's steps do not start until this reports healthy, so the test
+        # run never races the server's first boot.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sulis_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      # -race, like every other run of this suite: the concurrency subtests are
+      # the point of running it against a real database at all. Every test
+      # function gets its own PostgreSQL schema and drops it afterwards, so the
+      # one database serves all seven conformance runs without them seeing each
+      # other's rows.
+      - name: test store/sql against postgres
+        working-directory: store/sql
+        env:
+          SULIS_POSTGRES_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/sulis_test?sslmode=disable
+        run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./postgres/...
 
   analyze:
     name: static analysis
