@@ -172,6 +172,10 @@ entry rather than many small ones — see `CONTRIBUTING.md`.
 
 ### Changed
 
+- The minimum supported Go version is now 1.26.6 (both modules' `go`
+  directives, the CI floor, and the README requirement moved together
+  from 1.25.0).
+
 - Sentinel errors are consistently prefixed by package: `sulis:`, `totp:`,
   `passkey:`, `recovery:`.
 - CI (`ci.yml`) pins third-party Actions to a SHA and runs static analysis
