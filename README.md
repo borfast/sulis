@@ -159,6 +159,8 @@ It supports enrollment (`Enroll`, pending until `ConfirmEnrollment`), explicit r
 
 `ConfirmEnrollment` promotes the pending enrollment to active atomically (`Store.ConfirmEnrollment`), carrying `LastUsedCounter` forward monotonically: if an active credential already existed (a replacement is being confirmed), the promoted credential's counter is never set lower than what the replaced factor had already recorded, so swapping factors can't roll a user's replay-protection clock backward.
 
+**A confirm retry looks like `ErrTOTPNotEnrolled`, not success.** Once `ConfirmEnrollment` promotes a pending enrollment, that slot is consumed exactly once. A double-submitted confirmation form, or a dropped HTTP response after the server already committed the promotion, means a second call with the same code finds nothing pending and also returns `ErrTOTPNotEnrolled` — even though the user is enrolled and the first call's factor is active and working. Don't render that error as "you are not enrolled"; check current status (e.g. via your own record of enrollment, or by attempting `Validate`) before reacting to a confirm retry.
+
 `totp.WithLimiter` configures a rate limiter (structurally identical to the root `Limiter` interface, declared separately so this package has no dependency on the root module) consulted by both `Validate` and `ConfirmEnrollment`, keyed by `"totp:"+userID`. A denied check returns `ErrTOTPRateLimited`. This is not optional in production: a 6-digit code is a 10^6 space, brute-forceable without a limiter.
 
 Enrollment changes a security-relevant setting for the account: gate `Enroll`/`ReplaceEnrollment` behind recent re-authentication in your application (a forthcoming `RequireRecentAuth` helper is planned) rather than a bare session.

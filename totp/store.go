@@ -150,6 +150,11 @@ type Store interface {
 	SaveTOTP(ctx context.Context, cred *Credential) error
 
 	// DeleteTOTP removes both userID's active credential and any pending
-	// enrollment.
+	// enrollment. Implementations MUST remove both in one atomic operation:
+	// a separate delete-active-then-delete-pending (or vice versa) would let
+	// a concurrent ConfirmEnrollment promotion land in the gap between the
+	// two deletes, leaving the just-promoted credential behind as a
+	// resurrected "active" factor the caller believed it had just removed
+	// entirely.
 	DeleteTOTP(ctx context.Context, userID string) error
 }

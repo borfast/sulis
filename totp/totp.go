@@ -234,10 +234,31 @@ func (s *Service) enroll(ctx context.Context, userID, accountName string, forceR
 
 // ConfirmEnrollment verifies a code against the user's pending enrollment
 // and, if it matches, atomically promotes that enrollment to the active
-// credential Validate checks codes against (Store.ConfirmEnrollment). If
-// the pending enrollment was superseded by a racing Enroll or
-// ReplaceEnrollment between the read here and that promotion, this returns
-// ErrTOTPNotEnrolled — the same as if nothing were pending at all.
+// credential Validate checks codes against (Store.ConfirmEnrollment).
+//
+// ConfirmEnrollment returns ErrTOTPNotEnrolled — the same as if nothing
+// were pending at all — in two distinct situations callers must not
+// conflate:
+//
+//  1. Racing enrollment: the pending enrollment was superseded by a
+//     concurrent Enroll or ReplaceEnrollment between the read here and the
+//     promotion, so the code that was validated no longer names anything
+//     current to promote.
+//  2. Retry of an already-succeeded confirm: this is also the common case
+//     in practice — a double-submitted confirmation form, or an HTTP
+//     response dropped after the server already committed the promotion.
+//     Once a pending enrollment is promoted, its slot is consumed exactly
+//     once (mirroring the single-use contract ConsumeToken/ConsumeChallenge
+//     place on their own resources); a second call with the same code
+//     finds no pending enrollment left and returns ErrTOTPNotEnrolled even
+//     though the user genuinely is enrolled and the first call's factor is
+//     active and working.
+//
+// Because of (2), an HTTP layer built on this must not render
+// ErrTOTPNotEnrolled from ConfirmEnrollment as "you are not enrolled" —
+// check the user's current enrollment status (e.g. via GetActiveTOTP)
+// before deciding how to react to a confirm retry, rather than trusting
+// the error alone.
 func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) error {
 	if err := s.allow(ctx, "totp:"+userID); err != nil {
 		return err

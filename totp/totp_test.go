@@ -569,6 +569,136 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 	}
 }
 
+// TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled covers the
+// "plain retry" branch of ConfirmEnrollment's contract documented in its
+// GoDoc: a double-submitted confirmation (or a dropped HTTP response after
+// the server already committed the promotion) calls ConfirmEnrollment a
+// second time with the same code. The pending enrollment was already
+// consumed by the first call, so the retry finds nothing pending and
+// returns ErrTOTPNotEnrolled — even though the user genuinely is enrolled
+// and the factor the first call promoted is active and untouched. This is
+// the ZERO-COVERAGE branch flagged in task review (totp.go's
+// `s.store.ConfirmEnrollment(...)` error path inside Service.ConfirmEnrollment).
+func TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled(t *testing.T) {
+	store := newMemTOTPStore()
+	svc := mustService(t, store, "TestApp")
+	ctx := context.Background()
+
+	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	code, err := svc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// First confirm: succeeds and promotes the pending enrollment.
+	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+		t.Fatalf("ConfirmEnrollment (first): %v", err)
+	}
+
+	// Retry with the exact same code (the double-submit/dropped-response
+	// scenario): nothing is pending any more, so this must fail with
+	// ErrTOTPNotEnrolled, not silently succeed again.
+	err = svc.ConfirmEnrollment(ctx, "user1", code)
+	if !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("ConfirmEnrollment (retry) error = %v, want ErrTOTPNotEnrolled", err)
+	}
+
+	// The retry must not have disturbed the factor the first call promoted:
+	// it stays active and untouched, and Validate keeps working for it.
+	active, err := store.GetActiveTOTP(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetActiveTOTP: %v", err)
+	}
+	if active.Secret != secret || !active.Verified {
+		t.Fatalf("active credential disturbed by retry: got %+v", active)
+	}
+
+	period := time.Duration(svc.cfg.Period) * time.Second
+	nextCode, err := svc.Generate(secret, time.Now().Add(period))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := svc.Validate(ctx, "user1", nextCode); err != nil {
+		t.Fatalf("Validate after retried confirm: %v", err)
+	}
+}
+
+// confirmRaceStore wraps memTOTPStore and, on the first GetPendingTOTP call,
+// injects a racing EnrollPending immediately after the read returns — before
+// Service.ConfirmEnrollment gets to call Store.ConfirmEnrollment with the ID
+// it just read. This deterministically drives Service.ConfirmEnrollment's
+// `s.store.ConfirmEnrollment(...)` compare-and-swap into its failure branch
+// without depending on actual goroutine scheduling, exercising the same
+// pendingID-mismatch path TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending
+// exercises via real concurrency, but from a single, deterministic call.
+type confirmRaceStore struct {
+	*memTOTPStore
+	raced bool
+}
+
+func (s *confirmRaceStore) GetPendingTOTP(ctx context.Context, userID string) (*Credential, error) {
+	cred, err := s.memTOTPStore.GetPendingTOTP(ctx, userID)
+	if err == nil && !s.raced {
+		s.raced = true
+		if raceErr := s.memTOTPStore.EnrollPending(ctx, &Credential{
+			ID:        "raced-pending",
+			UserID:    userID,
+			Secret:    "RACEDSECRET",
+			CreatedAt: time.Now(),
+		}); raceErr != nil {
+			panic("confirmRaceStore: unexpected EnrollPending failure: " + raceErr.Error())
+		}
+	}
+	return cred, err
+}
+
+// TestConfirmEnrollmentReturnsNotEnrolledWhenPendingSupersededMidCall is a
+// deterministic (non-racy) regression test for the pendingID
+// compare-and-swap branch inside Service.ConfirmEnrollment — the
+// `if _, err := s.store.ConfirmEnrollment(...); err != nil` line — which
+// TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled does NOT reach:
+// that test's retry short-circuits earlier, at GetPendingTOTP, since
+// promotion deletes the pending row entirely. This test instead simulates a
+// pending enrollment superseded (by a racing Enroll/ReplaceEnrollment)
+// strictly between Service's read and its call to the store's atomic
+// promotion, which is the scenario this branch exists to handle.
+func TestConfirmEnrollmentReturnsNotEnrolledWhenPendingSupersededMidCall(t *testing.T) {
+	base := newMemTOTPStore()
+	store := &confirmRaceStore{memTOTPStore: base}
+	svc := mustService(t, store, "TestApp")
+	ctx := context.Background()
+
+	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	code, err := svc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	err = svc.ConfirmEnrollment(ctx, "user1", code)
+	if !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("ConfirmEnrollment() error = %v, want ErrTOTPNotEnrolled", err)
+	}
+
+	// The stale read must not have promoted anything to active.
+	if _, err := store.GetActiveTOTP(ctx, "user1"); !errors.Is(err, ErrTOTPNotEnrolled) {
+		t.Fatalf("expected no active credential, got err = %v", err)
+	}
+	// The racing pending enrollment is the one left standing, untouched.
+	p, err := store.GetPendingTOTP(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetPendingTOTP: %v", err)
+	}
+	if p.ID != "raced-pending" {
+		t.Fatalf("expected raced-pending to remain pending, got %+v", p)
+	}
+}
+
 // TestMemTOTPStoreRejectsLoweredCounterForSameCredential asserts that the
 // reference in-memory store enforces the fail-closed monotonicity contract
 // documented on Store.SaveTOTP: a save for an existing ACTIVE credential ID
