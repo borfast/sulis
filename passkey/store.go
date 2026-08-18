@@ -110,12 +110,43 @@ type Store interface {
 
 	// DeleteCredential removes the credential identified by id (a
 	// Credential.ID value — the store's own opaque ID, not the raw
-	// WebAuthn Credential.CredentialID). It performs no last-credential
-	// check of its own: callers that must guard against deleting a
-	// passwordless account's only remaining credential should go through
-	// Service.DeleteCredential instead, which enforces that guard before
-	// calling this method.
-	DeleteCredential(ctx context.Context, id string) error
+	// WebAuthn Credential.CredentialID) if it belongs to userID.
+	//
+	// If id is userID's only remaining credential and allowLast is false,
+	// the store MUST refuse the deletion and return ErrLastCredential
+	// instead of removing it. The membership check, the remaining-count
+	// check, and the removal itself MUST happen as a single atomic
+	// operation with respect to any concurrent call for the same userID —
+	// this is the same requirement ChallengeStore.ConsumeChallenge,
+	// TokenStore.ConsumeToken, and recovery.Store.ConsumeCode already place
+	// on their own check-and-mutate operations, for the same reason: a
+	// separate read-then-write lets two concurrent callers each observe the
+	// pre-mutation state before either mutation lands. Concretely, without
+	// atomicity here, two goroutines each deleting one of a user's last two
+	// credentials could both read count==2, both pass the guard with
+	// allowLast==false, and both succeed — leaving the user with zero
+	// credentials, exactly the lockout state this guard exists to prevent,
+	// reached through the guarded path.
+	//
+	// Reference implementations: SQL — run the count check and the DELETE
+	// inside one transaction after locking the user's credential rows
+	// (SELECT ... FOR UPDATE), or express both in one statement, e.g.
+	// "DELETE FROM credentials WHERE id = $1 AND user_id = $2 AND
+	// ($3 OR (SELECT COUNT(*) FROM credentials WHERE user_id = $2) > 1)"
+	// and check the affected-row count to distinguish "deleted" from
+	// "refused" (also handling "id didn't exist" — see below). A
+	// single-threaded or mutex-guarded in-memory store can simply perform
+	// the check and the removal while holding the same lock.
+	//
+	// Returns ErrPasskeyNotFound if id does not name a credential owned by
+	// userID.
+	//
+	// Service.DeleteCredential is a thin wrapper around this method: the
+	// last-credential guard lives here, in the store, not in Service,
+	// specifically so the check and the mutation cannot be split across
+	// two separate calls the way a Service-level "load, check, then
+	// delete" would split them.
+	DeleteCredential(ctx context.Context, userID, id string, allowLast bool) error
 
 	// DeleteCredentialsByUserID removes every credential owned by userID —
 	// e.g. as part of deleting the user's whole account. It does not apply

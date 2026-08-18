@@ -423,6 +423,8 @@ func keysOf(m map[string][]byte) []string {
 }
 
 type fakeStore struct {
+	mu sync.Mutex
+
 	credentialsByUser     map[string][]Credential
 	credentialByID        map[string]*Credential
 	getCredentialsCalls   int
@@ -439,15 +441,21 @@ type fakeStore struct {
 func (f *fakeStore) SaveCredential(context.Context, *Credential) error { return nil }
 
 func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID string) ([]Credential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.getCredentialsCalls++
 	f.lastUserID = userID
 	if f.credentialsByUser == nil {
 		return nil, nil
 	}
-	return f.credentialsByUser[userID], nil
+	return append([]Credential(nil), f.credentialsByUser[userID]...), nil
 }
 
 func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*Credential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if f.credentialByID == nil {
 		return nil, errors.New("credential not found")
 	}
@@ -463,6 +471,9 @@ func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*
 // GetCredentialByID call — exactly what finishLoginCredential makes right
 // after this one — observes the update, the same as a real store would.
 func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID []byte, signCount uint32, backupState bool, lastUsedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.updateAfterLoginCalls++
 	if f.credentialByID == nil {
 		return nil
@@ -477,8 +488,36 @@ func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID [
 	return nil
 }
 
-func (f *fakeStore) DeleteCredential(_ context.Context, id string) error {
+// DeleteCredential implements the atomic last-credential guard documented on
+// Store.DeleteCredential: the membership check, the remaining-count check,
+// and the removal from both lookup maps all happen while holding f.mu, so
+// two concurrent calls for two different credentials belonging to the same
+// last-two-credential user cannot both observe count==2 before either
+// removal lands (see TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes).
+func (f *fakeStore) DeleteCredential(_ context.Context, userID, id string, allowLast bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.deleteCredentialCalls++
+
+	creds := f.credentialsByUser[userID]
+	idx := -1
+	for i, c := range creds {
+		if c.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return ErrPasskeyNotFound
+	}
+	if len(creds) <= 1 && !allowLast {
+		return ErrLastCredential
+	}
+
+	removed := creds[idx]
+	f.credentialsByUser[userID] = append(append([]Credential(nil), creds[:idx]...), creds[idx+1:]...)
+	delete(f.credentialByID, string(removed.CredentialID))
 	f.deletedCredentialID = id
 	return nil
 }
@@ -487,6 +526,9 @@ func (f *fakeStore) DeleteCredential(_ context.Context, id string) error {
 // for userID from both of its lookup maps, mirroring what a real store's
 // equivalent bulk delete would do.
 func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.deleteCredentialsByUserIDCalls++
 	f.deletedUserID = userID
 	if f.credentialsByUser == nil {
@@ -504,6 +546,9 @@ func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) 
 // returns ErrPasskeyNotFound if no credential has that ID — matching the
 // contract documented on Store.RenameCredential.
 func (f *fakeStore) RenameCredential(_ context.Context, id, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	for userID, creds := range f.credentialsByUser {
 		for i := range creds {
 			if creds[i].ID == id {
@@ -1386,8 +1431,15 @@ func TestDeleteCredentialRejectsLastCredentialWithoutOverride(t *testing.T) {
 	if !errors.Is(err, ErrLastCredential) {
 		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrLastCredential)
 	}
-	if store.deleteCredentialCalls != 0 {
-		t.Errorf("DeleteCredential() store calls = %d, want 0 (rejected before reaching the store)", store.deleteCredentialCalls)
+	if store.deletedCredentialID != "" {
+		t.Errorf("deleted credential ID = %q, want none (rejected)", store.deletedCredentialID)
+	}
+	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GetCredentialsByUserID() error = %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("user-1 has %d credentials remaining, want 1 (rejected deletion must not remove anything)", len(remaining))
 	}
 }
 
@@ -1407,11 +1459,15 @@ func TestDeleteCredentialAllowsLastCredentialWithOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteCredential() error = %v, want nil", err)
 	}
-	if store.deleteCredentialCalls != 1 {
-		t.Fatalf("DeleteCredential() store calls = %d, want 1", store.deleteCredentialCalls)
-	}
 	if store.deletedCredentialID != "cred-1" {
 		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
+	}
+	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GetCredentialsByUserID() error = %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("user-1 has %d credentials remaining, want 0", len(remaining))
 	}
 }
 
@@ -1434,6 +1490,13 @@ func TestDeleteCredentialAllowsNonLastCredentialWithoutOverride(t *testing.T) {
 	if store.deletedCredentialID != "cred-1" {
 		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
 	}
+	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GetCredentialsByUserID() error = %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != "cred-2" {
+		t.Fatalf("user-1 credentials = %v, want only cred-2 remaining", remaining)
+	}
 }
 
 // TestDeleteCredentialReturnsErrPasskeyNotFoundForUnknownCredential covers a
@@ -1452,8 +1515,81 @@ func TestDeleteCredentialReturnsErrPasskeyNotFoundForUnknownCredential(t *testin
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrPasskeyNotFound)
 	}
-	if store.deleteCredentialCalls != 0 {
-		t.Errorf("DeleteCredential() store calls = %d, want 0", store.deleteCredentialCalls)
+	if store.deletedCredentialID != "" {
+		t.Errorf("deleted credential ID = %q, want none", store.deletedCredentialID)
+	}
+}
+
+// TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes is the regression
+// test for a TOCTOU race a review found in the last-factor guard: a
+// get-count-then-delete guard implemented as two separate operations lets
+// two concurrent callers, each deleting one of a user's last two
+// credentials, both observe count==2 before either deletion lands — both
+// then pass the guard with AllowLast==false, and both succeed, leaving the
+// user with zero credentials. That is exactly the lockout state
+// DeleteOptions.AllowLast exists to prevent, reached through the guarded
+// path. Store.DeleteCredential's contract requires the membership check,
+// the remaining-count check, and the removal to be one atomic operation for
+// exactly this reason (the same requirement ChallengeStore.ConsumeChallenge,
+// TokenStore.ConsumeToken, and recovery.Store.ConsumeCode already place on
+// their own check-and-mutate operations).
+//
+// Modeled on T201's TestFinishDiscoverableLoginConsumesChallengeExactlyOnce:
+// both goroutines are released from a shared start gate on every iteration
+// to make the race as tight as possible, and the property is checked across
+// many iterations since a single run can get lucky.
+func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
+	const iterations = 200
+
+	for i := 0; i < iterations; i++ {
+		store := &fakeStore{credentialsByUser: map[string][]Credential{
+			"user-1": {
+				{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")},
+				{ID: "cred-2", UserID: "user-1", CredentialID: []byte("credential-2")},
+			},
+		}}
+		service := newTestService(t, store, newFakeChallengeStore())
+
+		const racers = 2
+		ids := [racers]string{"cred-1", "cred-2"}
+		start := make(chan struct{})
+		errs := make([]error, racers)
+		var wg sync.WaitGroup
+		wg.Add(racers)
+		for g := 0; g < racers; g++ {
+			g := g
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[g] = service.DeleteCredential(context.Background(), "user-1", ids[g], DeleteOptions{})
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		var succeeded, rejected int
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				succeeded++
+			case errors.Is(err, ErrLastCredential):
+				rejected++
+			default:
+				t.Fatalf("iteration %d: DeleteCredential() unexpected error = %v", i, err)
+			}
+		}
+		if succeeded != 1 || rejected != 1 {
+			t.Fatalf("iteration %d: got %d succeeded and %d rejected among %d racers, want exactly 1 and 1 (atomic last-credential guard violated)",
+				i, succeeded, rejected, racers)
+		}
+
+		remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+		if err != nil {
+			t.Fatalf("iteration %d: GetCredentialsByUserID() error = %v", i, err)
+		}
+		if len(remaining) != 1 {
+			t.Fatalf("iteration %d: user-1 has %d credentials remaining, want exactly 1 (zero would be the lockout the guard exists to prevent)", i, len(remaining))
+		}
 	}
 }
 

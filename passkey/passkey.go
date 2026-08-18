@@ -27,10 +27,11 @@ var (
 	// GoDoc for why the cap exists.
 	ErrCeremonyBodyTooLarge = errors.New("passkey: ceremony response body too large")
 
-	// ErrLastCredential is returned by Service.DeleteCredential when id
-	// names the only credential userID has registered and
-	// DeleteOptions.AllowLast was not set. See DeleteOptions for why this
-	// package can't decide that on its own.
+	// ErrLastCredential is returned by Service.DeleteCredential (via the
+	// atomic guard in Store.DeleteCredential) when id names the only
+	// credential userID has registered and DeleteOptions.AllowLast was not
+	// set. See DeleteOptions for why this package can't decide that on its
+	// own, and Store.DeleteCredential for why the guard must be atomic.
 	ErrLastCredential = errors.New("passkey: cannot delete the account's last credential without DeleteOptions.AllowLast")
 )
 
@@ -508,28 +509,18 @@ type DeleteOptions struct {
 // has a password or another second factor, so a caller whose account can
 // only ever authenticate via passkey must set AllowLast with particular
 // care.
+//
+// This method is a thin wrapper: the guard itself — the membership check,
+// the remaining-count check, and the removal — is implemented entirely by
+// Store.DeleteCredential as one atomic operation. It does not live here as
+// a separate "load, check, then delete" sequence, because that would
+// reopen exactly the race the guard exists to close: two concurrent calls
+// for two different credentials of the same last-two-credential user could
+// each load the pre-deletion count before either delete lands, both pass a
+// Service-level check, and both succeed — see Store.DeleteCredential's
+// GoDoc for the full reasoning and reference implementations.
 func (s *Service) DeleteCredential(ctx context.Context, userID, id string, opts DeleteOptions) error {
-	creds, err := s.store.GetCredentialsByUserID(ctx, userID)
-	if err != nil {
-		return err
-	}
-
-	var found bool
-	for _, c := range creds {
-		if c.ID == id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return ErrPasskeyNotFound
-	}
-
-	if len(creds) <= 1 && !opts.AllowLast {
-		return ErrLastCredential
-	}
-
-	return s.store.DeleteCredential(ctx, id)
+	return s.store.DeleteCredential(ctx, userID, id, opts.AllowLast)
 }
 
 // checkCeremonyBodySize rejects a ceremony response body larger than the
