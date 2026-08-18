@@ -220,6 +220,55 @@ func TestServiceWithEncryptorStoresCiphertextNotPlaintext(t *testing.T) {
 	}
 }
 
+// TestReplaceEnrollmentStoresCiphertextNotPlaintext is
+// TestServiceWithEncryptorStoresCiphertextNotPlaintext's counterpart for the
+// OTHER enrollment path. enroll's encryptSecret call sits ahead of the
+// forceReplace branch, so ReplaceEnrollment is safe by construction today —
+// but nothing pinned that fact, and a future split of Enroll/
+// ReplaceEnrollment into two independent code paths could silently drop the
+// encrypt call on one of them without any test catching it. This asserts
+// the no-plaintext property against ReplaceEnrollment's own write
+// (Store.ReplacePending), not just Enroll's (Store.EnrollPending).
+func TestReplaceEnrollmentStoresCiphertextNotPlaintext(t *testing.T) {
+	store := newMemTOTPStore()
+	enc, err := NewAESEncryptor(testAESKeyA)
+	if err != nil {
+		t.Fatalf("NewAESEncryptor: %v", err)
+	}
+	svc := mustService(t, store, "Example", WithEncryptor(enc))
+	ctx := context.Background()
+
+	// Establish a verified, active credential first, so ReplaceEnrollment
+	// is genuinely replacing something rather than enrolling from scratch.
+	firstSecret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	firstCode, err := svc.Generate(firstSecret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := svc.ConfirmEnrollment(ctx, "user-1", firstCode); err != nil {
+		t.Fatalf("ConfirmEnrollment: %v", err)
+	}
+
+	secret, _, err := svc.ReplaceEnrollment(ctx, "user-1", "user1@example.com")
+	if err != nil {
+		t.Fatalf("ReplaceEnrollment: %v", err)
+	}
+
+	pending, err := store.GetPendingTOTP(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("GetPendingTOTP: %v", err)
+	}
+	if pending.Secret == secret {
+		t.Fatal("the value reaching the store is the plaintext base32 secret")
+	}
+	if strings.Contains(pending.Secret, secret) {
+		t.Fatal("the value reaching the store contains the plaintext base32 secret")
+	}
+}
+
 // TestServiceWithEncryptorRoundTripsThroughEnrollConfirmValidate is the
 // second scenario from the task brief: Enroll -> ConfirmEnrollment ->
 // Validate all work with encryption on.
@@ -390,5 +439,101 @@ func TestServiceValidateFailsClosedWhenDecryptFails(t *testing.T) {
 	}
 	if errors.Is(err, ErrTOTPInvalid) || errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("Validate reported a decrypt failure as %v; it must be distinguishable from a semantic rejection", err)
+	}
+}
+
+// TestConfirmEnrollmentFailsClosedOnPreEncryptorPlaintextRow and
+// TestValidateFailsClosedOnPreEncryptorPlaintextRow cover the realistic
+// migration scenario this package does NOT support silently: a row written
+// while no Encryptor was configured (the default), read back later by a
+// Service that now has one configured (WithEncryptor turned on for the
+// first time on an existing deployment).
+//
+// AESEncryptor.Decrypt was NOT changed for this — it already fails closed
+// on this input, for one of two reasons depending on secret length: (1) a
+// stored secret whose base32-encoded length isn't a multiple of 4 fails
+// outright at base64 decoding; (2) a stored secret long enough that its
+// base32 alphabet (A-Z2-7, a subset of base64's) happens to decode as valid
+// base64 anyway (true for the default 20-byte/32-character secret size)
+// gets its first 8 "bytes" looked up as a key-ID fingerprint that was never
+// registered by any configured key, so it fails via errUnknownKeyID. Either
+// way, Decrypt returns a non-nil error rather than ever treating an
+// unrecognized value as if it were already plaintext. These tests exist so
+// that property stays true if AESEncryptor's internals ever change, and so
+// the behavior is pinned rather than left to be rediscovered by an operator
+// enabling encryption for the first time. See the README's "Encrypting
+// stored secrets" section and the T506 Decisions row for the documented
+// recovery path (re-enrollment).
+func TestConfirmEnrollmentFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
+	store := newMemTOTPStore()
+	ctx := context.Background()
+
+	// Seed a pending enrollment the old way: no Encryptor configured.
+	plainSvc := mustService(t, store, "Example")
+	secret, _, err := plainSvc.Enroll(ctx, "user-1", "user1@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	code, err := plainSvc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Confirm that same enrollment through a Service pointed at the same
+	// store, but now with an Encryptor configured — the "just turned
+	// encryption on" moment.
+	enc, err := NewAESEncryptor(testAESKeyA)
+	if err != nil {
+		t.Fatalf("NewAESEncryptor: %v", err)
+	}
+	encryptedSvc := mustService(t, store, "Example", WithEncryptor(enc))
+
+	err = encryptedSvc.ConfirmEnrollment(ctx, "user-1", code)
+	if err == nil {
+		t.Fatal("ConfirmEnrollment succeeded against a pre-encryption plaintext row; it must fail closed instead")
+	}
+	if errors.Is(err, ErrTOTPNotEnrolled) || errors.Is(err, ErrTOTPInvalid) {
+		t.Fatalf("ConfirmEnrollment reported the pre-encryption row's decrypt failure as %v; it must be distinguishable from a semantic rejection", err)
+	}
+}
+
+func TestValidateFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
+	store := newMemTOTPStore()
+	ctx := context.Background()
+
+	// Seed a fully active credential the old way: no Encryptor configured.
+	plainSvc := mustService(t, store, "Example")
+	secret, _, err := plainSvc.Enroll(ctx, "user-1", "user1@example.com")
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	code, err := plainSvc.Generate(secret, time.Now())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := plainSvc.ConfirmEnrollment(ctx, "user-1", code); err != nil {
+		t.Fatalf("ConfirmEnrollment: %v", err)
+	}
+
+	// Validate that same active credential through a Service pointed at the
+	// same store, but now with an Encryptor configured. The submitted code
+	// doesn't matter — decryption must fail before it is ever compared.
+	enc, err := NewAESEncryptor(testAESKeyA)
+	if err != nil {
+		t.Fatalf("NewAESEncryptor: %v", err)
+	}
+	encryptedSvc := mustService(t, store, "Example", WithEncryptor(enc))
+
+	anyCode, err := plainSvc.Generate(secret, time.Now().Add(time.Duration(plainSvc.cfg.Period)*time.Second))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	err = encryptedSvc.Validate(ctx, "user-1", anyCode)
+	if err == nil {
+		t.Fatal("Validate succeeded against a pre-encryption plaintext row; it must fail closed instead")
+	}
+	if errors.Is(err, ErrTOTPInvalid) || errors.Is(err, ErrTOTPReplayed) || errors.Is(err, ErrTOTPNotEnrolled) || errors.Is(err, ErrTOTPNotVerified) {
+		t.Fatalf("Validate reported the pre-encryption row's decrypt failure as %v; it must be distinguishable from a semantic rejection", err)
 	}
 }

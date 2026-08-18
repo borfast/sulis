@@ -99,6 +99,15 @@ type Config struct {
 	// factor: a leaked store yields every enrolled secret, usable
 	// indefinitely and silently, with no work factor standing between the
 	// leak and every account it can now generate valid codes for.
+	//
+	// Turning this on for the first time on an existing deployment does
+	// NOT retroactively encrypt rows already on file, and does not read
+	// them as plaintext either: ConfirmEnrollment/Validate's decryptSecret
+	// call fails closed against a pre-Encryptor row (a decode or unknown
+	// key-ID error — AESEncryptor never mistakes an unrecognized value for
+	// its own plaintext), so that enrollment simply stops working. The
+	// recovery path is re-enrollment, not a migration step this package
+	// performs for you — see the README's "Encrypting stored secrets".
 	Encryptor Encryptor
 }
 
