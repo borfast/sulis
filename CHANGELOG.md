@@ -257,8 +257,12 @@ closes (see `docs/threat-model.md` for the complete mapping):
   accepted the password, the one case where fail-closed's "no password
   without a completed check" promise did not actually hold. `HIBP.lookup`
   now surfaces that row as an error like any other failed lookup, so
-  fail-closed rejects it; the fail-open default is unchanged; a malformed
-  row for an unrelated suffix is still ignored.
+  fail-closed rejects it via an error wrapping the newly-exported
+  `passwordcheck.ErrMalformedResponse`, letting applications distinguish
+  corrupted-response data from transport failures with `errors.Is` and
+  build custom policy in their own `PasswordChecker` wrapper; the
+  fail-open default is unchanged; a malformed row for an unrelated
+  suffix is still ignored.
 
 ## Migration guide
 
