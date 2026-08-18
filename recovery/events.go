@@ -5,43 +5,6 @@ import (
 	"time"
 )
 
-// Security events.
-//
-// This file discharges the carry-forward recorded at T509 (see PROGRESS.md):
-// recovery-code use was the one security decision the sulis module could not
-// yet observe, because the root package's event sink (events.go) only wires
-// through the root package's own flows and this subpackage has no
-// dependency on it.
-//
-// # Why this can't reuse sulis.Limiter's trick
-//
-// totp.Limiter and this package's own Limiter (recovery.go) are declared
-// with an identical method set to sulis.Limiter — Allow(ctx, key string)
-// error — so a single sulis.MemoryLimiter instance satisfies all three via
-// Go's structural interface typing, with no import in either direction:
-// the signature carries only primitives (a string key, an error).
-//
-// EventSink cannot repeat that trick, and this file's separate taxonomy is
-// not an oversight. Emit's payload is Event, and Event is a distinct named
-// type in every package that declares one (sulis.Event here would be
-// recovery.Event). Go resolves interface satisfaction by the method's exact
-// parameter type, not by structural equivalence of that parameter's own
-// fields, so no single Emit method can simultaneously take sulis.Event and
-// recovery.Event — unlike a bare string, a struct type doesn't get to be
-// "the same shape" across packages without literally being the same type.
-// Importing sulis.Event here to force that would defeat the entire reason
-// this package declares its own Limiter instead of importing sulis.Limiter:
-// recovery must not depend on the root module.
-//
-// So recovery ships its own independent EventKind/Event/EventSink/
-// WithEventSink, mirroring root's DESIGN — a closed, dot-namespaced
-// taxonomy; a payload with no field that could hold a secret; a nil
-// default; a contained sink panic — without pretending to be
-// wire-compatible with it. An application that wants one unified event
-// stream writes a small adapter translating a recovery.Event into whatever
-// shape its own sink expects (a sulis.Event, a log line, a metric) and
-// registers it via both packages' WithEventSink.
-
 // EventKind names one recovery-code security decision. The values are
 // stable, lowercase, dot-namespaced strings — the same shape as the root
 // package's EventKind — safe to use as log field values, metric labels, or
@@ -101,6 +64,41 @@ type Event struct {
 }
 
 // EventSink receives recovery-code security events.
+//
+// # Why this can't reuse sulis.Limiter's trick
+//
+// This package discharges the carry-forward recorded at T509 (see
+// PROGRESS.md): recovery-code use was the one security decision the sulis
+// module could not yet observe, because the root package's event sink
+// (events.go) only wires through the root package's own flows and this
+// subpackage has no dependency on it.
+//
+// totp.Limiter and this package's own Limiter (recovery.go) are declared
+// with an identical method set to sulis.Limiter — Allow(ctx, key string)
+// error — so a single sulis.MemoryLimiter instance satisfies all three via
+// Go's structural interface typing, with no import in either direction:
+// the signature carries only primitives (a string key, an error).
+//
+// EventSink cannot repeat that trick, and this package's separate taxonomy
+// is not an oversight. Emit's payload is Event, and Event is a distinct
+// named type in every package that declares one (sulis.Event here would be
+// recovery.Event). Go resolves interface satisfaction by the method's exact
+// parameter type, not by structural equivalence of that parameter's own
+// fields, so no single Emit method can simultaneously take sulis.Event and
+// recovery.Event — unlike a bare string, a struct type doesn't get to be
+// "the same shape" across packages without literally being the same type.
+// Importing sulis.Event here to force that would defeat the entire reason
+// this package declares its own Limiter instead of importing sulis.Limiter:
+// recovery must not depend on the root module.
+//
+// So recovery ships its own independent EventKind/Event/EventSink/
+// WithEventSink, mirroring root's DESIGN — a closed, dot-namespaced
+// taxonomy; a payload with no field that could hold a secret; a nil
+// default; a contained sink panic — without pretending to be
+// wire-compatible with it. An application that wants one unified event
+// stream writes a small adapter translating a recovery.Event into whatever
+// shape its own sink expects (a sulis.Event, a log line, a metric) and
+// registers it via both packages' WithEventSink.
 //
 // Emit returns nothing: a sink has no way to fail Consume, so there is no
 // error for this package to propagate and no temptation to propagate one.

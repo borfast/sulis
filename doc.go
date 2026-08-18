@@ -112,10 +112,10 @@
 // one through them is a separate piece of work (see the T509 Decisions row
 // in PROGRESS.md). recovery does: its own independent EventKind, Event,
 // EventSink, and WithEventSink (recovery/events.go), deliberately not
-// wire-compatible with the root taxonomy — see that file's leading comment
-// for why. An application wanting one unified event stream writes a small
-// adapter translating a recovery.Event into whatever shape its own sink
-// expects.
+// wire-compatible with the root taxonomy — see recovery.EventSink's doc
+// comment for why. An application wanting one unified event stream writes
+// a small adapter translating a recovery.Event into whatever shape its own
+// sink expects.
 //
 // # Where to go next
 //

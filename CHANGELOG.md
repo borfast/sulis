@@ -25,8 +25,9 @@ entry rather than many small ones — see `CONTRIBUTING.md`.
 
 - `Session.Token` is gone. Every call that mints a session now returns the
   raw token as a separate value instead.
-- `Login` and `RedeemMagicLink` now return `*LoginResult` instead of
-  `(*User, *Session, error)`.
+- `Login`, `RedeemMagicLink`, and `CompleteTwoFactor` now return
+  `*LoginResult` instead of `(*User, *Session, error)`; `CompleteTwoFactor`
+  also gained a `RequestInfo` parameter.
 - `RevokeSession` now takes `(ctx, userID, sessionID)` — a caller can only
   revoke a session belonging to their own user ID.
 - `IssueSession` now takes an `Authentication` proof instead of a bare user
@@ -153,8 +154,10 @@ entry rather than many small ones — see `CONTRIBUTING.md`.
   both green against the full `storetest` suite. This is a separate Go
   module (`store/sql/go.mod`) with its own dependency graph and its own
   versioning — see README.md's "Versioning" section.
-- **Fuzz targets** (`fuzz_test.go`) for `decodeHash`, `totp.Generate`'s
-  epoch guard, and recovery-code canonicalization/hashing.
+- **Fuzz targets**: `FuzzDecodeHash` and `FuzzNormalizeEmail` (root
+  `fuzz_test.go`), `FuzzGenerateCode` (`totp/fuzz_test.go`, exercising the
+  epoch guard), and `FuzzRecoveryCanonical` (`recovery/fuzz_test.go`,
+  canonicalization/hashing).
 - **Package documentation**: `doc.go` (overview, minimal end-to-end
   example, store-contract summary) and compiler-checked `Example`
   functions (`example_test.go`) for password login with a second factor,
@@ -269,6 +272,16 @@ Now: `result, err := auth.Login(ctx, email, password, ri)`
 Do this: check `result.NeedsSecondFactor` first. If false, use
 `result.User`/`result.Session`/`result.SessionToken`; if true, use
 `result.PendingToken` with `CompleteTwoFactor`.
+
+**`CompleteTwoFactor` returns `*LoginResult` and takes `RequestInfo`**
+Was: `user, session, err := auth.CompleteTwoFactor(ctx, userID, rawToken)`
+Now: `result, err := auth.CompleteTwoFactor(ctx, userID, rawToken, ri)`
+Do this: pass the `RequestInfo` you have for this request, and read
+`result.User`/`result.Session`/`result.SessionToken` instead of the old
+positional returns — the same shape as `Login`'s `*LoginResult` above,
+since completing a second factor is the other half of that same flow.
+`NeedsSecondFactor` is always `false` here (there is no third factor), but
+the field still exists on the returned `*LoginResult`.
 
 **`RevokeSession` is user-scoped**
 Was: `auth.RevokeSession(ctx, sessionID)`
