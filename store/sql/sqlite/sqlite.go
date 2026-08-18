@@ -180,7 +180,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: beginning the migration: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer rollback(tx)
 
 	if _, err := tx.ExecContext(ctx, Schema); err != nil {
 		return fmt.Errorf("sulis/sqlite: applying the schema: %w", err)
