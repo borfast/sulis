@@ -130,13 +130,17 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 
 // FinishRegistration completes the WebAuthn registration ceremony.
 // The http.Request must contain the authenticator's response body.
+//
+// The challenge is consumed before verification runs, so a failed
+// verification still burns it — the safe direction, same policy as sulis's
+// consumeToken: a rejected registration cannot be retried against the same
+// challenge.
 func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Request) (*Credential, error) {
 	key := challengeKey("register", string(user.ID))
-	data, err := s.challenges.GetChallenge(ctx, key)
+	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
 		return nil, ErrChallengeExpired
 	}
-	defer s.challenges.DeleteChallenge(ctx, key)
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
@@ -167,39 +171,51 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 }
 
 // BeginLogin starts the WebAuthn authentication ceremony.
-// Returns the credential assertion options to send to the client.
-func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.CredentialAssertion, error) {
+// Returns the credential assertion options to send to the client and a
+// ceremony ID that the caller must round-trip to FinishLogin. The challenge
+// is keyed by this ceremony ID rather than by user ID so that a second login
+// ceremony started for the same user (e.g. from a different device) cannot
+// clobber the first ceremony's saved challenge.
+func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.CredentialAssertion, string, error) {
 	// Load credentials from store.
 	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(creds) == 0 {
-		return nil, ErrPasskeyNotFound
+		return nil, "", ErrPasskeyNotFound
 	}
 	user.Credentials = creds
 
 	assertion, sessionData, err := s.wa.BeginLogin(user, webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
-		return nil, fmt.Errorf("passkey: begin login: %w", err)
+		return nil, "", fmt.Errorf("passkey: begin login: %w", err)
 	}
 
 	data, err := json.Marshal(sessionData)
 	if err != nil {
-		return nil, fmt.Errorf("passkey: marshaling session: %w", err)
+		return nil, "", fmt.Errorf("passkey: marshaling session: %w", err)
 	}
 
-	if err := s.challenges.SaveChallenge(ctx, challengeKey("login", string(user.ID)), data); err != nil {
-		return nil, err
+	ceremonyID := generateID()
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("login", ceremonyID), data); err != nil {
+		return nil, "", err
 	}
 
-	return assertion, nil
+	return assertion, ceremonyID, nil
 }
 
-// FinishLogin completes the WebAuthn authentication ceremony.
+// FinishLogin completes the WebAuthn authentication ceremony started by
+// BeginLogin. ceremonyID must be the value returned by the matching
+// BeginLogin call.
 // The http.Request must contain the authenticator's response body.
 // Returns the credential that was used for authentication.
-func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) (*Credential, error) {
+//
+// The challenge is consumed before verification runs, so a failed
+// verification still burns it — the safe direction, same policy as sulis's
+// consumeToken: a rejected assertion cannot be retried against the same
+// challenge.
+func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string, r *http.Request) (*Credential, error) {
 	// Load credentials from store.
 	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
 	if err != nil {
@@ -207,12 +223,11 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, r *http.Request) 
 	}
 	user.Credentials = creds
 
-	key := challengeKey("login", string(user.ID))
-	data, err := s.challenges.GetChallenge(ctx, key)
+	key := challengeKey("login", ceremonyID)
+	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
 		return nil, ErrChallengeExpired
 	}
-	defer s.challenges.DeleteChallenge(ctx, key)
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
@@ -256,13 +271,17 @@ func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.Credent
 // caller.
 // The http.Request must contain the authenticator's response body.
 // Returns the credential that was used for authentication.
+//
+// The challenge is consumed before verification runs, so a failed
+// verification still burns it — the safe direction, same policy as sulis's
+// consumeToken: a rejected assertion cannot be retried against the same
+// challenge.
 func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string, r *http.Request) (*Credential, error) {
 	key := challengeKey("discover", ceremonyID)
-	data, err := s.challenges.GetChallenge(ctx, key)
+	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
 		return nil, ErrChallengeExpired
 	}
-	defer s.challenges.DeleteChallenge(ctx, key)
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {

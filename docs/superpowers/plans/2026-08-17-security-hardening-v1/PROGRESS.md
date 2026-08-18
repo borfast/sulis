@@ -60,15 +60,16 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 ## Current position
 
 **Branch:** `security-hardening-v1` (branched from `main` at `bf18c6e`). All work happens here; not yet pushed.
-**Status:** T001, T002, T101–T107 done. Phase 1 complete.
-**Next task:** T201 — atomic passkey challenge consumption (first task of Phase 2).
-**Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally. Coverage: 84.6% root, 61.6% passkey, 92.1% recovery, 86.1% totp.
+**Status:** T001, T002, T101–T107, T201 done. Phase 1 complete; Phase 2 in progress.
+**Next task:** T202 — populate `excludeCredentials` from the store.
+**Tree:** GREEN. `gofmt`, `go build`, `go vet`, `staticcheck`, `gosec`, `govulncheck`, and `go test -race -count=1 ./...` all pass locally. Coverage: 84.6% root, 68.2% passkey, 92.1% recovery, 86.1% totp.
 **Blockers:** None. CI has not run on GitHub yet — the branch is unpushed, so the workflow is verified locally only. Push and confirm the workflow is green before relying on it.
 
 **Carry-forward for whoever picks this up:**
-- All 9 completed tasks are committed; the working tree is clean apart from pre-existing untracked files (`.claude/`, `.codegraph/`, `AGENTS.md`, `CLAUDE.md`).
+- All 10 completed tasks are committed; the working tree is clean apart from pre-existing untracked files (`.claude/`, `.codegraph/`, `.gitnexus/`, `AGENTS.md`, `CLAUDE.md`).
 - **T206 owes an end-to-end test.** T105 verified that user verification is requested and recorded in session data, not that a UV-absent assertion is rejected. That needs a forging test authenticator, which T206 must build. Do not close T206 without it.
 - Every finding fixed so far was mutation-tested — the regression test was confirmed to fail when the fix is reverted. Keep doing that for the security-critical ones; a test that cannot fail is decoration.
+- T201's TDD red was unusually informative: running the new concurrency test against the pre-fix get-then-`defer`-delete code under `-race` didn't just fail the logical assertion (0 of 2 racers got `ErrChallengeExpired` — both proceeded past the "expired" gate), it also tripped the race detector on the un-mutexed in-memory test double's map (concurrent read/delete). Both symptoms point at the same underlying bug; see the T201 Session log entry.
 
 ---
 
@@ -90,7 +91,7 @@ EmailVerifiedAt. Register and magic-link redemption stay exempt.
 - [x] **T107** · C1 · Own the email-change flow
 
 ### Phase 2 — Passkey hardening
-- [ ] **T201** · A4 · Atomic challenge consumption
+- [x] **T201** · A4 · Atomic challenge consumption
 - [ ] **T202** · A5 · Populate `excludeCredentials` from the store
 - [ ] **T203** · A6 · Request resident keys
 - [ ] **T204** · A7 · Bound the ceremony body, decouple from `net/http`
@@ -190,6 +191,7 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 | T107 | `ChangeEmail`'s uniqueness check runs once before staging; `ConfirmEmailChange`'s re-runs inside the `updateUserWithRetry` closure, against the freshly loaded row, on every attempt | Staging doesn't make an address live, so a race there is harmless. Confirmation is where the address actually becomes live, so that check must hold against current state, not the state read before the retry loop started — matching `updateUserWithRetry`'s existing re-establish-invariants contract |
 | T107 | `stampEmailVerified` (idempotent, no-op if already verified) is not reused by `ConfirmEmailChange` | Confirmation must re-stamp unconditionally with a fresh timestamp even though `EmailVerifiedAt` was already non-nil for the old address — idempotent semantics would make it a no-op and leave the old address's stamp in place for the new one |
 | T107 (fix round 1) | `UserStore` GoDoc now states email uniqueness MUST be enforced at the storage layer, with `CreateUser`/`UpdateUser` returning `ErrUserAlreadyExists` on violation | `Version` only guards a lost update on a single row; two different rows racing to claim the same address (e.g. two accounts both confirming a change to the same staged address) can't be prevented above the store interface. `ConfirmEmailChange`'s own `GetUserByEmail` re-check is a best-effort early rejection, not the guarantee — found in code review |
+| T201 | **Extends `PLAN.md` Appendix A** (which names only the `ChallengeStore` method change): `FinishLogin`'s signature changes from `(ctx, user, r)` to `(ctx, user, ceremonyID, r)`, matching `BeginLogin`'s new `(*protocol.CredentialAssertion, string, error)` return | Login challenges move from a per-user key to a per-ceremony key so a second login ceremony for the same user can't clobber the first device's in-flight challenge — the same reasoning `BeginDiscoverableLogin`/`FinishDiscoverableLogin` already used. The ceremony ID has to round-trip through the caller, so `FinishLogin` must accept it. Registration keying stays per-user; the plan only calls for this on login |
 
 ---
 
@@ -220,6 +222,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-18 | T106 | `MemoryLimiter` token bucket is now the default; `WithoutRateLimiting()` to opt out; per-account and per-IP budgets wired into password, reset and magic-link choke points; key tracking bounded |
 | 2026-08-18 | T107 | `changeemail.go`: `ChangeEmail`/`ConfirmEmailChange`, `User.PendingEmail`, `TokenPurposeEmailChange`. Confirmation swaps the address, clears `PendingEmail`, re-stamps `EmailVerifiedAt` with a fresh timestamp, and revokes all sessions plus purges password-reset and two-factor tokens. Mutation-tested: reverting the session/token purge or the `token.Email == PendingEmail` check each fail the corresponding regression test. Phase 1 complete |
 | 2026-08-18 | T107 (fix round 1) | Closed a cross-account race review found: two accounts confirming the same staged address could both pass `ConfirmEmailChange`'s `GetUserByEmail` pre-check before either write landed, since `Version` only guards one row. `UserStore` GoDoc now mandates storage-layer email-uniqueness enforcement (`ErrUserAlreadyExists` from `CreateUser`/`UpdateUser`); `memUserStore.UpdateUser` (test double) now enforces it; new test `TestConfirmEmailChangeAbortsIfAnotherAccountWinsTheRace` interleaves two confirmations via the existing `beforeUpdate` hook. Mutation-tested: reverting the test-store enforcement fails only that test |
+| 2026-08-18 | T201 | `ChallengeStore.GetChallenge`/`DeleteChallenge` replaced by `ConsumeChallenge(ctx, key) ([]byte, error)`, an atomic fetch-and-delete (GoDoc names Redis `GETDEL` and SQL `DELETE ... RETURNING` as reference implementations). All four `Finish*` methods now consume before verifying, so a failed verification still burns the challenge (documented as the same safe-direction policy as `consumeToken`). `BeginLogin` now returns `(*protocol.CredentialAssertion, string, error)` — a ceremony ID like `BeginDiscoverableLogin` already did — and `FinishLogin` takes that ceremony ID, keying login challenges per-ceremony instead of per-user so a second login ceremony can't clobber the first device's challenge. TDD: wrote `TestFinishDiscoverableLoginConsumesChallengeExactlyOnce` (200 iterations, shared start gate, `-race`) against the unmodified get-then-`defer`-delete code first — it failed deterministically at iteration 0/1 every run (0 of 2 racers got `ErrChallengeExpired`; both proceeded past the gate), and separately tripped the race detector on the un-mutexed in-memory test double's map. Mutation-tested: removing the `delete` from the fixed `ConsumeChallenge` reproduces the same iteration-0 failure; restored |
 
 ---
 

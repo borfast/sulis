@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -57,15 +58,18 @@ func TestBeginLoginSavesChallenge(t *testing.T) {
 		DisplayName: "User One",
 	}
 
-	assertion, err := service.BeginLogin(context.Background(), user)
+	assertion, ceremonyID, err := service.BeginLogin(context.Background(), user)
 	if err != nil {
 		t.Fatalf("BeginLogin() error = %v", err)
 	}
 	if assertion == nil {
 		t.Fatal("BeginLogin() returned nil assertion")
 	}
+	if ceremonyID == "" {
+		t.Fatal("BeginLogin() returned empty ceremony ID")
+	}
 
-	session := mustLoadSavedSession(t, challenges, challengeKey("login", string(user.ID)))
+	session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
@@ -82,12 +86,15 @@ func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.
 	service := newTestService(t, store, challenges)
 	user := &User{ID: []byte("user-1")}
 
-	assertion, err := service.BeginLogin(context.Background(), user)
+	assertion, ceremonyID, err := service.BeginLogin(context.Background(), user)
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("BeginLogin() error = %v, want %v", err, ErrPasskeyNotFound)
 	}
 	if assertion != nil {
 		t.Fatalf("BeginLogin() assertion = %#v, want nil", assertion)
+	}
+	if ceremonyID != "" {
+		t.Fatalf("BeginLogin() ceremony ID = %q, want empty", ceremonyID)
 	}
 	if len(challenges.saved) != 0 {
 		t.Fatalf("BeginLogin() saved %d challenges, want 0", len(challenges.saved))
@@ -129,7 +136,7 @@ func TestFinishLoginReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T)
 	service := newTestService(t, store, challenges)
 	user := &User{ID: []byte("user-1")}
 
-	cred, err := service.FinishLogin(context.Background(), user, httptestNewRequest(t))
+	cred, err := service.FinishLogin(context.Background(), user, "missing-ceremony-id", httptestNewRequest(t))
 	if !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("FinishLogin() error = %v, want %v", err, ErrChallengeExpired)
 	}
@@ -160,7 +167,8 @@ func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
 	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
 		t.Fatalf("BeginRegistration() error = %v", err)
 	}
-	if _, err := service.BeginLogin(context.Background(), user); err != nil {
+	_, ceremonyID, err := service.BeginLogin(context.Background(), user)
+	if err != nil {
 		t.Fatalf("BeginLogin() error = %v", err)
 	}
 
@@ -168,9 +176,10 @@ func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
 	if !ok || len(registerData) == 0 {
 		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "register:user-1", keysOf(challenges.saved))
 	}
-	loginData, ok := challenges.saved["login:user-1"]
+	loginKey := challengeKey("login", ceremonyID)
+	loginData, ok := challenges.saved[loginKey]
 	if !ok || len(loginData) == 0 {
-		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "login:user-1", keysOf(challenges.saved))
+		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", loginKey, keysOf(challenges.saved))
 	}
 	if len(challenges.saved) != 2 {
 		t.Fatalf("challenges.saved has %d entries, want 2 (got keys = %v)", len(challenges.saved), keysOf(challenges.saved))
@@ -189,7 +198,8 @@ func TestFinishLoginWrapsUnderlyingError(t *testing.T) {
 	service := newTestService(t, store, challenges)
 	user := &User{ID: []byte("user-1")}
 
-	if _, err := service.BeginLogin(context.Background(), user); err != nil {
+	_, ceremonyID, err := service.BeginLogin(context.Background(), user)
+	if err != nil {
 		t.Fatalf("BeginLogin() error = %v", err)
 	}
 
@@ -199,7 +209,7 @@ func TestFinishLoginWrapsUnderlyingError(t *testing.T) {
 	}
 	badRequest.Header.Set("Content-Type", "application/json")
 
-	cred, err := service.FinishLogin(context.Background(), user, badRequest)
+	cred, err := service.FinishLogin(context.Background(), user, ceremonyID, badRequest)
 	if !errors.Is(err, ErrChallengeFailed) {
 		t.Fatalf("FinishLogin() error = %v, want errors.Is(err, ErrChallengeFailed)", err)
 	}
@@ -300,6 +310,70 @@ func TestFinishDiscoverableLoginWithoutChallengeReturnsErrChallengeExpired(t *te
 	}
 }
 
+// TestFinishDiscoverableLoginConsumesChallengeExactlyOnce is the regression
+// test for audit finding A4: get-then-defer-delete lets two concurrent
+// finishes of the same ceremony both read the challenge before either
+// deletes it, so both proceed past the "challenge expired" gate. Exactly one
+// of the two racing calls must be told the challenge is gone
+// (ErrChallengeExpired); the other may fail verification for its own
+// reasons, but it must not also be told the challenge was missing.
+//
+// Both goroutines are released from a shared start gate on every iteration
+// to make the race as tight as possible, and the property is checked across
+// many iterations rather than once, since a single run can get lucky.
+func TestFinishDiscoverableLoginConsumesChallengeExactlyOnce(t *testing.T) {
+	const iterations = 200
+
+	for i := 0; i < iterations; i++ {
+		store := &fakeStore{}
+		challenges := newFakeChallengeStore()
+		service := newTestService(t, store, challenges)
+
+		_, ceremonyID, err := service.BeginDiscoverableLogin(context.Background())
+		if err != nil {
+			t.Fatalf("iteration %d: BeginDiscoverableLogin() error = %v", i, err)
+		}
+
+		const racers = 2
+		start := make(chan struct{})
+		errs := make([]error, racers)
+		var wg sync.WaitGroup
+		wg.Add(racers)
+		for g := 0; g < racers; g++ {
+			g := g
+			go func() {
+				defer wg.Done()
+				badRequest, err := http.NewRequest(http.MethodPost, "https://example.com", strings.NewReader("not valid json"))
+				if err != nil {
+					errs[g] = err
+					return
+				}
+				badRequest.Header.Set("Content-Type", "application/json")
+				<-start
+				_, errs[g] = service.FinishDiscoverableLogin(context.Background(), ceremonyID, badRequest)
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		var expiredCount, otherCount int
+		for _, err := range errs {
+			switch {
+			case errors.Is(err, ErrChallengeExpired):
+				expiredCount++
+			case err != nil:
+				otherCount++
+			default:
+				t.Fatalf("iteration %d: FinishDiscoverableLogin() unexpectedly succeeded with a malformed request", i)
+			}
+		}
+		if expiredCount != 1 || otherCount != 1 {
+			t.Fatalf("iteration %d: got %d ErrChallengeExpired and %d other errors among %d racers, want exactly 1 and 1 (single-use challenge violated)",
+				i, expiredCount, otherCount, racers)
+		}
+	}
+}
+
 func keysOf(m map[string][]byte) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -346,6 +420,7 @@ func (f *fakeStore) UpdateCredentialSignCount(context.Context, []byte, uint32) e
 func (f *fakeStore) DeleteCredential(context.Context, string) error { return nil }
 
 type fakeChallengeStore struct {
+	mu    sync.Mutex
 	saved map[string][]byte
 }
 
@@ -353,22 +428,38 @@ func newFakeChallengeStore() *fakeChallengeStore {
 	return &fakeChallengeStore{saved: make(map[string][]byte)}
 }
 
-func (f *fakeChallengeStore) SaveChallenge(_ context.Context, userID string, sessionData []byte) error {
-	f.saved[userID] = append([]byte(nil), sessionData...)
+func (f *fakeChallengeStore) SaveChallenge(_ context.Context, key string, sessionData []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saved[key] = append([]byte(nil), sessionData...)
 	return nil
 }
 
-func (f *fakeChallengeStore) GetChallenge(_ context.Context, userID string) ([]byte, error) {
-	data, ok := f.saved[userID]
+// ConsumeChallenge implements ChallengeStore atomically: the read and the
+// delete happen under the same lock, so two concurrent callers can never
+// both observe the challenge as present.
+func (f *fakeChallengeStore) ConsumeChallenge(_ context.Context, key string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.saved[key]
 	if !ok {
 		return nil, errors.New("challenge not found")
 	}
+	delete(f.saved, key)
 	return append([]byte(nil), data...), nil
 }
 
-func (f *fakeChallengeStore) DeleteChallenge(_ context.Context, userID string) error {
-	delete(f.saved, userID)
-	return nil
+// peekChallenge returns the challenge data saved under key without consuming
+// it, for tests that want to inspect what BeginX saved without going through
+// a Finish call. It is not part of the ChallengeStore interface.
+func (f *fakeChallengeStore) peekChallenge(key string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.saved[key]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), data...), true
 }
 
 func newTestService(t *testing.T, store Store, challenges ChallengeStore) *Service {
@@ -396,15 +487,15 @@ func httptestNewRequest(t *testing.T) *http.Request {
 	return req
 }
 
-func mustLoadSavedSession(t *testing.T, challenges ChallengeStore, key string) webauthn.SessionData {
+func mustLoadSavedSession(t *testing.T, challenges *fakeChallengeStore, key string) webauthn.SessionData {
 	t.Helper()
 
-	data, err := challenges.GetChallenge(context.Background(), key)
-	if err != nil {
-		t.Fatalf("GetChallenge() error = %v", err)
+	data, ok := challenges.peekChallenge(key)
+	if !ok {
+		t.Fatalf("no challenge saved under %q", key)
 	}
 	if len(data) == 0 {
-		t.Fatal("GetChallenge() returned empty challenge data")
+		t.Fatal("saved challenge data is empty")
 	}
 
 	var session webauthn.SessionData
@@ -446,14 +537,14 @@ func TestUserVerificationIsRequiredByDefault(t *testing.T) {
 	})
 
 	t.Run("login", func(t *testing.T) {
-		assertion, err := svc.BeginLogin(ctx, user)
+		assertion, ceremonyID, err := svc.BeginLogin(ctx, user)
 		if err != nil {
 			t.Fatalf("BeginLogin: %v", err)
 		}
 		if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
 			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
 		}
-		session := mustLoadSavedSession(t, challenges, "login:user-1")
+		session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID))
 		if session.UserVerification != protocol.VerificationRequired {
 			t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationRequired)
 		}
