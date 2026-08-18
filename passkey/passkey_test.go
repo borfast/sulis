@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -723,6 +724,216 @@ func TestNewServiceRejectsUnknownResidentKey(t *testing.T) {
 	}, WithResidentKey(protocol.ResidentKeyRequirement("sometimes")))
 	if err == nil {
 		t.Fatal("expected an unknown resident key requirement to be rejected")
+	}
+}
+
+// TestFinishRegistrationRejectsOversizedBody is the regression test for audit
+// finding A7: go-webauthn's decodeBody (protocol/decoder.go) is a bare
+// json.NewDecoder(body).Decode(v) with no size limit, so an attacker who can
+// reach FinishRegistration could send an arbitrarily large body and have it
+// read fully into memory before any validation runs. The default 64 KiB cap
+// must reject an oversized body cheaply — before the challenge is even
+// consumed — not after an unbounded read.
+func TestFinishRegistrationRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1"), Name: "user@example.com", DisplayName: "User One"}
+
+	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", bytes.NewReader(oversized))
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishRegistration() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishRegistration() credential = %#v, want nil", cred)
+	}
+
+	// The challenge saved by BeginRegistration must still be there: an
+	// oversized body is rejected before the challenge is consumed, so a
+	// retry with a correctly sized request against the same ceremony can
+	// still succeed.
+	if _, ok := challenges.peekChallenge(challengeKey("register", string(user.ID))); !ok {
+		t.Fatal("challenge was consumed by a rejected oversized body, want it left intact")
+	}
+}
+
+// constantByteReader is an io.Reader that supplies an endless stream of a
+// single repeated byte — used, wrapped in an io.LimitReader as a safety net,
+// to prove FinishRegistration's http.MaxBytesReader cap actually stops
+// reading the request body at the limit rather than reading it in full and
+// only rejecting it afterward.
+type constantByteReader byte
+
+func (b constantByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(b)
+	}
+	return len(p), nil
+}
+
+// countingReader records how many bytes have been pulled through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// TestFinishRegistrationCapsBodyReadRatherThanReadingItAll is the sharper
+// regression test for audit finding A7's "not an unbounded read" half:
+// TestFinishRegistrationRejectsOversizedBody proves the *outcome* (a bounded
+// error), but it uses a body that is already fully materialized in memory
+// as a []byte before the request is even built, so it would still pass even
+// if FinishRegistration read the whole body first and only checked its
+// length afterward — which is exactly the unbounded-read behavior the cap
+// is supposed to prevent. This test proves the *read itself* stops at the
+// limit: the source is a ten-times-oversized body backed by a reader that
+// never allocates its output up front, and the assertion is on how many
+// bytes were actually pulled through it, not just on the error returned.
+func TestFinishRegistrationCapsBodyReadRatherThanReadingItAll(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1"), Name: "user@example.com", DisplayName: "User One"}
+
+	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+
+	const hugeBody = 10 * defaultMaxCeremonyBody
+	source := &countingReader{r: io.LimitReader(constantByteReader('a'), hugeBody)}
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", source)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.ContentLength = -1 // unknown length: don't let net/http short-circuit on it
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishRegistration() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishRegistration() credential = %#v, want nil", cred)
+	}
+	if source.n > defaultMaxCeremonyBody+1 {
+		t.Fatalf("read %d bytes from the request body, want at most %d+1 — the cap must stop the read at the limit instead of reading the full (10x oversized) body before rejecting it",
+			source.n, defaultMaxCeremonyBody)
+	}
+}
+
+// TestFinishRegistrationResponseRejectsOversizedBody covers the []byte core
+// method directly: a caller that never goes through net/http (and so never
+// benefits from http.MaxBytesReader) must still be bounded by the same
+// limit.
+func TestFinishRegistrationResponseRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
+	cred, err := service.FinishRegistrationResponse(context.Background(), user, oversized)
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishRegistrationResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishRegistrationResponse() credential = %#v, want nil", cred)
+	}
+}
+
+// TestFinishLoginResponseRejectsOversizedBody is FinishRegistrationResponse's
+// counterpart for the login ceremony's []byte core method.
+func TestFinishLoginResponseRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1")}
+
+	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
+	cred, err := service.FinishLoginResponse(context.Background(), user, "missing-ceremony-id", oversized)
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishLoginResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishLoginResponse() credential = %#v, want nil", cred)
+	}
+}
+
+// TestFinishDiscoverableLoginResponseRejectsOversizedBody is
+// FinishRegistrationResponse's counterpart for the discoverable-login
+// ceremony's []byte core method.
+func TestFinishDiscoverableLoginResponseRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
+	cred, err := service.FinishDiscoverableLoginResponse(context.Background(), "missing-ceremony-id", oversized)
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishDiscoverableLoginResponse() credential = %#v, want nil", cred)
+	}
+}
+
+// TestWithMaxCeremonyBodyOverridesDefault covers the escape hatch for callers
+// who want a tighter (or looser) limit than the 64 KiB default.
+func TestWithMaxCeremonyBodyOverridesDefault(t *testing.T) {
+	t.Parallel()
+
+	challenges := newFakeChallengeStore()
+	svc, err := NewService(&fakeStore{}, challenges, WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithMaxCeremonyBody(10))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("user-1")}
+	_, err = svc.FinishRegistrationResponse(context.Background(), user, []byte("12345678901")) // 11 bytes > 10
+	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
+		t.Fatalf("FinishRegistrationResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
+	}
+}
+
+func TestNewServiceRejectsNonPositiveMaxCeremonyBody(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewService(&fakeStore{}, newFakeChallengeStore(), WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithMaxCeremonyBody(0))
+	if err == nil {
+		t.Fatal("expected a non-positive max ceremony body to be rejected")
 	}
 }
 

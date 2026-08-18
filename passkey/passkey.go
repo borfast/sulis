@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -22,7 +21,19 @@ var (
 	ErrChallengeFailed  = errors.New("passkey: challenge verification failed")
 	ErrChallengeExpired = errors.New("passkey: challenge expired or not found")
 	ErrCloneWarning     = errors.New("passkey: credential clone detected (sign count anomaly)")
+
+	// ErrCeremonyBodyTooLarge is returned when a ceremony response body
+	// exceeds the configured WithMaxCeremonyBody limit. See that option's
+	// GoDoc for why the cap exists.
+	ErrCeremonyBodyTooLarge = errors.New("passkey: ceremony response body too large")
 )
+
+// defaultMaxCeremonyBody is WithMaxCeremonyBody's default: generous enough
+// for any real WebAuthn attestation/assertion response (which run at most a
+// few KiB, even with a large X.509 attestation certificate chain) while
+// still bounding how much of a request body sulis will read or hold in
+// memory for a single ceremony.
+const defaultMaxCeremonyBody = 64 * 1024
 
 // WebAuthnConfig holds the configuration for the WebAuthn relying party.
 type WebAuthnConfig struct {
@@ -35,6 +46,7 @@ type WebAuthnConfig struct {
 type serviceConfig struct {
 	userVerification protocol.UserVerificationRequirement
 	residentKey      protocol.ResidentKeyRequirement
+	maxCeremonyBody  int64
 }
 
 // Option configures a passkey Service.
@@ -70,6 +82,23 @@ func WithUserVerification(uv protocol.UserVerificationRequirement) Option {
 // caller of BeginLogin always supplies an identified user first.
 func WithResidentKey(rk protocol.ResidentKeyRequirement) Option {
 	return func(c *serviceConfig) { c.residentKey = rk }
+}
+
+// WithMaxCeremonyBody caps how many bytes of a ceremony response body
+// FinishRegistration, FinishLogin, and FinishDiscoverableLogin (and their
+// []byte-taking counterparts) will read or accept, in bytes. max must be > 0.
+//
+// The default is 64 KiB. go-webauthn's own body decoding
+// (protocol.decodeBody, in its unexported decoder.go) is a bare
+// json.NewDecoder(body).Decode(v) with no limit at all — an attacker who can
+// reach a Finish endpoint could otherwise send an arbitrarily large body and
+// have it read fully into memory before any validation runs. Because sulis
+// owns the *http.Request in the http.go wrappers, it can — and does — impose
+// this limit itself via http.MaxBytesReader; the same limit is also enforced
+// in the []byte-taking core methods so a caller that bypasses net/http
+// entirely gets the same bound.
+func WithMaxCeremonyBody(max int64) Option {
+	return func(c *serviceConfig) { c.maxCeremonyBody = max }
 }
 
 // User identifies a consumer's user account to the passkey Service.
@@ -112,6 +141,7 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 	sc := serviceConfig{
 		userVerification: protocol.VerificationRequired,
 		residentKey:      protocol.ResidentKeyRequirementRequired,
+		maxCeremonyBody:  defaultMaxCeremonyBody,
 	}
 	for _, opt := range opts {
 		opt(&sc)
@@ -125,6 +155,9 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 	case protocol.ResidentKeyRequirementRequired, protocol.ResidentKeyRequirementPreferred, protocol.ResidentKeyRequirementDiscouraged:
 	default:
 		return nil, fmt.Errorf("passkey: invalid resident key requirement %q", sc.residentKey)
+	}
+	if sc.maxCeremonyBody <= 0 {
+		return nil, fmt.Errorf("passkey: invalid max ceremony body %d (must be > 0)", sc.maxCeremonyBody)
 	}
 
 	// The legacy requireResidentKey boolean is for authenticators that
@@ -197,14 +230,24 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 	return creation, nil
 }
 
-// FinishRegistration completes the WebAuthn registration ceremony.
-// The http.Request must contain the authenticator's response body.
+// FinishRegistrationResponse completes the WebAuthn registration ceremony
+// from the raw response body — the []byte-taking core that FinishRegistration
+// (in http.go) wraps for net/http callers, and the entry point for callers
+// that don't use net/http at all.
+//
+// body must not exceed the Service's configured WithMaxCeremonyBody limit
+// (default 64 KiB); a larger body is rejected up front, before the challenge
+// is consumed or any JSON parsing happens, with ErrCeremonyBodyTooLarge.
 //
 // The challenge is consumed before verification runs, so a failed
 // verification still burns it — the safe direction, same policy as sulis's
 // consumeToken: a rejected registration cannot be retried against the same
 // challenge.
-func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Request) (*Credential, error) {
+func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, body []byte) (*Credential, error) {
+	if err := s.checkCeremonyBodySize(body); err != nil {
+		return nil, err
+	}
+
 	key := challengeKey("register", string(user.ID))
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
@@ -219,7 +262,7 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 	// Parsed directly (rather than via s.wa.FinishRegistration, which
 	// discards the parsed response) so ClientExtensionResults is available
 	// below to populate Credential.Discoverable.
-	parsedResponse, err := protocol.ParseCredentialCreationResponse(r)
+	parsedResponse, err := protocol.ParseCredentialCreationResponseBytes(body)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: parsing registration response: %w", err)
 	}
@@ -284,17 +327,27 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 	return assertion, ceremonyID, nil
 }
 
-// FinishLogin completes the WebAuthn authentication ceremony started by
-// BeginLogin. ceremonyID must be the value returned by the matching
-// BeginLogin call.
-// The http.Request must contain the authenticator's response body.
+// FinishLoginResponse completes the WebAuthn authentication ceremony started
+// by BeginLogin, from the raw response body — the []byte-taking core that
+// FinishLogin (in http.go) wraps for net/http callers, and the entry point
+// for callers that don't use net/http at all. ceremonyID must be the value
+// returned by the matching BeginLogin call.
+//
+// body must not exceed the Service's configured WithMaxCeremonyBody limit
+// (default 64 KiB); a larger body is rejected up front, before the challenge
+// is consumed or any JSON parsing happens, with ErrCeremonyBodyTooLarge.
+//
 // Returns the credential that was used for authentication.
 //
 // The challenge is consumed before verification runs, so a failed
 // verification still burns it — the safe direction, same policy as sulis's
 // consumeToken: a rejected assertion cannot be retried against the same
 // challenge.
-func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string, r *http.Request) (*Credential, error) {
+func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyID string, body []byte) (*Credential, error) {
+	if err := s.checkCeremonyBodySize(body); err != nil {
+		return nil, err
+	}
+
 	// Load credentials from store.
 	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
 	if err != nil {
@@ -313,7 +366,12 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
-	waCredential, err := s.wa.FinishLogin(waUser, sessionData, r)
+	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
+	}
+
+	waCredential, err := s.wa.ValidateLogin(waUser, sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
 	}
@@ -343,19 +401,29 @@ func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.Credent
 	return assertion, ceremonyID, nil
 }
 
-// FinishDiscoverableLogin completes a usernameless WebAuthn authentication
-// ceremony started by BeginDiscoverableLogin. ceremonyID must be the value
-// returned by the matching BeginDiscoverableLogin call. The user is resolved
-// from the credential's stored owner rather than being supplied by the
-// caller.
-// The http.Request must contain the authenticator's response body.
+// FinishDiscoverableLoginResponse completes a usernameless WebAuthn
+// authentication ceremony started by BeginDiscoverableLogin, from the raw
+// response body — the []byte-taking core that FinishDiscoverableLogin (in
+// http.go) wraps for net/http callers, and the entry point for callers that
+// don't use net/http at all. ceremonyID must be the value returned by the
+// matching BeginDiscoverableLogin call. The user is resolved from the
+// credential's stored owner rather than being supplied by the caller.
+//
+// body must not exceed the Service's configured WithMaxCeremonyBody limit
+// (default 64 KiB); a larger body is rejected up front, before the challenge
+// is consumed or any JSON parsing happens, with ErrCeremonyBodyTooLarge.
+//
 // Returns the credential that was used for authentication.
 //
 // The challenge is consumed before verification runs, so a failed
 // verification still burns it — the safe direction, same policy as sulis's
 // consumeToken: a rejected assertion cannot be retried against the same
 // challenge.
-func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string, r *http.Request) (*Credential, error) {
+func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyID string, body []byte) (*Credential, error) {
+	if err := s.checkCeremonyBodySize(body); err != nil {
+		return nil, err
+	}
+
 	key := challengeKey("discover", ceremonyID)
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
@@ -378,7 +446,12 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string
 		return &webauthnUser{user: &User{ID: userHandle}, credentials: []Credential{*cred}}, nil
 	}
 
-	waCred, err := s.wa.FinishDiscoverableLogin(handler, sessionData, r)
+	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
+	}
+
+	waCred, err := s.wa.ValidateDiscoverableLogin(handler, sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
 	}
@@ -399,6 +472,20 @@ func (s *Service) finishLoginCredential(ctx context.Context, waCred *webauthn.Cr
 	}
 
 	return s.store.GetCredentialByID(ctx, waCred.ID)
+}
+
+// checkCeremonyBodySize rejects a ceremony response body larger than the
+// Service's configured WithMaxCeremonyBody limit. Callers run this before
+// consuming a challenge or attempting any JSON parsing, so an oversized body
+// is rejected cheaply rather than after work has already been spent on it —
+// and, for FinishRegistrationResponse/FinishLoginResponse/
+// FinishDiscoverableLoginResponse specifically, without burning the
+// caller's still-valid challenge.
+func (s *Service) checkCeremonyBodySize(body []byte) error {
+	if int64(len(body)) > s.cfg.maxCeremonyBody {
+		return fmt.Errorf("%w: %d bytes exceeds the %d byte limit", ErrCeremonyBodyTooLarge, len(body), s.cfg.maxCeremonyBody)
+	}
+	return nil
 }
 
 // credPropsResidentKey reports whether the client's "credProps" extension
