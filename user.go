@@ -17,6 +17,10 @@ type User struct {
 	// reachable (e.g. via VerifyEmail or a redeemed magic link). Nil means
 	// the address has not been verified.
 	EmailVerifiedAt *time.Time
+	// PendingEmail holds a staged address awaiting proof of control, set by
+	// ChangeEmail. The live Email field never changes except through a
+	// successful ConfirmEmailChange, which also clears this back to empty.
+	PendingEmail string
 	// Version guards against lost updates. It is set by the store on read and
 	// must be passed back unchanged in UpdateUser, which applies the write
 	// only if it still matches the persisted row. Callers outside the store
