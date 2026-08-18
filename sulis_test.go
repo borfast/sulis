@@ -739,12 +739,10 @@ func TestCreatePasswordResetTokenUnknownEmailPerformsEquivalentWork(t *testing.T
 	ctx := context.Background()
 
 	var calls int
-	orig := resetTokenGenerator
-	resetTokenGenerator = func(nBytes int) (string, string, error) {
+	t.Cleanup(testSwapResetTokenGenerator(func(nBytes int) (string, string, error) {
 		calls++
-		return orig(nBytes)
-	}
-	defer func() { resetTokenGenerator = orig }()
+		return generateRawToken(nBytes)
+	}))
 
 	if _, err := s.CreatePasswordResetToken(ctx, "nobody@example.com", RequestInfo{}); err != nil {
 		t.Fatalf("CreatePasswordResetToken: %v", err)
@@ -3453,6 +3451,57 @@ func TestReAuthenticateWrongPasswordDoesNotRefreshStamp(t *testing.T) {
 	sessions.mu.Unlock()
 	if !got.Equal(old) {
 		t.Fatalf("AuthenticatedAt changed on a failed ReAuthenticate: got %v, want unchanged %v", got, old)
+	}
+}
+
+// TestReAuthenticateRevokedSessionPropagatesErrSessionNotFound is the T501
+// pinning test PROGRESS.md's "Carried past 1.0" table recorded as missing:
+// a session revoked (e.g. by RevokeSession from another request, or the
+// session simply expiring and being cleaned up) between the caller's
+// ValidateSession and its ReAuthenticate call. The store's
+// UpdateAuthenticatedAt then has no row to stamp and returns
+// ErrSessionNotFound; ReAuthenticate must propagate that error unchanged
+// and must NOT refresh the caller's *Session — there is no longer a stored
+// session for the refresh to mean anything.
+//
+// This was already correct by contract before this test existed; nothing
+// asserted it. If ReAuthenticate is ever changed to swallow the store
+// error (e.g. to always stamp the caller's *Session regardless of whether
+// the write landed), this test fails on both assertions below.
+func TestReAuthenticateRevokedSessionPropagatesErrSessionNotFound(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].AuthenticatedAt = old
+	sessions.mu.Unlock()
+
+	// The caller validates the session, exactly as an application would at
+	// the top of a step-up-gated request handler.
+	validated, _, err := s.ValidateSession(ctx, sessionTok)
+	if err != nil {
+		t.Fatalf("ValidateSession: %v", err)
+	}
+
+	// ...then, before ReAuthenticate runs, something else revokes it: a
+	// logout on another device, an admin action, or a concurrent request on
+	// this same session racing ahead. Simulated here as a direct revoke.
+	if err := s.RevokeSession(ctx, user.ID, validated.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	if err := s.ReAuthenticate(ctx, validated, "correct-battery-staple", RequestInfo{}); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ReAuthenticate error = %v, want ErrSessionNotFound", err)
+	}
+
+	if !validated.AuthenticatedAt.Equal(old) {
+		t.Fatalf("ReAuthenticate mutated the caller's *Session.AuthenticatedAt to %v despite the store update failing; want it left unchanged at %v", validated.AuthenticatedAt, old)
 	}
 }
 

@@ -109,6 +109,18 @@ func (s *Sulis) accountStatus(user *User) error {
 // bookkeeping, and a write failure here must not turn a correctly detected
 // wrong password into a different error for the caller, who is about to
 // receive ErrInvalidCredentials regardless.
+//
+// Bounded-retry undercount: updateUserWithRetry gives up after
+// maxUserUpdateAttempts (sulis.go) attempts and returns ErrConcurrentUpdate,
+// which the swallow above then drops silently. Under extreme contention on
+// one account — more concurrent failed-login writers than that in flight at
+// once — one of them can exhaust its retries this way and its increment is
+// lost. The direction is safe: an undercount only pushes
+// FailedLoginAttempts further from FailureLockoutThreshold, delaying a
+// lockout that would otherwise have triggered sooner; it can never trigger
+// one early or falsely. See PROGRESS.md's T502 row — this is a pre-existing
+// property of every updateUserWithRetry caller, not something specific to
+// login failures.
 func (s *Sulis) recordFailedLogin(ctx context.Context, userID string, ri RequestInfo) {
 	now := time.Now()
 	// Set inside the closure and reset on every attempt, so a retry that

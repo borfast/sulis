@@ -136,6 +136,19 @@ func hashPassword(password string, params Argon2Params, pepper []byte) (string, 
 // unknown-user and passwordless branches run this same function against the
 // dummy hash and so pay the same doubled cost.
 //
+// The same doubling also shows up on a correct password, and there it does
+// carry a narrow signal (T505): a successful verification against a hash
+// that predates NFKC normalization pays for the failed normalized compare
+// plus the succeeding raw one — two Argon2 runs — where the same password
+// against an already-migrated hash matches on the first and pays for only
+// one. What that timing difference reveals to someone able to measure
+// repeated logins against the same account is just that the account has not
+// logged in since the NFKC upgrade shipped — nothing about the password
+// itself — and it is self-erasing: the caller's next successful login
+// re-hashes the account (see legacy above and (*Sulis).rehashPassword),
+// after which every login costs one comparison again like any other. See
+// sulis.go's VerifyPassword doc for the caller-facing version of this note.
+//
 // pepper is applied (via applyPepper) to whichever candidate form is being
 // compared, normalized or raw, exactly as hashPassword applies it before
 // writing a hash. This is deliberately NOT a second, pepper-shaped fallback
