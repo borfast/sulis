@@ -32,13 +32,24 @@
 -- REFERENCES clauses (and PRAGMA foreign_keys = ON) if your users table is
 -- co-located and you want the cascade.
 
+-- Case-insensitive at the SQL level, on purpose: email is COLLATE NOCASE, a
+-- column-level collation, so it governs every comparison on the column, not
+-- just the UNIQUE index. That means BOTH of the following are
+-- case-insensitive even for a caller that queries this table directly,
+-- bypassing the Go store entirely:
+--   - uniqueness: two rows differing only by the case of email are the same
+--     violation, so "Someone@Example.test" cannot coexist with
+--     "someone@example.test";
+--   - lookup: "SELECT ... WHERE email = ?" — GetUserByEmail's own query —
+--     matches regardless of the case either side is in.
+-- This matches sulis's own behavior: sulis normalizes an address to
+-- lowercase long before a store ever sees it, so for every address sulis
+-- itself produces, COLLATE NOCASE changes nothing. It only matters for a
+-- caller that bypasses that normalization, and there, refusing the
+-- confusable duplicate on write and matching it on lookup is the safer of
+-- the two behaviors.
 CREATE TABLE IF NOT EXISTS users (
     id                    TEXT    PRIMARY KEY,
-    -- COLLATE NOCASE makes the UNIQUE index below case-insensitive. sulis
-    -- normalizes an address to lowercase long before a store sees it, so for
-    -- every address sulis itself produces this changes nothing; where it
-    -- matters is a caller that bypasses normalization, and there refusing to
-    -- create the confusable duplicate is the safer of the two behaviors.
     email                 TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     password_hash         TEXT    NOT NULL DEFAULT '',
     created_at            TEXT    NOT NULL,
