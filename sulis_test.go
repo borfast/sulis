@@ -539,6 +539,36 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 }
 
+// TestRegisterAndLoginWithPepperConfigured is the Sulis-level counterpart to
+// password_test.go's hashPassword/verifyPassword pepper unit tests: with a
+// pepper configured from the start (WithPepper), Register and Login work
+// exactly as they do without one, and a wrong password is still rejected.
+func TestRegisterAndLoginWithPepperConfigured(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithPepper([]byte("a-deployment-pepper")))
+	ctx := context.Background()
+
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if sessionTok == "" {
+		t.Fatal("expected non-empty session token")
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login with a pepper configured: %v", err)
+	}
+	if res.NeedsSecondFactor {
+		t.Fatal("no second factor is enrolled, so Login should return a session")
+	}
+
+	if _, err := s.Login(ctx, "alice@example.com", "wrong-password", RequestInfo{}); err != ErrInvalidCredentials {
+		t.Fatalf("Login with the wrong password under a pepper = %v, want ErrInvalidCredentials", err)
+	}
+}
+
 func TestRegisterDuplicate(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
@@ -2515,10 +2545,10 @@ func TestConcurrentResetAndVerifyDoesNotResurrectOldHash(t *testing.T) {
 		t.Fatalf("GetUserByID: %v", err)
 	}
 
-	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash, nil); ok {
 		t.Error("the reset was silently undone: the old password still verifies")
 	}
-	ok, _, err := verifyPassword(newPassword, stored.PasswordHash)
+	ok, _, err := verifyPassword(newPassword, stored.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -3040,7 +3070,7 @@ func TestReAuthenticateUpgradesWeakStoredHash(t *testing.T) {
 		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
 	}
 
-	ok, _, err := verifyPassword(password, after.PasswordHash)
+	ok, _, err := verifyPassword(password, after.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -4338,7 +4368,7 @@ func TestLoginUpgradesWeakStoredHash(t *testing.T) {
 		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
 	}
 
-	ok, _, err := verifyPassword(password, after.PasswordHash)
+	ok, _, err := verifyPassword(password, after.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -4578,10 +4608,10 @@ func TestRehashDoesNotClobberConcurrentPasswordChange(t *testing.T) {
 		t.Fatalf("GetUserByID: %v", err)
 	}
 
-	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash, nil); ok {
 		t.Fatal("the rehash resurrected the old password: it still verifies after a concurrent ChangePassword")
 	}
-	ok, _, err := verifyPassword(newPassword, stored.PasswordHash)
+	ok, _, err := verifyPassword(newPassword, stored.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -4923,7 +4953,7 @@ func TestLegacyPasswordHashIsUpgradedToTheNormalizedFormOnLogin(t *testing.T) {
 		t.Fatal("the stored hash was not upgraded; the account stays on the pre-normalization form forever and the equivalent spellings never start working")
 	}
 
-	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash)
+	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -4973,7 +5003,7 @@ func TestReAuthenticateUpgradesALegacyPasswordHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserByID: %v", err)
 	}
-	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash)
+	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash, nil)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}

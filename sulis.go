@@ -56,7 +56,7 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 		cfg:      cfg,
 	}
 	// crypto/rand cannot fail on Go >= 1.24, so ignoring the error here is safe.
-	s.dummyHash, _ = hashPassword("sulis-timing-equalization-dummy", cfg.Argon2)
+	s.dummyHash, _ = hashPassword("sulis-timing-equalization-dummy", cfg.Argon2, cfg.Pepper)
 	return s, nil
 }
 
@@ -72,7 +72,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 		return nil, nil, "", err
 	}
 
-	hash, err := hashPassword(password, s.cfg.Argon2)
+	hash, err := hashPassword(password, s.cfg.Argon2, s.cfg.Pepper)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("sulis: hashing password: %w", err)
 	}
@@ -141,7 +141,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		if errors.Is(err, ErrUserNotFound) {
 			// Run the same Argon2 work a real verification would, so the
 			// response time doesn't reveal whether the account exists.
-			_, _, _ = verifyPassword(password, s.dummyHash)
+			_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
@@ -149,11 +149,11 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 
 	if user.PasswordHash == "" {
 		// Passwordless user: verify against the dummy hash for the same reason.
-		_, _, _ = verifyPassword(password, s.dummyHash)
+		_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
 		return nil, ErrInvalidCredentials
 	}
 
-	ok, legacyForm, err := verifyPassword(password, user.PasswordHash)
+	ok, legacyForm, err := verifyPassword(password, user.PasswordHash, s.cfg.Pepper)
 	if err != nil {
 		return nil, fmt.Errorf("sulis: verifying password: %w", err)
 	}
@@ -222,7 +222,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string) {
 	verifiedHash := user.PasswordHash
 
-	newHash, err := hashPassword(password, s.cfg.Argon2)
+	newHash, err := hashPassword(password, s.cfg.Argon2, s.cfg.Pepper)
 	if err != nil {
 		// TODO(T509): emit rehash event
 		return
@@ -286,7 +286,7 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		// The legacy-form flag is ignored here: whichever form matched, the
 		// stored hash is about to be replaced by a hash of the new password,
 		// which setPassword derives from its normalized form anyway.
-		ok, _, err := verifyPassword(oldPassword, u.PasswordHash)
+		ok, _, err := verifyPassword(oldPassword, u.PasswordHash, s.cfg.Pepper)
 		if err != nil {
 			return fmt.Errorf("sulis: verifying old password: %w", err)
 		}
@@ -410,7 +410,7 @@ func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate f
 func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, guard func(*User) error) error {
 	// Hashed once, outside the retry loop: a conflict should not make the
 	// caller pay for Argon2 again.
-	hash, err := hashPassword(newPassword, s.cfg.Argon2)
+	hash, err := hashPassword(newPassword, s.cfg.Argon2, s.cfg.Pepper)
 	if err != nil {
 		return fmt.Errorf("sulis: hashing new password: %w", err)
 	}

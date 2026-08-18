@@ -60,6 +60,10 @@ type Config struct {
 	Limiter                        Limiter         // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
 	PasswordChecker                PasswordChecker // screens new passwords for known-compromised values (default: passwordcheck.NewBlocklist())
 
+	// Pepper is mixed into every password via HMAC-SHA256 before Argon2 —
+	// see WithPepper. Default: nil, meaning no pepper.
+	Pepper []byte
+
 	// FailureLockoutThreshold, FailureLockoutBaseBackoff, and
 	// FailureLockoutMaxBackoff configure the optional automatic-lockout
 	// mechanism (see WithFailureLockout). FailureLockoutThreshold of 0
@@ -129,6 +133,41 @@ func WithEmailVerificationTokenDuration(d time.Duration) Option {
 // WithArgon2Params sets custom argon2id parameters for password hashing.
 func WithArgon2Params(p Argon2Params) Option {
 	return func(c *Config) { c.Argon2 = p }
+}
+
+// WithPepper sets a secret pepper mixed into every password via
+// HMAC-SHA256 before Argon2 (see password.go's applyPepper). It protects
+// against a database-only leak — a copy of the user table with no access
+// to application config or secrets yields hashes nobody can run an offline
+// dictionary attack against without also having the pepper. It does NOT
+// protect against a full application compromise: the same process that
+// hashes passwords holds the pepper, so an attacker who reaches that
+// process reaches both.
+//
+// Losing the pepper makes EVERY stored hash permanently unverifiable —
+// there is no fallback, unlike a hash's own salt (which travels with the
+// hash). Store it with the same care as a private key: outside version
+// control, in a secrets manager or environment variable, never beside the
+// database it is meant to protect.
+//
+// The pepper is a first-deployment decision, not a knob to turn later.
+// Setting one where there was none, changing its value, or clearing one
+// that was set makes every hash written under the old configuration
+// unverifiable: verifyPassword applies whichever pepper is CURRENTLY
+// configured, uniformly, to both the NFKC and pre-NFKC forms its existing
+// T505 legacy-fallback seam already tries (see the T505 Decisions row) —
+// it does not also try "with each pepper this deployment has ever used" on
+// top of that. Unlike T505's normalization fallback, which is safe to widen
+// because it can only ever match the exact bytes a hash was already
+// derived from, a pepper-introduced-later problem is symmetric with a
+// pepper-changed or pepper-removed one: there is no single "old form" to
+// fall back to, only an unbounded list of past values this library has no
+// way to know. Introduce a pepper before the first password is ever hashed,
+// or plan on resetting affected users' passwords when introducing one
+// later — the same recovery path already used for a lost password, not a
+// new failure mode.
+func WithPepper(pepper []byte) Option {
+	return func(c *Config) { c.Pepper = append([]byte(nil), pepper...) }
 }
 
 // WithRevokeSessionsOnPasswordChange controls whether all of a user's

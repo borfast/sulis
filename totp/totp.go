@@ -90,6 +90,16 @@ type Config struct {
 	Skew       uint      // number of periods to check before/after current (default: 1)
 	SecretSize int       // bytes of entropy for new secrets (default: 20)
 	Limiter    Limiter   // rate limiter consulted before validating a code (default: nil, disabled)
+
+	// Encryptor, if set, encrypts every secret before it reaches Store and
+	// decrypts it immediately after reading one back — see WithEncryptor.
+	// Default: nil, meaning NO ENCRYPTION. Credential.Secret then reaches
+	// Store as the same base32 plaintext this package has always written,
+	// which is NOT safe for a production deployment of a real second
+	// factor: a leaked store yields every enrolled secret, usable
+	// indefinitely and silently, with no work factor standing between the
+	// leak and every account it can now generate valid codes for.
+	Encryptor Encryptor
 }
 
 // Option is a functional option for configuring the TOTP service.
@@ -126,6 +136,21 @@ func WithSecretSize(n int) Option {
 // limiter (the default) disables rate limiting.
 func WithLimiter(l Limiter) Option {
 	return func(c *Config) { c.Limiter = l }
+}
+
+// WithEncryptor configures the Encryptor Service uses to protect every
+// secret before it reaches Store and immediately after reading one back:
+// Enroll, ReplaceEnrollment, ConfirmEnrollment, and Validate's counter-bump
+// save all go through it, so a Store implementation never receives, stores,
+// or reads back a usable secret — the protection does not depend on the
+// store author. See AESEncryptor for the AES-256-GCM implementation this
+// package provides, including key rotation.
+//
+// The default is nil: no encryption, so Credential.Secret reaches Store as
+// plaintext, exactly as before this option existed. Configure a real
+// Encryptor before relying on this package for a production second factor.
+func WithEncryptor(e Encryptor) Option {
+	return func(c *Config) { c.Encryptor = e }
 }
 
 // Service manages TOTP enrollment and validation.
@@ -212,10 +237,15 @@ func (s *Service) enroll(ctx context.Context, userID, accountName string, forceR
 
 	secret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secretBytes)
 
+	storedSecret, err := s.encryptSecret(secret)
+	if err != nil {
+		return "", "", err
+	}
+
 	cred := &Credential{
 		ID:        generateID(),
 		UserID:    userID,
-		Secret:    secret,
+		Secret:    storedSecret,
 		Verified:  false,
 		CreatedAt: time.Now(),
 	}
@@ -271,7 +301,18 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 		return ErrTOTPNotEnrolled
 	}
 
-	counter, ok := s.matchCode(pending.Secret, code, time.Now())
+	plainSecret, err := s.decryptSecret(pending.Secret)
+	if err != nil {
+		// Not the same failure as "nothing pending": the enrollment is
+		// right there, but the configured Encryptor could not recover its
+		// secret (wrong/missing key, corrupted ciphertext). Surface it
+		// distinctly rather than telling the caller there is nothing to
+		// confirm, matching Validate's SaveTOTP failure, which is returned
+		// unchanged for the same reason.
+		return err
+	}
+
+	counter, ok := s.matchCode(plainSecret, code, time.Now())
 	if !ok {
 		return ErrTOTPInvalid
 	}
@@ -311,7 +352,17 @@ func (s *Service) Validate(ctx context.Context, userID, code string) error {
 		return ErrTOTPNotEnrolled
 	}
 
-	counter, ok := s.matchCode(cred.Secret, code, time.Now())
+	plainSecret, err := s.decryptSecret(cred.Secret)
+	if err != nil {
+		// Same reasoning as ConfirmEnrollment's identical check: a decrypt
+		// failure is not "wrong code" or "not enrolled", it's this
+		// instance's Encryptor being unable to recover a secret that
+		// genuinely exists. cred.Secret itself is left untouched below, so
+		// this never risks writing anything back.
+		return err
+	}
+
+	counter, ok := s.matchCode(plainSecret, code, time.Now())
 	if !ok {
 		return ErrTOTPInvalid
 	}
@@ -319,6 +370,9 @@ func (s *Service) Validate(ctx context.Context, userID, code string) error {
 		return ErrTOTPReplayed
 	}
 
+	// cred.Secret is left exactly as read from the store — still whatever
+	// encryptSecret produced at enrollment time — so this save never writes
+	// plainSecret (or anything derived from it) back to Store.
 	cred.LastUsedCounter = counter
 	if err := s.store.SaveTOTP(ctx, cred); err != nil {
 		// Fail closed: if we can't persist the counter, we can't guarantee
@@ -350,6 +404,40 @@ func (s *Service) allow(ctx context.Context, key string) error {
 		return ErrTOTPRateLimited
 	}
 	return nil
+}
+
+// encryptSecret returns secret ready to hand to a Store-writing method:
+// unchanged if no Encryptor is configured (the default — see WithEncryptor),
+// or its ciphertext otherwise. Every path that writes Credential.Secret
+// (enroll, Validate's counter-bump save) MUST go through this rather than
+// writing secret directly, or a configured Encryptor is silently bypassed
+// and the plaintext still reaches the store.
+func (s *Service) encryptSecret(secret string) (string, error) {
+	if s.cfg.Encryptor == nil {
+		return secret, nil
+	}
+	ciphertext, err := s.cfg.Encryptor.Encrypt(secret)
+	if err != nil {
+		return "", fmt.Errorf("totp: encrypting secret: %w", err)
+	}
+	return ciphertext, nil
+}
+
+// decryptSecret reverses encryptSecret: unchanged if no Encryptor is
+// configured, otherwise the plaintext recovered from stored's ciphertext.
+// Every path that reads Credential.Secret before comparing it to a
+// submitted code (ConfirmEnrollment, Validate) MUST go through this. It
+// fails closed: any Decrypt error propagates unchanged rather than being
+// treated as "not encrypted after all" and compared as-is.
+func (s *Service) decryptSecret(stored string) (string, error) {
+	if s.cfg.Encryptor == nil {
+		return stored, nil
+	}
+	plaintext, err := s.cfg.Encryptor.Decrypt(stored)
+	if err != nil {
+		return "", fmt.Errorf("totp: decrypting secret: %w", err)
+	}
+	return plaintext, nil
 }
 
 // matchCode checks a code against the secret, allowing for clock skew, and

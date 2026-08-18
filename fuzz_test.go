@@ -46,7 +46,7 @@ func FuzzDecodeHash(f *testing.F) {
 		if len(password) > 256 {
 			password = password[:256]
 		}
-		hash, err := hashPassword(password, testArgon2Params)
+		hash, err := hashPassword(password, testArgon2Params, nil)
 		if err != nil {
 			return // crypto/rand failure path; nothing to check here
 		}

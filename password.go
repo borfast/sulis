@@ -1,7 +1,9 @@
 package sulis
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -41,6 +43,27 @@ func normalizePassword(password string) string {
 	return norm.NFKC.String(password)
 }
 
+// applyPepper returns the material actually fed into Argon2 for candidate:
+// candidate unchanged, as raw bytes, if pepper is empty (the default — see
+// WithPepper), or HMAC-SHA256(pepper, candidate) otherwise. candidate may be
+// either normalized or the caller's raw bytes — hashPassword always passes
+// the normalized form, but verifyPassword's pre-normalization fallback
+// (T505) passes raw bytes on its second attempt, and peppering applies
+// uniformly to whichever one is being compared, rather than adding a second
+// path of its own; see the WithPepper Decisions row for why.
+//
+// An HMAC rather than a bare concatenation keeps the pepper out of the
+// derived material's length and structure, and is the transform WithPepper
+// documents (HMAC-SHA256 of the password, post-NFKC, before Argon2).
+func applyPepper(candidate string, pepper []byte) []byte {
+	if len(pepper) == 0 {
+		return []byte(candidate)
+	}
+	mac := hmac.New(sha256.New, pepper)
+	mac.Write([]byte(candidate))
+	return mac.Sum(nil)
+}
+
 // hashPassword hashes a password using argon2id with the given parameters.
 // Returns a PHC-format string: $argon2id$v=19$m=65536,t=3,p=2$<salt>$<hash>
 //
@@ -49,14 +72,19 @@ func normalizePassword(password string) string {
 // produced it or what they had already done to the string. This is the choke
 // point that makes "normalize on every path that sets a password" a property
 // of the code rather than a rule to remember.
-func hashPassword(password string, params Argon2Params) (string, error) {
+//
+// pepper, if non-empty, is mixed in via applyPepper before Argon2 ever sees
+// the password — see WithPepper. Passing a different pepper (or none, where
+// one was used before) than the hash was originally produced with can never
+// verify against it; there is no fallback the way normalizePassword has one.
+func hashPassword(password string, params Argon2Params, pepper []byte) (string, error) {
 	salt := make([]byte, params.SaltLength)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("sulis: generating salt: %w", err)
 	}
 
 	hash := argon2.IDKey(
-		[]byte(normalizePassword(password)),
+		applyPepper(normalizePassword(password), pepper),
 		salt,
 		params.Iterations,
 		params.Memory,
@@ -107,7 +135,15 @@ func hashPassword(password string, params Argon2Params) (string, error) {
 // nothing about the account. It also holds uniformly, because VerifyPassword's
 // unknown-user and passwordless branches run this same function against the
 // dummy hash and so pay the same doubled cost.
-func verifyPassword(password, encoded string) (ok, legacy bool, err error) {
+//
+// pepper is applied (via applyPepper) to whichever candidate form is being
+// compared, normalized or raw, exactly as hashPassword applies it before
+// writing a hash. This is deliberately NOT a second, pepper-shaped fallback
+// path alongside the NFKC one above: a hash written under a different
+// pepper than the one currently configured (including no pepper at all)
+// cannot verify, full stop — see WithPepper's Decisions row for why that is
+// the honest choice rather than a gap to close later.
+func verifyPassword(password, encoded string, pepper []byte) (ok, legacy bool, err error) {
 	params, salt, hash, err := decodeHash(encoded)
 	if err != nil {
 		return false, false, err
@@ -115,7 +151,7 @@ func verifyPassword(password, encoded string) (ok, legacy bool, err error) {
 
 	compare := func(candidate string) bool {
 		otherHash := argon2.IDKey(
-			[]byte(candidate),
+			applyPepper(candidate, pepper),
 			salt,
 			params.Iterations,
 			params.Memory,

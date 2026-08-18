@@ -32,7 +32,7 @@ The root package owns the auth logic and data types:
 - `CreateEmailVerificationToken`, `VerifyEmail`
 - `Authenticate`, `UserFromContext`, `SessionFromContext`
 
-Password hashes use Argon2id over the NFKC-normalized password. New passwords are screened for length and against a corpus of known-compromised values — see [Password quality](#password-quality). Reset, magic-link, two-factor, and email-verification tokens are random, single-use, purpose-scoped, and time-limited.
+Password hashes use Argon2id over the NFKC-normalized password, optionally peppered first — see [Peppering](#peppering). New passwords are screened for length and against a corpus of known-compromised values — see [Password quality](#password-quality). Reset, magic-link, two-factor, and email-verification tokens are random, single-use, purpose-scoped, and time-limited.
 
 ## Core Flows
 
@@ -117,6 +117,28 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 `ChangePassword(ctx, userID, oldPassword, newPassword, requestInfo)` is for accounts that already have a password. It consults the configured `Limiter` (key `"password:"+email`, the same key `Login`/`VerifyPassword` use) before verifying the old password, so a stolen session token can't be used to brute-force it once rate limiting is enabled. It returns `ErrInvalidCredentials` for a passwordless account or a wrong old password. The old password is re-verified against the freshly loaded user as part of the write, so a password changed by a concurrent request is never overwritten on the strength of a stale check.
 
 `SetInitialPassword(ctx, userID, newPassword)` is for passwordless accounts created through flows such as magic link. Call it only after your application has already authenticated the user through a trusted flow; it returns `ErrInvalidCredentials` if the account already has a password.
+
+### Peppering
+
+`WithPepper(pepper []byte)` mixes a secret pepper into every password via HMAC-SHA256 before Argon2 ever sees it:
+
+```go
+s, err := sulis.New(users, sessions, tokens, factors,
+    sulis.WithPepper(loadPepperFromSecretsManager()),
+)
+```
+
+**What it protects against, and what it doesn't.** A pepper is not stored anywhere near the password hashes — unlike a salt, which travels with the hash it protects. It defends against a *database-only* leak: a copy of the user table with no access to your application's configuration or secrets yields Argon2 hashes nobody can run an offline dictionary attack against without also having the pepper. It does **not** protect against a full application compromise — the same process that hashes and verifies passwords holds the pepper, so an attacker who reaches that process reaches both.
+
+**Losing the pepper makes every hash unverifiable. There is no fallback.** Store it with the same care as a private key: a secrets manager or environment variable, never checked in, never beside the database it is meant to protect.
+
+**Set it before the first password is ever hashed, or plan on password resets.** A pepper is a first-deployment decision, not a knob to turn on a running system. `verifyPassword` applies whichever pepper is *currently* configured, uniformly, to both forms its [NFKC compatibility fallback](#upgrading-what-nfkc-normalization-does-to-existing-hashes) already tries — it does not also try every pepper this deployment has ever used. That fallback is safe to widen because it can only ever match the exact bytes a hash was already derived from; a pepper introduced later, changed, or removed has no such single "old form" to fall back to, only an unbounded list of past values this library has no way to know. Concretely:
+
+- Introducing a pepper on a deployment that started without one makes every existing hash unverifiable.
+- Changing a pepper's value makes every hash written under the old value unverifiable.
+- Removing a pepper makes every hash written while one was set unverifiable.
+
+In every case, the recovery path is the same one already used for a lost password: reset it. This is a deliberate choice, not a gap — building dual-path verification the way T505's NFKC fallback works would mean guessing which of an unbounded set of historical peppers produced a given hash, which is a fundamentally different (and unsafe) problem from "try the one other form a password can take."
 
 ### ValidateSession
 
@@ -287,6 +309,36 @@ Enrollment changes a security-relevant setting for the account: gate `Enroll`/`R
 
 The package depends on a consumer-owned `totp.Store` for saving and loading TOTP credentials — see [Store Contracts](#store-contracts) below for the active/pending separation and its atomicity requirements.
 
+#### Encrypting stored secrets
+
+**By default, `Credential.Secret` reaches your store as base32 plaintext.** Unlike a password hash, a TOTP secret has no work factor standing between a leak and its use: whoever reads it can generate valid codes for that account indefinitely, silently, with no way to detect or revoke the compromise short of re-enrollment. This is fine for a throwaway store in tests, and not something you should ship to production unencrypted.
+
+`totp.WithEncryptor(e Encryptor)` fixes this from inside the package, so the protection does not depend on your store implementation at all:
+
+```go
+enc, err := totp.NewAESEncryptor(key) // key: 32 bytes, AES-256
+svc, err := totp.NewService(store, "MyApp", totp.WithEncryptor(enc))
+```
+
+`Service` encrypts a secret before every write (`Enroll`, `ReplaceEnrollment`, `Validate`'s replay-counter bump) and decrypts it immediately after every read (`ConfirmEnrollment`, `Validate`) — entirely inside this package. Your `totp.Store` implementation never receives, persists, or reads back a usable secret; `Credential.Secret` is still just a string either way, so no store contract, schema, or column type needs to know encryption exists. Nothing in [Store Contracts](#store-contracts) changes.
+
+`NewAESEncryptor` implements `Encryptor` with AES-256-GCM: a random 96-bit nonce on every `Encrypt` call, and a key-ID fingerprint (derived from the key itself, not assigned or positional) prefixed onto the ciphertext so `Decrypt` knows which key produced it. **Key rotation:**
+
+```go
+// Today: everything is encrypted under keyA.
+enc, _ := totp.NewAESEncryptor(keyA)
+
+// Rotating in keyB: it becomes current for all new Encrypt calls; keyA is
+// kept only so ciphertext already written under it keeps decrypting.
+enc, _ := totp.NewAESEncryptor(keyB, keyA)
+```
+
+There is no in-place "re-encrypt everything" step — like the rehash-on-login upgrade path for Argon2 parameters, a secret only actually moves onto the new key the next time `Service` writes it (a fresh enrollment, or `Validate`'s counter bump), not immediately on rotation. Once you're confident nothing still needs a retired key, drop it from the `rotated` list.
+
+**Decryption fails closed.** A wrong key, a truncated ciphertext, an unrecognized key-ID, or a tampered payload all return a non-nil error from `Decrypt` — never a plausible-looking but wrong plaintext. `Service` propagates that error distinctly from `ErrTOTPInvalid`/`ErrTOTPNotEnrolled`: a decrypt failure means the enrollment genuinely exists but this instance's `Encryptor` cannot recover its secret (most likely a missing rotated key), which is a different problem from a wrong code or no enrollment at all and should be alerted on differently.
+
+Bring your own `Encryptor` (a KMS or HSM-backed one, for instance) by implementing the two-method interface directly; `AESEncryptor` is provided because it needs nothing beyond the standard library, not because it's the only option.
+
 ### `passkey`
 
 **User verification is required by default.** `NewService` sets `UserVerification: required` on the relying-party config and on both login ceremonies. This matters because go-webauthn only checks the UV flag in the authenticator data when the ceremony's session data says `required` — leaving it unset means a presence-only tap (no PIN, no biometric) is accepted, which reduces a passwordless passkey from two factors to bare possession of an unlocked device.
@@ -422,7 +474,7 @@ It is not for production: nothing survives a restart, nothing is shared between 
 
 - `Token.TokenHash` stores a SHA-256 hash of a reset, magic-link, two-factor, or email-verification token. Raw tokens are returned once for delivery and should never be persisted. `Token.Email` is set for magic-link tokens issued before the user account exists, and for email-verification tokens (bound to the address they prove, so a later email change invalidates them); it is empty for password-reset and two-factor tokens.
 - Session tokens are opaque bearer tokens. `SessionStore` implementations persist only `TokenHash` (the root package always clears `Session.Token` before calling `CreateSession`) and perform `GetSessionByTokenHash` lookups against the hash of the presented session token rather than the raw token. `ValidateSession` likewise never returns the raw token to the caller.
-- TOTP secrets (`totp.Credential.Secret`) and passkey public keys are handed to your stores as-is; recovery codes and all `sulis` tokens/sessions are hashed before your store ever sees them. See [Operational requirements](#operational-requirements) for what that implies for TOTP secrets specifically.
+- TOTP secrets (`totp.Credential.Secret`) and passkey public keys are handed to your stores as-is, **unless** you configure `totp.WithEncryptor` — see [Encrypting stored secrets](#encrypting-stored-secrets) — in which case your `totp.Store` only ever sees the configured `Encryptor`'s ciphertext. Recovery codes and all `sulis` tokens/sessions are hashed before your store ever sees them. See [Operational requirements](#operational-requirements) for what an unconfigured `Encryptor` implies for TOTP secrets specifically.
 
 ## Operational requirements
 
@@ -442,7 +494,7 @@ Token-redemption calls (`ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`,
 
 **A `PasswordChecker` that reaches the network is your outbound dependency.** The default (`passwordcheck.NewBlocklist()`) makes no requests at all. Adding `passwordcheck.NewHIBP()` puts an HTTPS call to `api.pwnedpasswords.com` on the critical path of registration, password change, and password reset — allow it through egress filtering, watch its latency (it is bounded at 5s by default, on top of the Argon2 hash the user is already waiting for), and decide deliberately whether it fails open (the default) or closed. It is never on the login path.
 
-**Encrypt TOTP secrets at rest.** `totp.Service` hands your `totp.Store` a plaintext base32 secret (`Credential.Secret`) — there is no application-layer encryption. Encrypt it at rest (e.g. envelope encryption via a KMS) in your store implementation, since a database compromise would otherwise hand an attacker every enrolled user's shared secret, usable to generate valid codes indefinitely.
+**Configure `totp.WithEncryptor` before production.** By default, `totp.Service` hands your `totp.Store` a plaintext base32 secret (`Credential.Secret`) — there is no encryption unless you configure one. `totp.WithEncryptor(totp.NewAESEncryptor(key))` fixes this application-side, so a store implementation never needs its own envelope encryption to be safe: see [Encrypting stored secrets](#encrypting-stored-secrets) for the AES-256-GCM implementation, key rotation, and the fail-closed behavior on a wrong or missing key. Leaving it unconfigured means a database compromise hands an attacker every enrolled user's shared secret, usable to generate valid codes indefinitely and silently, with no work factor slowing that down the way Argon2 does for passwords.
 
 **`CreatePasswordResetToken` cannot be used to enumerate registered addresses.** Like `Login`/`VerifyPassword`, it normalizes the unknown-address case away: an unregistered `email` returns `("", nil)`, the same shape a genuine issuance takes from the caller's perspective, rather than `ErrUserNotFound`. The unknown-address path also performs the same token generation and hashing work the known-address path does before discarding the result, so the two paths can't be distinguished by the work they perform either — only by a residual asymmetry this can't remove: the known-address path writes a token row and the unknown-address path never does, since there's no user to attach one to (the same kind of documented gap as `VerifyPassword`'s dummy-hash equalization — equal work, not a provable-equal-latency guarantee across a storage boundary). Your HTTP handler can safely return the same generic response ("if that address is registered, we've sent a reset link") unconditionally, with no flattening of its own required.
 

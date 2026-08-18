@@ -91,11 +91,11 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		// Passwordless user: verify against the dummy hash for the same
 		// reason VerifyPassword does — so response timing doesn't reveal
 		// that this account has no password to check.
-		_, _, _ = verifyPassword(password, s.dummyHash)
+		_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
 		return ErrInvalidCredentials
 	}
 
-	ok, legacyForm, err := verifyPassword(password, user.PasswordHash)
+	ok, legacyForm, err := verifyPassword(password, user.PasswordHash, s.cfg.Pepper)
 	if err != nil {
 		return fmt.Errorf("sulis: verifying password: %w", err)
 	}

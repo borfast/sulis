@@ -13,9 +13,17 @@ import (
 // Credential GetActiveTOTP returns and false on every Credential
 // GetPendingTOTP returns.
 type Credential struct {
-	ID              string
-	UserID          string
-	Secret          string // base32-encoded shared secret
+	ID     string
+	UserID string
+	// Secret is the base32-encoded shared secret, UNLESS Service is
+	// configured with an Encryptor (see WithEncryptor), in which case every
+	// value a Store implementation ever sees here is that Encryptor's
+	// ciphertext instead — Service encrypts before every write and decrypts
+	// after every read, entirely inside the totp package. A Store
+	// implementation cannot tell the difference and does not need to: this
+	// field is an opaque string either way, and the Store interface below
+	// is unchanged by whether encryption is configured.
+	Secret          string
 	Verified        bool   // true after the user confirms enrollment with a valid code
 	LastUsedCounter uint64 // time-step counter of the last accepted code, for replay protection
 	CreatedAt       time.Time
