@@ -68,18 +68,38 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 
 // extractToken reads the session token from whichever channel(s) s.cfg.
 // TokenSource permits, in precedence order: a Bearer header is tried
-// first, and — deliberately — never falls back to a cookie if a Bearer
-// header was presented but didn't hold a token (e.g. malformed). Falling
-// back would let an attacker who can inject an Authorization header, but
-// not read cookies, probe for a valid cookie-based session by observing
-// whether validation "recovers"; see
-// TestAuthenticateBearerTakesPrecedenceOverCookie.
+// first (unless TokenSourceCookieOnly is configured, in which case the
+// Authorization header is never even inspected — an explicit developer
+// opt-out of the whole channel, not the ambiguous case this comment is
+// about).
+//
+// Whenever the Authorization header IS inspected, presenting ANY non-empty
+// value suppresses the cookie fallback entirely for that request — the
+// request is treated as Bearer-only the moment a caller volunteers an
+// Authorization header, whether or not it parses as "Bearer <token>". A
+// well-formed "Bearer <token>" returns that token; anything else (missing
+// the "Bearer " prefix, a different scheme like "Basic ...", or malformed
+// in any other way) returns "" immediately, never falling through to the
+// cookie. Falling through on a malformed-but-present header would let an
+// attacker who can make the browser send an arbitrary Authorization value
+// on a cross-site request — a credentialed CORS misconfiguration is a
+// realistic way to get exactly that — but can't read cookies directly,
+// still ride the victim's ambient cookie on a route the developer may have
+// filed as "Bearer API, no CSRF needed" specifically because it inspects
+// Authorization at all. A client that sends a non-Bearer Authorization
+// header on a request it also expects cookie auth to satisfy was never a
+// sane configuration to support; see
+// TestAuthenticateBearerTakesPrecedenceOverCookie and
+// TestAuthenticateRejectsNonBearerAuthorizationEvenWithValidCookie, and the
+// T507 (fix round 1) Decisions row in PROGRESS.md.
 func (s *Sulis) extractToken(r *http.Request) string {
 	if s.cfg.TokenSource != TokenSourceCookieOnly {
 		if auth := r.Header.Get("Authorization"); auth != "" {
-			if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
-				return strings.TrimSpace(after)
+			after, ok := strings.CutPrefix(auth, "Bearer ")
+			if !ok {
+				return ""
 			}
+			return strings.TrimSpace(after)
 		}
 	}
 

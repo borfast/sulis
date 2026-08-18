@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -186,6 +187,19 @@ func TestRequireCSRFTokenAllowsStateChangingMethodWithMatchingToken(t *testing.T
 	}
 }
 
+// constantTimeCompareCallPattern matches a call to subtle.ConstantTimeCompare
+// tolerating whitespace (including a line break) between the name and the
+// opening paren, so reformatting the call across multiple lines doesn't
+// break TestVerifyCSRFTokenUsesConstantTimeCompare below. It is still
+// sensitive to changes that don't merely reformat the call: aliasing the
+// "crypto/subtle" import (e.g. `csubtle "crypto/subtle"`) or moving the
+// comparison into a helper function elsewhere would both need this pattern
+// (or the test) updated to match. That residual brittleness is accepted
+// deliberately — the goal is to catch an accidental regression to a
+// data-dependent comparison in the ordinary course of editing this file,
+// not to survive an adversarial rewrite of it.
+var constantTimeCompareCallPattern = regexp.MustCompile(`subtle\.ConstantTimeCompare\s*\(`)
+
 // TestVerifyCSRFTokenUsesConstantTimeCompare is an implementation-inspection
 // assertion, not a timing measurement: timing-based tests are inherently
 // flaky under a shared CI runner and would either flake or need enough
@@ -203,7 +217,7 @@ func TestVerifyCSRFTokenUsesConstantTimeCompare(t *testing.T) {
 	if !strings.Contains(string(src), `"crypto/subtle"`) {
 		t.Fatal("expected csrf.go to import crypto/subtle")
 	}
-	if !strings.Contains(string(src), "subtle.ConstantTimeCompare(") {
+	if !constantTimeCompareCallPattern.MatchString(string(src)) {
 		t.Fatal("expected csrf.go to compare the CSRF token via subtle.ConstantTimeCompare")
 	}
 }

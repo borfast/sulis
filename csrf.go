@@ -13,6 +13,22 @@ import (
 // place. A deployment configured with WithTokenSource(TokenSourceBearerOnly)
 // — one that never calls SessionCookie either — needs none of this; see
 // the README's "Cookie sessions and CSRF" section.
+//
+// This is a PURE double-submit: CSRFCookieName's value is a bare random
+// token, not cryptographically bound to the session that requested it (no
+// HMAC over a session ID, no server-side lookup). By itself that means
+// anyone who can get their own chosen value written into that cookie for
+// this origin could echo the very same value back in CSRFHeaderName/
+// CSRFFormField themselves, defeating the check — the classical weakness
+// of a bare double-submit token versus a session-bound one. This package
+// closes that gap by layering, not by binding the token: CSRFCookieName
+// carries the __Host- prefix, so neither a sibling subdomain nor a
+// network attacker without HTTPS can set it for this origin in the first
+// place, and RequireSameOrigin adds an independent, Fetch-Metadata-based
+// check that doesn't depend on cookie contents at all. Treat
+// IssueCSRFToken/RequireCSRFToken/VerifyCSRFToken as one layer of a
+// defense meant to be combined with __Host- and RequireSameOrigin, not as
+// a standalone guarantee.
 const (
 	// CSRFCookieName is the cookie IssueCSRFToken sets and
 	// RequireCSRFToken/VerifyCSRFToken read the expected value from.
@@ -92,6 +108,11 @@ func RequireCSRFToken(next http.Handler) http.Handler {
 // <form> POST that can't set a custom header) the CSRFFormField form
 // value. A missing cookie, a missing echoed value, and a mismatch all
 // return the same ErrCSRFTokenInvalid.
+//
+// This check alone is a pure double-submit — not bound to the session,
+// only to whoever can read this cookie — see the package doc comment
+// above for why that's layered with the __Host- prefix and
+// RequireSameOrigin rather than relied on in isolation.
 //
 // The comparison is constant-time (crypto/subtle.ConstantTimeCompare), so
 // a timing side channel can't be used to recover the token byte by byte.

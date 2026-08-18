@@ -153,6 +153,77 @@ func TestAuthenticateBearerTakesPrecedenceOverCookie(t *testing.T) {
 	}
 }
 
+// TestAuthenticateRejectsNonBearerAuthorizationEvenWithValidCookie is the
+// fix-round-1 regression test for a gap in the "Bearer takes precedence"
+// rule above: that rule only checked a well-formed "Bearer <token>" header.
+// A non-empty Authorization header that ISN'T "Bearer ..." at all (e.g.
+// "Basic xyz", a scheme this middleware never accepts) fell through
+// strings.CutPrefix's failure to the cookie branch, silently authenticating
+// via the ambient cookie. That is a real cross-site risk: an attacker's
+// page — allowed by a permissive, credentialed CORS policy to set an
+// arbitrary Authorization header on a cross-site fetch — could set any
+// non-Bearer value and still ride the victim's cookie on a
+// TokenSourceBoth route the developer mentally filed as "Bearer API, no
+// CSRF needed." Any non-empty Authorization header now suppresses the
+// cookie fallback entirely for that request: the request is treated as
+// Bearer-only once a caller volunteers ANY Authorization header, and a
+// malformed one is a straightforward 401, never a silent recovery via
+// cookie. See the T507 (fix round 1) Decisions row in PROGRESS.md.
+func TestAuthenticateRejectsNonBearerAuthorizationEvenWithValidCookie(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	handler := s.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, authHeader := range []string{"Basic xyz", "Bearer"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: defaultCookieName, Value: sessionTok})
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("Authorization=%q: expected 401 (non-Bearer header must suppress cookie fallback), got %d", authHeader, rec.Code)
+		}
+	}
+}
+
+// TestAuthenticateAcceptsCookieWhenNoAuthorizationHeaderIsPresent pins the
+// unchanged half of the fix above: a request that never sends an
+// Authorization header at all — the ordinary cookie-only browser case —
+// still authenticates via the cookie exactly as before.
+func TestAuthenticateAcceptsCookieWhenNoAuthorizationHeaderIsPresent(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	handler := s.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: defaultCookieName, Value: sessionTok})
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
 // TestAuthenticateRejectsMissingTokenSetsSecurityHeaders asserts the 401
 // path advertises WWW-Authenticate (RFC 7235/6750 — tells a Bearer client
 // what scheme to retry with) and Cache-Control: no-store (an auth failure,
