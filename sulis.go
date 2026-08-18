@@ -127,6 +127,16 @@ func (s *Sulis) Login(ctx context.Context, email, password string, ri RequestInf
 // password is wrong. Like Login, it equalizes response timing for
 // unknown-user and passwordless-user cases by running the same Argon2 work
 // against a dummy hash.
+//
+// One further timing note, narrow enough to rarely matter: a successful
+// verification against a hash written before NFKC normalization existed
+// (see the README's "Upgrading" section) costs a second Argon2 comparison —
+// one for an account that has already migrated, two for one that hasn't
+// logged in since. The gap closes for good after that account's next
+// successful login, and it only exists at all for a password containing
+// characters an already-normalized (e.g. plain ASCII) password never has.
+// See verifyPassword's doc comment (password.go) for the full accounting,
+// including why this is not a guessing oracle.
 func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri RequestInfo) (*User, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {

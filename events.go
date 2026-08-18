@@ -387,6 +387,14 @@ type Event struct {
 // called from whatever goroutine is running the flow — and should return
 // quickly, doing anything slow or fallible elsewhere. Emit is called AFTER
 // the decision it reports.
+//
+// A panicking Emit is recovered, and the panic dropped, so a broken sink
+// cannot take authentication down with it — but that containment is itself
+// silent: there is nowhere left to report the panic to, so a sink that
+// panics gets no error, no log line, and no second call this time around.
+// Do not rely on it. A sink should hand the event off — a channel, a
+// logger, a buffer — and return, rather than doing anything slow or
+// failure-prone inline.
 type EventSink interface {
 	Emit(ctx context.Context, e Event)
 }
