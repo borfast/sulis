@@ -35,6 +35,14 @@ type Token struct {
 	// later address change invalidates an outstanding token). It is empty
 	// for password-reset and two-factor tokens.
 	Email string
+	// NonceHash is the SHA-256 hash of a magic-link binding nonce (see
+	// WithMagicLinkBinding) — the raw nonce is never stored, matching
+	// TokenHash's own treatment of the raw token. It is set only for a
+	// magic-link token issued while binding was enabled (the default);
+	// empty for every other token purpose, and empty for a magic-link
+	// token issued while binding was disabled — RedeemMagicLink accepts
+	// any bindingNonce, including "", whenever NonceHash is empty.
+	NonceHash string
 }
 
 // TokenStore defines the persistence operations for tokens.

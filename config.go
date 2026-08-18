@@ -79,19 +79,26 @@ const (
 
 // Config holds the configuration for a Sulis instance.
 type Config struct {
-	SessionDuration                time.Duration // how long sessions are valid (default: 24h)
-	TokenDuration                  time.Duration // how long reset/magic link tokens are valid (default: 1h)
+	SessionDuration time.Duration // how long sessions are valid (default: 24h)
+	TokenDuration   time.Duration // how long password reset tokens are valid (default: 1h)
+	// MagicLinkDuration is how long magic-link tokens are valid (default:
+	// 15m), independent of TokenDuration — see WithMagicLinkDuration.
+	MagicLinkDuration              time.Duration
 	TwoFactorTokenDuration         time.Duration // how long two-factor pending-login tokens are valid (default: 5m)
 	EmailVerificationTokenDuration time.Duration // how long email verification tokens are valid (default: 24h)
 	SessionTokenBytes              int           // length of random session tokens in bytes (default: 32)
 	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
 	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
 	RequireVerifiedEmail           bool          // block new sessions for unverified accounts (default: true)
-	MinPasswordLength              int           // minimum accepted password length in bytes (default: 12)
-	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
-	Argon2                         Argon2Params
-	Limiter                        Limiter         // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
-	PasswordChecker                PasswordChecker // screens new passwords for known-compromised values (default: passwordcheck.NewBlocklist())
+	// MagicLinkBinding requires RedeemMagicLink to be called with the
+	// bindingNonce CreateMagicLinkToken returned alongside the token
+	// (default: true) — see WithMagicLinkBinding.
+	MagicLinkBinding  bool
+	MinPasswordLength int // minimum accepted password length in bytes (default: 12)
+	MaxPasswordLength int // maximum accepted password length in bytes (default: 1024)
+	Argon2            Argon2Params
+	Limiter           Limiter         // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
+	PasswordChecker   PasswordChecker // screens new passwords for known-compromised values (default: passwordcheck.NewBlocklist())
 
 	// Pepper is mixed into every password via HMAC-SHA256 before Argon2 —
 	// see WithPepper. Default: nil, meaning no pepper.
@@ -143,12 +150,14 @@ func defaultConfig() Config {
 	return Config{
 		SessionDuration:                24 * time.Hour,
 		TokenDuration:                  1 * time.Hour,
+		MagicLinkDuration:              15 * time.Minute,
 		TwoFactorTokenDuration:         5 * time.Minute,
 		EmailVerificationTokenDuration: 24 * time.Hour,
 		SessionTokenBytes:              32,
 		ResetTokenBytes:                32,
 		RevokeSessionsOnPasswordChange: true,
 		RequireVerifiedEmail:           true,
+		MagicLinkBinding:               true,
 		MinPasswordLength:              12,
 		MaxPasswordLength:              1024,
 		Limiter:                        NewMemoryLimiter(),
@@ -169,9 +178,27 @@ func WithSessionDuration(d time.Duration) Option {
 	return func(c *Config) { c.SessionDuration = d }
 }
 
-// WithTokenDuration sets how long password reset and magic link tokens remain valid.
+// WithTokenDuration sets how long password reset tokens remain valid.
+// Magic-link tokens do NOT use this — they have their own, independent
+// duration; see WithMagicLinkDuration.
 func WithTokenDuration(d time.Duration) Option {
 	return func(c *Config) { c.TokenDuration = d }
+}
+
+// WithMagicLinkDuration sets how long magic-link tokens remain valid
+// (default: 15m). This is independent of TokenDuration/WithTokenDuration,
+// which governs password-reset tokens only: a magic link is a full
+// credential delivered in cleartext over email — where it can be
+// forwarded, scanned by a mail security appliance, or prefetched by a
+// client before the recipient ever sees it — so it should live for only as
+// long as a legitimate recipient plausibly needs to click it, not as long
+// as a password-reset link a human reads and then types a new password
+// after. The previous behavior, before this option existed, was both
+// flows sharing TokenDuration (default 1h); a deployment relying on that
+// 1h magic-link window must now set WithMagicLinkDuration(time.Hour)
+// explicitly.
+func WithMagicLinkDuration(d time.Duration) Option {
+	return func(c *Config) { c.MagicLinkDuration = d }
 }
 
 // WithTwoFactorTokenDuration sets how long two-factor pending-login tokens
@@ -264,6 +291,48 @@ func WithPasswordLengthLimits(minLength, maxLength int) Option {
 // redemption (which verifies the email itself) are always exempt.
 func WithRequireVerifiedEmail(require bool) Option {
 	return func(c *Config) { c.RequireVerifiedEmail = require }
+}
+
+// WithMagicLinkBinding controls whether redeeming a magic link requires a
+// binding nonce matching the one CreateMagicLinkToken generated alongside
+// the token (default: true).
+//
+// CreateMagicLinkToken returns (token, bindingNonce string, err error). The
+// application is expected to set bindingNonce as a short-lived, HttpOnly
+// cookie on the response to the request that triggered issuance — NOT to
+// embed it in the emailed link itself, which would defeat the entire
+// point — and to read it back from that cookie when the link is later
+// clicked, passing it to RedeemMagicLink alongside the token recovered
+// from the link's query string. Because the nonce travels only in a
+// cookie scoped to the browser that requested the link, a copy of the
+// link forwarded to, or opened by, a different device or browser arrives
+// without the matching cookie: RedeemMagicLink then rejects it with
+// ErrTokenInvalid even though the token itself is still valid, unused, and
+// unexpired. That is what makes a forwarded magic link useless to whoever
+// it was forwarded to.
+//
+// The nonce is stored hashed (SHA-256, alongside the token's own hash —
+// see Token.NonceHash), never in plaintext, and compared at redemption via
+// crypto/subtle.ConstantTimeCompare over the hashes, exactly as
+// VerifyCSRFToken compares its own double-submit token.
+//
+// Passing false accepts any bindingNonce value at redemption — including
+// "" — because CreateMagicLinkToken stops generating one at all: it
+// returns bindingNonce == "" and the created Token carries no NonceHash
+// for RedeemMagicLink to check against. The trade-off: without binding, a
+// magic link works from whatever device or browser opens it, which is
+// convenient when mail is routinely read somewhere other than where the
+// link was requested (a common case — requesting from a desktop, opening
+// from a phone's mail app) — but it also means a link forwarded to
+// someone else, or consumed by an automated mail scanner that prefetches
+// links before a human ever clicks, signs that other party or scanner in
+// instead. Turning this off is a deliberate, greppable trade-off; make it
+// with that risk in mind, not by leaving it at the default without
+// thinking about it. See the README's magic-link section for the prefetch
+// hazard and why a confirmation click (rather than a bare GET link) is
+// recommended regardless of this setting.
+func WithMagicLinkBinding(b bool) Option {
+	return func(c *Config) { c.MagicLinkBinding = b }
 }
 
 // WithLimiter replaces the rate limiter consulted at guessable authentication

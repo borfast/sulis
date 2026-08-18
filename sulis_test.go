@@ -400,9 +400,9 @@ func mustNew(users UserStore, sessions SessionStore, tokens TokenStore, opts ...
 // (user, session) shape most tests assert on. It fails the test if a second
 // factor is unexpectedly demanded; tests covering that branch call
 // RedeemMagicLink directly.
-func redeemMagicLink(t *testing.T, s *Sulis, ctx context.Context, rawToken string) (*User, *Session, string, error) {
+func redeemMagicLink(t *testing.T, s *Sulis, ctx context.Context, rawToken, bindingNonce string) (*User, *Session, string, error) {
 	t.Helper()
-	res, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
+	res, err := s.RedeemMagicLink(ctx, rawToken, bindingNonce, RequestInfo{})
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -800,12 +800,12 @@ func TestMagicLinkFlow(t *testing.T) {
 	ctx := context.Background()
 
 	// Magic link for new user (should auto-create).
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -820,9 +820,171 @@ func TestMagicLinkFlow(t *testing.T) {
 	}
 
 	// Token should be used; can't reuse.
-	_, err = s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
+	_, err = s.RedeemMagicLink(ctx, rawToken, nonce, RequestInfo{})
 	if err != ErrTokenAlreadyUsed {
 		t.Fatalf("expected ErrTokenAlreadyUsed, got %v", err)
+	}
+}
+
+// --- T508: split magic-link TTL; bind links to the requester --------------
+
+// storedTokenByHash returns the token store's copy of the token whose raw
+// value hashes to rawToken, for tests that need to inspect fields (like
+// NonceHash) RedeemMagicLink's return value doesn't surface.
+func storedTokenByHash(t *testing.T, tokens *memTokenStore, rawToken string) *Token {
+	t.Helper()
+	want := hashToken(rawToken)
+	tokens.mu.Lock()
+	defer tokens.mu.Unlock()
+	for _, tk := range tokens.tokens {
+		if tk.TokenHash == want {
+			cp := *tk
+			return &cp
+		}
+	}
+	t.Fatalf("no stored token found for the given raw token")
+	return nil
+}
+
+// TestMagicLinkDurationIsIndependentOfTokenDuration asserts that magic-link
+// tokens expire after the default MagicLinkDuration (15m) regardless of
+// TokenDuration, which now governs password-reset tokens only. A magic link
+// is a full credential delivered in cleartext over email — often forwarded,
+// scanned, or prefetched — so it must not inherit whatever TTL an operator
+// picks for password resets.
+func TestMagicLinkDurationIsIndependentOfTokenDuration(t *testing.T) {
+	s, _, _, tokens := newTestEnv(WithTokenDuration(2 * time.Hour))
+	ctx := context.Background()
+
+	rawToken, _, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	stored := storedTokenByHash(t, tokens, rawToken)
+	want := 15 * time.Minute
+	got := stored.ExpiresAt.Sub(stored.CreatedAt)
+	if got < want-time.Second || got > want+time.Second {
+		t.Fatalf("magic-link TTL = %v, want ~%v (independent of the configured 2h TokenDuration)", got, want)
+	}
+}
+
+// TestWithMagicLinkDurationOverridesDefault asserts that WithMagicLinkDuration
+// actually changes the TTL magic-link tokens are issued with, rather than the
+// default merely happening to be independent of TokenDuration on its own.
+func TestWithMagicLinkDurationOverridesDefault(t *testing.T) {
+	s, _, _, tokens := newTestEnv(WithMagicLinkDuration(3 * time.Minute))
+	ctx := context.Background()
+
+	rawToken, _, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	stored := storedTokenByHash(t, tokens, rawToken)
+	want := 3 * time.Minute
+	got := stored.ExpiresAt.Sub(stored.CreatedAt)
+	if got < want-time.Second || got > want+time.Second {
+		t.Fatalf("magic-link TTL = %v, want ~%v (the configured WithMagicLinkDuration)", got, want)
+	}
+}
+
+// TestRedeemMagicLinkRejectsMissingOrWrongNonceWhenBindingOn asserts that,
+// under the default WithMagicLinkBinding(true), a missing or incorrect
+// binding nonce is rejected with ErrTokenInvalid even though the token
+// itself is valid, unused, and unexpired. This is the property that makes a
+// forwarded magic link useless on a different browser: the nonce, not the
+// token, is what only the original requester's browser can present (via the
+// short-lived HttpOnly cookie the application sets at issuance time).
+func TestRedeemMagicLinkRejectsMissingOrWrongNonceWhenBindingOn(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	rawToken1, nonce1, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if nonce1 == "" {
+		t.Fatal("expected a non-empty binding nonce when binding is on (the default)")
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken1, "", RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("missing nonce: expected ErrTokenInvalid, got %v", err)
+	}
+
+	rawToken2, _, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (second): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken2, "wrong-nonce", RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("wrong nonce: expected ErrTokenInvalid, got %v", err)
+	}
+
+	// A third, freshly issued token with its own correct nonce still
+	// redeems — proving the two rejections above were about the nonce
+	// specifically, not some wider breakage.
+	rawToken3, nonce3, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (third): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken3, nonce3, RequestInfo{}); err != nil {
+		t.Fatalf("expected the correct nonce to redeem successfully, got %v", err)
+	}
+}
+
+// TestRedeemMagicLinkWithoutNonceWorksWhenBindingOff asserts that
+// WithMagicLinkBinding(false) both stops CreateMagicLinkToken from minting
+// a nonce at all and makes RedeemMagicLink accept any bindingNonce value —
+// including empty, and including an arbitrary non-empty one — since a token
+// issued under this setting stores no NonceHash to check against.
+func TestRedeemMagicLinkWithoutNonceWorksWhenBindingOff(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithMagicLinkBinding(false))
+	ctx := context.Background()
+
+	rawToken1, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if nonce != "" {
+		t.Fatalf("expected an empty binding nonce when binding is off, got %q", nonce)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken1, "", RequestInfo{}); err != nil {
+		t.Fatalf("expected redemption without a nonce to succeed when binding is off, got %v", err)
+	}
+
+	rawToken2, _, err := s.CreateMagicLinkToken(ctx, "carol@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (second): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken2, "anything-goes", RequestInfo{}); err != nil {
+		t.Fatalf("expected redemption with an arbitrary nonce to succeed when binding is off, got %v", err)
+	}
+}
+
+// TestMagicLinkNonceIsStoredHashed asserts that the binding nonce is never
+// persisted in plaintext: the stored token's NonceHash must be the nonce's
+// SHA-256 hash, matching TokenHash's own treatment of the raw token, never
+// the raw nonce itself.
+func TestMagicLinkNonceIsStoredHashed(t *testing.T) {
+	s, _, _, tokens := newTestEnv()
+	ctx := context.Background()
+
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if nonce == "" {
+		t.Fatal("expected a non-empty binding nonce")
+	}
+
+	stored := storedTokenByHash(t, tokens, rawToken)
+	if stored.NonceHash == "" {
+		t.Fatal("expected a non-empty stored NonceHash when binding is on")
+	}
+	if stored.NonceHash == nonce {
+		t.Fatal("stored NonceHash must not equal the plaintext nonce")
+	}
+	if stored.NonceHash != hashToken(nonce) {
+		t.Fatalf("NonceHash = %q, want the SHA-256 hash of the raw nonce (%q)", stored.NonceHash, hashToken(nonce))
 	}
 }
 
@@ -1158,12 +1320,12 @@ func TestChangePasswordRejectsPasswordlessUser(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 	// The user is only created at redemption time (deferred user creation).
-	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1178,12 +1340,12 @@ func TestSetInitialPassword(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 	// The user is only created at redemption time (deferred user creation).
-	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1245,7 +1407,7 @@ func TestCreateMagicLinkTokenAcceptsWrappedUserNotFound(t *testing.T) {
 	ctx := context.Background()
 	s := mustNew(&wrappedNotFoundUserStore{}, newMemSessionStore(), newMemTokenStore())
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "wrapped@example.com", RequestInfo{})
+	rawToken, _, err := s.CreateMagicLinkToken(ctx, "wrapped@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
@@ -1336,7 +1498,7 @@ func TestConsumeTokenWrongPurposeIsInvalid(t *testing.T) {
 	}
 
 	// Presenting a reset token to the magic-link flow must not consume it.
-	_, err = s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
+	_, err = s.RedeemMagicLink(ctx, rawToken, "", RequestInfo{})
 	if err != ErrTokenInvalid {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
@@ -1554,13 +1716,13 @@ func TestLoginPasswordlessUserReturnsInvalidCredentials(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 	// Redeem so the passwordless user actually exists; otherwise this would
 	// exercise the unknown-user path instead of the passwordless-user path.
-	if _, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{}); err != nil {
+	if _, err := s.RedeemMagicLink(ctx, rawToken, nonce, RequestInfo{}); err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
 
@@ -1610,7 +1772,7 @@ func TestCreateMagicLinkTokenDoesNotCreateUser(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, _, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
@@ -1626,7 +1788,7 @@ func TestRedeemMagicLinkCreatesPasswordlessUser(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "Bob@Example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "Bob@Example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
@@ -1634,7 +1796,7 @@ func TestRedeemMagicLinkCreatesPasswordlessUser(t *testing.T) {
 		t.Fatalf("expected no user before redemption, got %d", len(users.users))
 	}
 
-	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1656,7 +1818,7 @@ func TestRedeemMagicLinkRacesWithRegister(t *testing.T) {
 	s, _, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
@@ -1668,7 +1830,7 @@ func TestRedeemMagicLinkRacesWithRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -1706,12 +1868,12 @@ func TestGetOrCreatePasswordlessUserFallsBackAfterCreateUserRace(t *testing.T) {
 	s := mustNew(users, newMemSessionStore(), newMemTokenStore())
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -2180,12 +2342,12 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 		t.Fatal("expected EmailVerifiedAt nil before any verification")
 	}
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	verifiedUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	verifiedUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -2194,11 +2356,11 @@ func TestRedeemMagicLinkStampsEmailVerified(t *testing.T) {
 	}
 	firstVerifiedAt := *verifiedUser.EmailVerifiedAt
 
-	rawToken2, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
+	rawToken2, nonce2, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken (second): %v", err)
 	}
-	secondUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken2)
+	secondUser, _, _, err := redeemMagicLink(t, s, ctx, rawToken2, nonce2)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink (second): %v", err)
 	}
@@ -2225,12 +2387,12 @@ func TestRedeemMagicLinkRevokesAttackerSessionOnFirstVerification(t *testing.T) 
 		t.Fatalf("Register: %v", err)
 	}
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "victim@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	victimUser, _, victimSessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
+	victimUser, _, victimSessionTok, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -2286,7 +2448,7 @@ func TestDeniedLimiterReturnsErrRateLimited(t *testing.T) {
 		t.Fatalf("CreatePasswordResetToken: expected ErrRateLimited, got %v", err)
 	}
 
-	if _, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{}); !errors.Is(err, ErrRateLimited) {
+	if _, _, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{}); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("CreateMagicLinkToken: expected ErrRateLimited, got %v", err)
 	}
 }
@@ -2344,7 +2506,7 @@ func TestNilLimiterIsNoOp(t *testing.T) {
 		t.Fatalf("CreatePasswordResetToken: %v", err)
 	}
 
-	if _, err := s.CreateMagicLinkToken(ctx, "carol@example.com", RequestInfo{}); err != nil {
+	if _, _, err := s.CreateMagicLinkToken(ctx, "carol@example.com", RequestInfo{}); err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 }
@@ -2428,12 +2590,12 @@ func TestRedeemMagicLinkStillSignsInUnverifiedUser(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, sessionTok, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: expected success despite default RequireVerifiedEmail, got %v", err)
 	}
@@ -2679,14 +2841,14 @@ func TestRedeemMagicLinkWithSecondFactorRequiresSecondFactor(t *testing.T) {
 	verifyUserEmail(t, users, user.ID)
 	factors.enroll(user.ID)
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
 	before := sessions.count()
 
-	res, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
+	res, err := s.RedeemMagicLink(ctx, rawToken, nonce, RequestInfo{})
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -2723,12 +2885,12 @@ func TestRedeemMagicLinkStampsVerifiedEvenWhenSecondFactorPending(t *testing.T) 
 	factors.enroll(user.ID)
 
 	// Deliberately left unverified.
-	rawToken, err := s.CreateMagicLinkToken(ctx, "dave@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "dave@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
 
-	res, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{})
+	res, err := s.RedeemMagicLink(ctx, rawToken, nonce, RequestInfo{})
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -3116,11 +3278,11 @@ func TestReAuthenticatePasswordlessUserReturnsInvalidCredentials(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
-	_, session, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	_, session, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -3541,7 +3703,7 @@ func TestRedeemMagicLinkRejectsDisabledAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	rawToken, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
@@ -3550,7 +3712,7 @@ func TestRedeemMagicLinkRejectsDisabledAccount(t *testing.T) {
 		t.Fatalf("DisableUser: %v", err)
 	}
 
-	if _, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
+	if _, err := s.RedeemMagicLink(ctx, rawToken, nonce, RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("RedeemMagicLink error = %v, want ErrAccountDisabled", err)
 	}
 }
@@ -3819,11 +3981,11 @@ func TestSetInitialPasswordClearsLockoutFields(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
 	ctx := context.Background()
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
-	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken, nonce)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
@@ -3909,11 +4071,11 @@ func TestSessionsRecordRequestInfoAtIssuance(t *testing.T) {
 		t.Errorf("Login session IP/UserAgent = %q/%q, want %q/%q", loginRes.Session.IP, loginRes.Session.UserAgent, ri.IP, ri.UserAgent)
 	}
 
-	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	rawToken, nonce, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
 	if err != nil {
 		t.Fatalf("CreateMagicLinkToken: %v", err)
 	}
-	magicRes, err := s.RedeemMagicLink(ctx, rawToken, ri)
+	magicRes, err := s.RedeemMagicLink(ctx, rawToken, nonce, ri)
 	if err != nil {
 		t.Fatalf("RedeemMagicLink: %v", err)
 	}
