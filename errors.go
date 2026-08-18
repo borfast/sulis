@@ -1,18 +1,41 @@
 package sulis
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/borfast/sulis/passwordcheck"
+)
 
 var (
 	// User errors.
 	ErrUserNotFound      = errors.New("sulis: user not found")
 	ErrUserAlreadyExists = errors.New("sulis: user already exists")
+	// ErrConcurrentUpdate is returned by UserStore.UpdateUser when the write
+	// was built from a stale read and another writer won the race.
+	ErrConcurrentUpdate = errors.New("sulis: concurrent update")
 
 	// Credential errors.
 	ErrInvalidCredentials = errors.New("sulis: invalid credentials")
 
+	// Authentication errors.
+	//
+	// ErrNotAuthenticated is returned by IssueSession when given the zero
+	// value Authentication{} (or any Authentication not obtained by
+	// completing a factor sulis itself verified, since nothing outside this
+	// package can construct one otherwise). It means there is no proof of
+	// authentication to act on, not that a specific credential was wrong.
+	ErrNotAuthenticated = errors.New("sulis: not authenticated")
+
 	// Session errors.
 	ErrSessionNotFound = errors.New("sulis: session not found")
 	ErrSessionExpired  = errors.New("sulis: session expired")
+
+	// ErrReauthRequired is returned by RequireRecentAuth when a session's
+	// AuthenticatedAt is older than the caller's maxAge. It means the
+	// session is otherwise valid — ValidateSession would still accept it —
+	// but too stale to authorize a step-up-gated operation without proving
+	// the credential again via ReAuthenticate.
+	ErrReauthRequired = errors.New("sulis: recent authentication required")
 
 	// Token errors.
 	ErrTokenInvalid     = errors.New("sulis: invalid token")
@@ -23,6 +46,21 @@ var (
 	// Password policy errors.
 	ErrPasswordTooShort = errors.New("sulis: password too short")
 	ErrPasswordTooLong  = errors.New("sulis: password too long")
+	// ErrPasswordCompromised is returned by every path that sets a password
+	// — Register, ChangePassword, ResetPassword, SetInitialPassword — when
+	// the configured PasswordChecker recognises the password as commonly
+	// used, expected, or previously breached. It is never returned by
+	// VerifyPassword, Login, or ReAuthenticate: see WithPasswordChecker for
+	// why screening happens where a password is chosen and not where it is
+	// proven.
+	//
+	// It is the very same error value as passwordcheck.ErrCompromised, not a
+	// copy of it, so errors.Is matches under either name. The value has to be
+	// born in that package rather than here: sulis's default configuration
+	// constructs a passwordcheck.Blocklist, so an import in the other
+	// direction would be a cycle, and two separate sentinels would silently
+	// break errors.Is for anyone who compared against the wrong one.
+	ErrPasswordCompromised = passwordcheck.ErrCompromised
 
 	// Email validation errors.
 	ErrInvalidEmail = errors.New("sulis: invalid email")
@@ -32,4 +70,31 @@ var (
 
 	// Rate limiting.
 	ErrRateLimited = errors.New("sulis: rate limited")
+
+	// Account status errors.
+	//
+	// ErrAccountDisabled is returned once a credential has verified for an
+	// account DisableUser marked disabled — VerifyPassword checks this only
+	// after a successful password verification, so a caller who has not
+	// proven the password cannot use it to learn whether an account exists
+	// and is disabled. ValidateSession also returns it for a pre-existing
+	// session belonging to a disabled account, so disabling takes effect on
+	// every live session immediately rather than only on the next login.
+	ErrAccountDisabled = errors.New("sulis: account disabled")
+	// ErrAccountLocked is returned the same way — only after a credential
+	// has verified — for an account whose LockedUntil (set by the optional
+	// automatic lockout; see WithFailureLockout) has not yet passed. Unlike
+	// ErrAccountDisabled, it is not checked by ValidateSession: a lockout
+	// throttles new authentication attempts, it does not invalidate a
+	// session already issued before the lockout began.
+	ErrAccountLocked = errors.New("sulis: account locked")
+
+	// ErrCSRFTokenInvalid is returned by VerifyCSRFToken (and so by the
+	// RequireCSRFToken middleware built on it) when the double-submit CSRF
+	// cookie is missing, the client echoed nothing back in the header or
+	// form field, or the two values don't match. It deliberately doesn't
+	// distinguish those cases: telling an attacker which one failed would
+	// hand back a bit of information about a cookie they can't otherwise
+	// read.
+	ErrCSRFTokenInvalid = errors.New("sulis: csrf token invalid")
 )

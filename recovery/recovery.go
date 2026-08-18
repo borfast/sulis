@@ -6,6 +6,33 @@
 // Codes are generated from crypto/rand, displayed to the user exactly once,
 // and only their SHA-256 hashes are persisted via the Store interface that
 // the consumer implements.
+//
+// # The lifecycle this package does not implement
+//
+// Consuming a recovery code is a full bypass of every other factor — as
+// strong a signal that an account may be under attack (a lost device, or a
+// stolen one) as anything this library can name. This package only
+// validates and consumes a code: it has no session store, no notification
+// mechanism, and no idea what your product looks like. A real integration
+// must do, itself, immediately after a successful Consume:
+//
+//  1. Revoke every OTHER active session for the user (e.g. sulis's
+//     RevokeAllSessions) — a recovery-code login means the primary factor
+//     was lost, so a session an attacker already holds should not survive
+//     it, the same reasoning behind sulis's own session revocation on a
+//     password change.
+//  2. Record the event somewhere auditable — subscribe a WithEventSink
+//     (EventCodeConsumed / EventCodeRejected / EventCodesExhausted /
+//     EventCodeRateLimited) or emit
+//     your own signal from the call site.
+//  3. Push the user toward re-enrolling a real second factor, especially
+//     once the returned remaining count reaches 0 (also reported as
+//     EventCodesExhausted) — recovery codes are a bridge back to a working
+//     TOTP credential or passkey, not a permanent substitute for one.
+//
+// Symmetrically, when the user's LAST other second factor is removed, call
+// Disable(ctx, userID) to purge whatever recovery codes are left over — see
+// Disable's doc comment for why that method is the purge hook.
 package recovery
 
 import (
@@ -16,11 +43,29 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"unicode"
 )
 
 // ErrCodeInvalid is returned when a supplied recovery code does not match
 // any stored, unused code for the user.
 var ErrCodeInvalid = errors.New("recovery: invalid code")
+
+// ErrCodeRateLimited is returned by Consume when the configured Limiter
+// denies the attempt. It replaces whatever error the Limiter itself
+// returned, so callers never see limiter implementation details — mirrors
+// totp.ErrTOTPRateLimited exactly.
+var ErrCodeRateLimited = errors.New("recovery: rate limited")
+
+// Limiter enforces a rate limit for a caller-supplied key. It is declared
+// separately from (and identical to) the root sulis package's Limiter
+// interface and totp.Limiter, so this package has no dependency on either
+// — a single implementation (e.g. sulis.MemoryLimiter) satisfies all three
+// via Go's structural interface typing, because every one of them uses only
+// primitives (a string key, an error) in its signature. Allow returns a
+// non-nil error if the key should be denied.
+type Limiter interface {
+	Allow(ctx context.Context, key string) error
+}
 
 // defaultCount is the number of recovery codes generated when WithCount is
 // not supplied.
@@ -32,7 +77,9 @@ const codeBytes = 10
 
 // Config holds recovery code generation parameters.
 type Config struct {
-	Count int
+	Count     int
+	Limiter   Limiter
+	EventSink EventSink
 }
 
 // Option is a functional option for configuring the recovery Service.
@@ -46,6 +93,24 @@ func WithCount(n int) Option {
 			c.Count = n
 		}
 	}
+}
+
+// WithLimiter sets the rate limiter Consume consults, keyed by
+// "recovery:"+userID, before it ever hashes or looks up the submitted code
+// — a recovery code is a 10-byte (80-bit) value, far larger than a 6-digit
+// TOTP code, but it is still a value an attacker who knows nothing else
+// about the account could try to guess, and this package ships no limiter
+// of its own. A nil limiter (the default) disables rate limiting.
+func WithLimiter(l Limiter) Option {
+	return func(c *Config) { c.Limiter = l }
+}
+
+// WithEventSink routes recovery-code security events to sink. The default
+// is nil: no sink, no events, and nothing on Consume's hot path but a nil
+// check. See EventSink's doc comment for the taxonomy and for why this
+// cannot simply reuse the root package's EventSink.
+func WithEventSink(sink EventSink) Option {
+	return func(c *Config) { c.EventSink = sink }
 }
 
 // Service manages recovery code generation and consumption.
@@ -85,15 +150,46 @@ func (s *Service) Generate(ctx context.Context, userID string) ([]string, error)
 	return codes, nil
 }
 
-// Consume validates and consumes a single-use recovery code for userID.
-// Input is normalized before comparison, so case, surrounding whitespace,
-// and dash grouping don't matter. A code can only be consumed once.
-func (s *Service) Consume(ctx context.Context, userID, code string) error {
-	err := s.store.ConsumeCode(ctx, userID, hashCode(code))
-	if errors.Is(err, ErrCodeNotFound) {
-		return ErrCodeInvalid
+// Consume validates and consumes a single-use recovery code for userID,
+// reporting how many unused codes remain for the user afterward. Input is
+// normalized before comparison, so case, surrounding whitespace, and dash
+// grouping don't matter. A code can only be consumed once.
+//
+// If a Limiter is configured (WithLimiter), it is consulted first — before
+// the submitted code is even hashed or looked up. A denied attempt returns
+// ErrCodeRateLimited and never touches the store, and emits
+// EventCodeRateLimited. An unmatched code returns ErrCodeInvalid.
+// remaining is always 0 when err is non-nil.
+//
+// Consume does not, by itself, revoke the user's other sessions, notify
+// anyone, or push the user toward re-enrolling a stronger factor — see this
+// package's doc comment for the full sequence a real integration needs,
+// which is the calling application's responsibility.
+func (s *Service) Consume(ctx context.Context, userID, code string) (remaining int, err error) {
+	if err = s.allow(ctx, "recovery:"+userID); err != nil {
+		s.emit(ctx, Event{Kind: EventCodeRateLimited, UserID: userID})
+		return 0, err
 	}
-	return err
+
+	err = s.store.ConsumeCode(ctx, userID, hashCode(code))
+	if errors.Is(err, ErrCodeNotFound) {
+		s.emit(ctx, Event{Kind: EventCodeRejected, UserID: userID})
+		return 0, ErrCodeInvalid
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	remaining, err = s.store.CountCodes(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+
+	s.emit(ctx, Event{Kind: EventCodeConsumed, UserID: userID, Remaining: remaining})
+	if remaining == 0 {
+		s.emit(ctx, Event{Kind: EventCodesExhausted, UserID: userID})
+	}
+	return remaining, nil
 }
 
 // Remaining reports the number of unused recovery codes for userID.
@@ -102,8 +198,36 @@ func (s *Service) Remaining(ctx context.Context, userID string) (int, error) {
 }
 
 // Disable removes all recovery codes for userID.
+//
+// This is also the purge hook applications must call when the user's LAST
+// OTHER second factor (a TOTP credential, a passkey) is removed. Recovery
+// codes exist as a fallback for a real second factor, not as a standalone
+// one, so they must not outlive the factor they back up — an application
+// that lets a user delete their only authenticator app while ten unused
+// recovery codes sit in the store has left the account guarded by exactly
+// the codes that were meant to be an emergency bridge, not the destination.
+// recovery cannot detect this by itself: it has no visibility into
+// totp.Store or passkey.Store, so calling Disable(ctx, userID) at that
+// moment is the calling application's responsibility. Disable is also,
+// unsurprisingly, what an explicit "turn off recovery codes" setting
+// should call — both uses want exactly the same operation, which is why
+// there is one method here rather than two identically-implemented ones.
 func (s *Service) Disable(ctx context.Context, userID string) error {
 	return s.store.DeleteCodes(ctx, userID)
+}
+
+// allow consults the configured rate limiter for key, if one is set. A nil
+// limiter is a no-op. Any error from the limiter is normalized to
+// ErrCodeRateLimited so callers never see limiter implementation details —
+// mirrors totp.Service.allow exactly.
+func (s *Service) allow(ctx context.Context, key string) error {
+	if s.cfg.Limiter == nil {
+		return nil
+	}
+	if err := s.cfg.Limiter.Allow(ctx, key); err != nil {
+		return ErrCodeRateLimited
+	}
+	return nil
 }
 
 // generateCode produces a fresh recovery code from crypto/rand, formatted
@@ -127,12 +251,28 @@ func formatCode(s string) string {
 	return strings.Join(groups, "-")
 }
 
-// canonical normalizes a user-supplied code for hashing: it trims
-// surrounding whitespace, strips dashes and internal spaces, and
-// uppercases the result.
+// canonical normalizes a user-supplied code for hashing: it strips every
+// dash and any Unicode whitespace character (anywhere in the string, not
+// just at the ends), and uppercases what remains.
+//
+// It strips whitespace and dashes in a single left-to-right pass rather than
+// TrimSpace-then-strip-dashes: the two-step version was not idempotent — an
+// interior whitespace rune (e.g. a tab) adjacent to a dash could end up at
+// the string's edge only after the dash was removed, so a second call would
+// trim it away when the first call had not, changing the hash a stored code
+// was compared against depending on how many times canonical happened to run
+// on it. FuzzRecoveryCanonical (task T402) found this via the input
+// "-\t0": canonical("-\t0") == "\t0", but canonical("\t0") == "0".
 func canonical(code string) string {
-	code = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
-	return strings.ReplaceAll(code, " ", "")
+	var b strings.Builder
+	b.Grow(len(code))
+	for _, r := range code {
+		if r == '-' || unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(unicode.ToUpper(r))
+	}
+	return b.String()
 }
 
 // hashCode returns the SHA-256 hex digest of the canonical form of code.

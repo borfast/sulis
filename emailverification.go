@@ -2,8 +2,13 @@ package sulis
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// errAlreadyVerified aborts the stampEmailVerified update when another writer
+// verified the address first. It never escapes this package.
+var errAlreadyVerified = errors.New("sulis: email already verified")
 
 // CreateEmailVerificationToken generates a short-lived, single-use token
 // proving control of the given user's registered email address. The token
@@ -57,17 +62,38 @@ func (s *Sulis) stampEmailVerified(ctx context.Context, user *User) error {
 	if user.EmailVerifiedAt != nil {
 		return nil
 	}
-	hadPassword := user.PasswordHash != ""
 
+	var hadPassword bool
 	now := time.Now()
-	user.EmailVerifiedAt = &now
-	user.UpdatedAt = now
-	if err := s.users.UpdateUser(ctx, user); err != nil {
+	updated, err := s.updateUserWithRetry(ctx, user.ID, func(u *User) error {
+		if u.EmailVerifiedAt != nil {
+			return errAlreadyVerified
+		}
+		// Read from the freshly loaded row, not the caller's copy: a password
+		// set between the caller's read and this write still counts.
+		hadPassword = u.PasswordHash != ""
+		u.EmailVerifiedAt = &now
+		u.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errAlreadyVerified) {
+			return nil
+		}
 		return err
 	}
+	// Give the caller the row as persisted, so the *User it returns reflects
+	// the verification and carries the current version.
+	*user = *updated
+
+	// Emitted here rather than in VerifyEmail, so the same event covers the
+	// magic-link path (RedeemMagicLink also stamps verification through this
+	// function). The already-verified early return above emits nothing: it
+	// decided nothing.
+	s.emit(ctx, Event{Kind: EventEmailVerified, UserID: user.ID})
 
 	if hadPassword {
-		if err := s.sessions.DeleteUserSessions(ctx, user.ID); err != nil {
+		if err := s.revokeUserSessions(ctx, user.ID); err != nil {
 			return err
 		}
 	}
