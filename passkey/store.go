@@ -14,7 +14,34 @@ type Credential struct {
 	AttestationType string
 	AAGUID          []byte
 	SignCount       uint32
-	CreatedAt       time.Time
+
+	// Discoverable records whether the authenticator created a client-side
+	// discoverable ("resident key") credential — the kind
+	// Service.BeginDiscoverableLogin's usernameless login needs in order to
+	// find a credential without the caller supplying a username first.
+	//
+	// It is populated from the client's "credProps" extension output
+	// (credProps.rk) on the registration response: true only when the
+	// client explicitly reported rk == true, false otherwise (extension
+	// absent, or credProps.rk == false). This is the only place
+	// go-webauthn v0.17.4 surfaces a resident-key signal at all — the
+	// finished credential's own Authenticator/Flags fields (UserPresent,
+	// UserVerified, BackupEligible, BackupState) have no such bit, and
+	// BackupEligible is a related but distinct property (can the
+	// credential be synced/backed up, not whether it's discoverable
+	// without a credential ID).
+	//
+	// LIMITATION: credProps is a client-reported (browser) extension
+	// output, not part of the signed attestation object — it is not
+	// cryptographically verified, and an older browser or authenticator
+	// may omit it entirely even for a credential that is, in fact,
+	// discoverable. Treat a false value as "not confirmed discoverable",
+	// not as proof the credential isn't; this under-reports rather than
+	// over-reports, so BeginDiscoverableLogin may simply fail to offer such
+	// a credential rather than something being accepted that shouldn't be.
+	Discoverable bool
+
+	CreatedAt time.Time
 }
 
 // Store defines the persistence operations for passkey credentials.

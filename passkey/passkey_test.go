@@ -1,7 +1,10 @@
 package passkey
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -630,5 +633,261 @@ func TestNewServiceRejectsUnknownUserVerification(t *testing.T) {
 	}, WithUserVerification(protocol.UserVerificationRequirement("sometimes")))
 	if err == nil {
 		t.Fatal("expected an unknown user verification requirement to be rejected")
+	}
+}
+
+// TestResidentKeyIsRequiredByDefault is the regression test for audit finding
+// A6: BeginRegistration never asked for a discoverable ("resident key")
+// credential, so BeginDiscoverableLogin (usernameless login) only worked
+// when an authenticator happened to create a discoverable credential anyway
+// — and the fallback to identified login trains users back onto knowing
+// (and typing) a username, undermining the point of passkeys.
+func TestResidentKeyIsRequiredByDefault(t *testing.T) {
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	svc := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+
+	creation, err := svc.BeginRegistration(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+
+	sel := creation.Response.AuthenticatorSelection
+	if sel.ResidentKey != protocol.ResidentKeyRequirementRequired {
+		t.Errorf("ResidentKey = %q, want %q", sel.ResidentKey, protocol.ResidentKeyRequirementRequired)
+	}
+	if sel.RequireResidentKey == nil || !*sel.RequireResidentKey {
+		t.Errorf("RequireResidentKey = %v, want a non-nil pointer to true — older authenticators that don't understand residentKey fall back to this legacy boolean", sel.RequireResidentKey)
+	}
+}
+
+// TestBeginRegistrationRequestsCredPropsExtension is the regression test for
+// the client-reported discoverable-credential signal: without asking for the
+// "credProps" extension, the browser has no reason to report back whether
+// the credential it created is client-side discoverable, and
+// Credential.Discoverable could never be populated from a real client.
+func TestBeginRegistrationRequestsCredPropsExtension(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+
+	creation, err := service.BeginRegistration(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+
+	rk, ok := creation.Response.Extensions["credProps"].(bool)
+	if !ok || !rk {
+		t.Fatalf("Extensions[%q] = %#v, want true", "credProps", creation.Response.Extensions["credProps"])
+	}
+}
+
+// TestWithResidentKeyOverridesDefault covers the escape hatch for callers
+// that do not offer usernameless login and so have no use for a discoverable
+// credential.
+func TestWithResidentKeyOverridesDefault(t *testing.T) {
+	challenges := newFakeChallengeStore()
+	svc, err := NewService(&fakeStore{}, challenges, WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithResidentKey(protocol.ResidentKeyRequirementPreferred))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	creation, err := svc.BeginRegistration(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+
+	sel := creation.Response.AuthenticatorSelection
+	if sel.ResidentKey != protocol.ResidentKeyRequirementPreferred {
+		t.Errorf("ResidentKey = %q, want %q", sel.ResidentKey, protocol.ResidentKeyRequirementPreferred)
+	}
+	if sel.RequireResidentKey == nil || *sel.RequireResidentKey {
+		t.Errorf("RequireResidentKey = %v, want a non-nil pointer to false when residency is merely preferred", sel.RequireResidentKey)
+	}
+}
+
+func TestNewServiceRejectsUnknownResidentKey(t *testing.T) {
+	_, err := NewService(&fakeStore{}, newFakeChallengeStore(), WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}, WithResidentKey(protocol.ResidentKeyRequirement("sometimes")))
+	if err == nil {
+		t.Fatal("expected an unknown resident key requirement to be rejected")
+	}
+}
+
+// registrationSpecVectorNoneES256 returns the W3C WebAuthn spec test vector
+// for a "none"-attestation ES256 registration
+// (https://www.w3.org/TR/webauthn-3/#sctn-test-vectors-none-es256), adapted
+// to optionally carry a top-level "clientExtensionResults.credProps.rk"
+// value — credProps is a client (browser) extension output, not part of the
+// signed attestation object, so it can be added or omitted independently of
+// the rest of the fixture. Pass a nil credPropsRK to simulate a client that
+// omits the extension entirely (e.g. an older browser).
+//
+// The fixture's RP ID is "example.org" (baked into the authenticator data's
+// RP ID hash) and its origin is "https://example.org" (baked into the
+// client data JSON): callers must configure the Service with that RPID and
+// origin for verification to succeed.
+func registrationSpecVectorNoneES256(t *testing.T, credPropsRK *bool) (body []byte, challenge string, credentialID []byte) {
+	t.Helper()
+
+	const (
+		attestationObjectHex = "a363666d74646e6f6e656761747453746d74a068617574684461746158a4bfabc37432958b063360d3ad6461c9c4735ae7f8edd46592a5e0f01452b2e4b559000000008446ccb9ab1db374750b2367ff6f3a1f0020f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4a5010203262001215820afefa16f97ca9b2d23eb86ccb64098d20db90856062eb249c33a9b672f26df61225820930a56b87a2fca66334b03458abf879717c12cc68ed73290af2e2664796b9220"
+		clientDataJSONHex    = "7b2274797065223a22776562617574686e2e637265617465222c226368616c6c656e6765223a22414d4d507434557878475453746e63647134313759447742466938767049612d7077386f4f755657345441222c226f726967696e223a2268747470733a2f2f6578616d706c652e6f7267222c2263726f73734f726967696e223a66616c73652c22657874726144617461223a22636c69656e74446174614a534f4e206d617920626520657874656e6465642077697468206164646974696f6e616c206669656c647320696e20746865206675747572652c207375636820617320746869733a20426b5165446a646354427258426941774a544c453551227d"
+		credentialIDHex      = "f91f391db4c9b2fde0ea70189cba3fb63f579ba6122b33ad94ff3ec330084be4" //nolint:gosec
+		challengeHex         = "00c30fb78531c464d2b6771dab8d7b603c01162f2fa486bea70f283ae556e130"
+	)
+
+	credentialID, err := hex.DecodeString(credentialIDHex)
+	if err != nil {
+		t.Fatalf("decode credential ID: %v", err)
+	}
+	challengeBytes, err := hex.DecodeString(challengeHex)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	challenge = base64.RawURLEncoding.EncodeToString(challengeBytes)
+
+	attObjBytes, err := hex.DecodeString(attestationObjectHex)
+	if err != nil {
+		t.Fatalf("decode attestation object: %v", err)
+	}
+	cdjBytes, err := hex.DecodeString(clientDataJSONHex)
+	if err != nil {
+		t.Fatalf("decode client data JSON: %v", err)
+	}
+
+	id := base64.RawURLEncoding.EncodeToString(credentialID)
+	response := map[string]any{
+		"id":    id,
+		"rawId": id,
+		"type":  "public-key",
+		"response": map[string]any{
+			"attestationObject": base64.RawURLEncoding.EncodeToString(attObjBytes),
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(cdjBytes),
+		},
+	}
+	if credPropsRK != nil {
+		response["clientExtensionResults"] = map[string]any{
+			"credProps": map[string]any{"rk": *credPropsRK},
+		}
+	}
+
+	body, err = json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+
+	return body, challenge, credentialID
+}
+
+// seedRegistrationChallenge saves session data directly into challenges,
+// bypassing BeginRegistration, so a FinishRegistration test can supply a
+// fixed spec-vector challenge instead of the random one BeginRegistration
+// would generate.
+func seedRegistrationChallenge(t *testing.T, challenges *fakeChallengeStore, user *User, challenge string, rpID string) {
+	t.Helper()
+
+	sessionData := webauthn.SessionData{
+		Challenge:        challenge,
+		RelyingPartyID:   rpID,
+		UserID:           user.ID,
+		UserVerification: protocol.VerificationDiscouraged, // the spec vector's authenticator data has no UV flag set
+		CredParams:       webauthn.CredentialParametersDefault(),
+	}
+	data, err := json.Marshal(sessionData)
+	if err != nil {
+		t.Fatalf("marshal session data: %v", err)
+	}
+	if err := challenges.SaveChallenge(context.Background(), challengeKey("register", string(user.ID)), data); err != nil {
+		t.Fatalf("SaveChallenge: %v", err)
+	}
+}
+
+// TestFinishRegistrationRecordsDiscoverableWhenCredPropsSaysResidentKey is
+// part of the regression coverage for audit finding A6: recording
+// Discoverable is pointless if it is never actually populated from a real
+// client response.
+func TestFinishRegistrationRecordsDiscoverableWhenCredPropsSaysResidentKey(t *testing.T) {
+	t.Parallel()
+
+	rk := true
+	body, challenge, credentialID := registrationSpecVectorNoneES256(t, &rk)
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if !bytes.Equal(cred.CredentialID, credentialID) {
+		t.Errorf("CredentialID = %x, want %x", cred.CredentialID, credentialID)
+	}
+	if !cred.Discoverable {
+		t.Error("Discoverable = false, want true when the client's credProps.rk = true")
+	}
+}
+
+// TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent covers the
+// documented fallback: a client that omits the credProps extension entirely
+// (e.g. an older browser) must not be recorded as discoverable by default.
+func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent(t *testing.T) {
+	t.Parallel()
+
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil)
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if cred.Discoverable {
+		t.Error("Discoverable = true, want false when the client omits credProps")
 	}
 }

@@ -167,6 +167,9 @@ The package depends on a consumer-owned `totp.Store` for saving and loading TOTP
 
 Pass `passkey.WithUserVerification(protocol.VerificationDiscouraged)` only when the passkey is a **second** factor behind a verified password.
 
+**Registration requests a discoverable credential by default.** `NewService` also sets `ResidentKey: required` (plus the legacy `RequireResidentKey` boolean, for authenticators that predate the `residentKey` enum) on the relying-party config, and `BeginRegistration` asks for the `credProps` extension. Without this, `BeginDiscoverableLogin` (usernameless login) only works when an authenticator happens to create a discoverable credential anyway, and the fallback to identified login trains users back onto typing a username. Pass `passkey.WithResidentKey(protocol.ResidentKeyRequirementPreferred)` (or `...Discouraged`) only if you don't offer usernameless login and every caller of `BeginLogin` always supplies a username first.
+
+`FinishRegistration` records what the client actually reported, not just what was requested: `Credential.Discoverable` is populated from the client's `credProps.rk` extension output. This is a client-reported (unsigned) signal, not a cryptographic property of the credential — an older browser or authenticator may omit `credProps` entirely even for a credential that is, in fact, discoverable, in which case `Discoverable` is recorded as `false` (see the field's GoDoc for the full caveat).
 
 `passkey` wraps `github.com/go-webauthn/webauthn` to provide higher-level passkey registration and login helpers. It manages begin/finish WebAuthn ceremonies, persists credentials through a consumer-owned `passkey.Store`, and persists transient ceremony state through a consumer-owned `passkey.ChallengeStore`.
 

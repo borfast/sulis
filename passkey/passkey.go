@@ -34,6 +34,7 @@ type WebAuthnConfig struct {
 // serviceConfig holds the tunable ceremony parameters.
 type serviceConfig struct {
 	userVerification protocol.UserVerificationRequirement
+	residentKey      protocol.ResidentKeyRequirement
 }
 
 // Option configures a passkey Service.
@@ -52,6 +53,23 @@ type Option func(*serviceConfig)
 // the UV flag when the ceremony's session data says VerificationRequired.
 func WithUserVerification(uv protocol.UserVerificationRequirement) Option {
 	return func(c *serviceConfig) { c.userVerification = uv }
+}
+
+// WithResidentKey sets whether registration asks the authenticator to create
+// a client-side discoverable ("resident key") credential — the kind
+// BeginDiscoverableLogin's usernameless login depends on being able to find
+// without the relying party supplying a credential ID first.
+//
+// The default is protocol.ResidentKeyRequirementRequired, and it should stay
+// there for any Service that offers BeginDiscoverableLogin: a passkey that
+// isn't discoverable can't be found by usernameless login, so registration
+// would silently produce credentials the feature can't use, and the
+// fallback to typing a username trains users back onto the thing passkeys
+// are meant to replace. Use protocol.ResidentKeyRequirementPreferred or
+// ...Discouraged only when usernameless login is not offered and every
+// caller of BeginLogin always supplies an identified user first.
+func WithResidentKey(rk protocol.ResidentKeyRequirement) Option {
+	return func(c *serviceConfig) { c.residentKey = rk }
 }
 
 // User identifies a consumer's user account to the passkey Service.
@@ -91,7 +109,10 @@ type Service struct {
 
 // NewService creates a new passkey service with the given stores and configuration.
 func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts ...Option) (*Service, error) {
-	sc := serviceConfig{userVerification: protocol.VerificationRequired}
+	sc := serviceConfig{
+		userVerification: protocol.VerificationRequired,
+		residentKey:      protocol.ResidentKeyRequirementRequired,
+	}
 	for _, opt := range opts {
 		opt(&sc)
 	}
@@ -100,13 +121,29 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 	default:
 		return nil, fmt.Errorf("passkey: invalid user verification requirement %q", sc.userVerification)
 	}
+	switch sc.residentKey {
+	case protocol.ResidentKeyRequirementRequired, protocol.ResidentKeyRequirementPreferred, protocol.ResidentKeyRequirementDiscouraged:
+	default:
+		return nil, fmt.Errorf("passkey: invalid resident key requirement %q", sc.residentKey)
+	}
+
+	// The legacy requireResidentKey boolean is for authenticators that
+	// predate the residentKey string enum; only "required" maps to true —
+	// go-webauthn's own WithResidentKeyRequirement option follows the same
+	// rule (protocol.ResidentKeyRequired only for the Required case).
+	requireResidentKey := protocol.ResidentKeyNotRequired()
+	if sc.residentKey == protocol.ResidentKeyRequirementRequired {
+		requireResidentKey = protocol.ResidentKeyRequired()
+	}
 
 	wa, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: cfg.RPDisplayName,
 		RPID:          cfg.RPID,
 		RPOrigins:     cfg.RPOrigins,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			UserVerification: sc.userVerification,
+			UserVerification:   sc.userVerification,
+			ResidentKey:        sc.residentKey,
+			RequireResidentKey: requireResidentKey,
 		},
 	})
 	if err != nil {
@@ -136,7 +173,14 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 	waUser := &webauthnUser{user: user, credentials: creds}
 	exclude := webauthn.Credentials(toWebAuthnCreds(creds)).CredentialDescriptors()
 
-	creation, sessionData, err := s.wa.BeginRegistration(waUser, webauthn.WithExclusions(exclude))
+	// credProps is requested regardless of the configured ResidentKey
+	// requirement: it's how the client reports back whether the credential
+	// it actually created is discoverable (see Credential.Discoverable),
+	// which is worth knowing even under "preferred" or "discouraged".
+	creation, sessionData, err := s.wa.BeginRegistration(waUser,
+		webauthn.WithExclusions(exclude),
+		webauthn.WithExtensions(protocol.AuthenticationExtensions{"credProps": true}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: begin registration: %w", err)
 	}
@@ -172,8 +216,16 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
+	// Parsed directly (rather than via s.wa.FinishRegistration, which
+	// discards the parsed response) so ClientExtensionResults is available
+	// below to populate Credential.Discoverable.
+	parsedResponse, err := protocol.ParseCredentialCreationResponse(r)
+	if err != nil {
+		return nil, fmt.Errorf("passkey: parsing registration response: %w", err)
+	}
+
 	waUser := &webauthnUser{user: user}
-	waCredential, err := s.wa.FinishRegistration(waUser, sessionData, r)
+	waCredential, err := s.wa.CreateCredential(waUser, sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: finish registration: %w", err)
 	}
@@ -186,6 +238,7 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 		AttestationType: waCredential.AttestationType,
 		AAGUID:          waCredential.Authenticator.AAGUID,
 		SignCount:       waCredential.Authenticator.SignCount,
+		Discoverable:    credPropsResidentKey(parsedResponse.ClientExtensionResults),
 		CreatedAt:       time.Now(),
 	}
 
@@ -346,6 +399,20 @@ func (s *Service) finishLoginCredential(ctx context.Context, waCred *webauthn.Cr
 	}
 
 	return s.store.GetCredentialByID(ctx, waCred.ID)
+}
+
+// credPropsResidentKey reports whether the client's "credProps" extension
+// output says the credential just created is client-side discoverable
+// (credProps.rk). See Credential.Discoverable for why this — rather than
+// anything on the finished waCredential itself — is the signal used, and
+// for its reliability caveats.
+func credPropsResidentKey(ext protocol.AuthenticationExtensionsClientOutputs) bool {
+	credProps, ok := ext["credProps"].(map[string]any)
+	if !ok {
+		return false
+	}
+	rk, _ := credProps["rk"].(bool)
+	return rk
 }
 
 // toWebAuthnCreds converts our Credential type to the webauthn library's type.
