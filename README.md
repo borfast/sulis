@@ -30,6 +30,7 @@ The root package owns the auth logic and data types:
 - `CreateMagicLinkToken`, `RedeemMagicLink`
 - `CreateTwoFactorToken`, `CompleteTwoFactor`
 - `CreateEmailVerificationToken`, `VerifyEmail`
+- `ChangeEmail`, `ConfirmEmailChange`
 - `Authenticate`, `UserFromContext`, `SessionFromContext`
 - `SessionCookie`, `ClearSessionCookie`, `RequireSameOrigin`
 - `IssueCSRFToken`, `RequireCSRFToken`, `VerifyCSRFToken`
@@ -276,14 +277,16 @@ Because the nonce lives only in a cookie scoped to the browser that requested th
 
 Two-factor authentication is a pending-login token sandwiched between a verified first factor and a verified second factor. `sulis` doesn't implement any second factor itself — pair it with `totp`, `recovery`, or `passkey` below — it only issues and redeems the short-lived pending token that stands in for "first factor passed, second factor pending."
 
-Flow: `VerifyPassword` → your app checks whether the user has 2FA enabled → `CreateTwoFactorToken` → your app independently verifies the second factor (TOTP, recovery code, or passkey) → `CompleteTwoFactor(ctx, userID, rawToken)`. No session exists until `CompleteTwoFactor` succeeds; the pending token is single-use, purpose-scoped (rejected by `ResetPassword`, `RedeemMagicLink`, and `VerifyEmail`), and expires after `TwoFactorTokenDuration` (default 5 minutes).
+Flow: `VerifyPassword` → your app checks whether the user has 2FA enabled → `CreateTwoFactorToken` → your app independently verifies the second factor (TOTP, recovery code, or passkey) → `CompleteTwoFactor(ctx, userID, rawToken, requestInfo)`, which returns a `*LoginResult` on the same terms as `Login`. No session exists until `CompleteTwoFactor` succeeds; the pending token is single-use, purpose-scoped (rejected by `ResetPassword`, `RedeemMagicLink`, and `VerifyEmail`), and expires after `TwoFactorTokenDuration` (default 5 minutes).
 
 By default, `CreateTwoFactorToken` returns `ErrEmailNotVerified` for an unverified account, failing before your app ever prompts for a second factor. `CompleteTwoFactor` re-checks the same condition as defense in depth (the token is consumed either way), against the account's *current* verification state rather than its state when the token was minted.
 
 `CompleteTwoFactor` takes `userID` as an explicit argument and rejects the token with `ErrTokenInvalid` if it wasn't minted for that user (consuming the token either way, so a mismatched attempt also burns it). Your app must carry the `userID` obtained from `VerifyPassword` through its own server-side state across the two requests — e.g. keyed by the pending token, or in a short-lived server session — and pass that value to `CompleteTwoFactor`. **Never accept a client-supplied `userID` for this call**: if the second-factor request's `userID` came from the client instead, an attacker who can produce a *valid* second factor for their own account (their own TOTP code, their own passkey) could pair it with someone else's pending token and pass someone else's `userID`, since `sulis` only checks that the token and the userID match each other, not that the caller is who they claim.
 
 ```go
-user, err := auth.VerifyPassword(ctx, email, password)
+ri := sulis.RequestInfo{IP: ip, UserAgent: ua}
+
+user, err := auth.VerifyPassword(ctx, email, password, ri)
 if err != nil {
     return err // ErrInvalidCredentials or ErrRateLimited
 }
@@ -292,9 +295,10 @@ if !userHasTwoFactorEnabled(user) {
     // This app determines 2FA status itself rather than through Login's
     // SecondFactorChecker, so sulis has no Authentication to offer here —
     // IssueSessionUnchecked is the caller-vouches-for-it primitive for
-    // exactly that case.
-    session, err := auth.IssueSessionUnchecked(ctx, user.ID, sulis.AuthMethodPassword)
-    return finish(user, session, err)
+    // exactly that case. The raw session token comes back beside the
+    // *Session, never on it (Session has no Token field).
+    session, sessionToken, err := auth.IssueSessionUnchecked(ctx, user.ID, sulis.AuthMethodPassword)
+    return finish(user, session, sessionToken, err)
 }
 
 // First factor passed; hold a pending token instead of a session.
@@ -324,9 +328,13 @@ if err := totpSvc.Validate(ctx, user.ID, submittedCode); err != nil {
 }
 
 // user.ID here comes from server-side state established above, never from
-// the client's request.
-user, session, err := auth.CompleteTwoFactor(ctx, user.ID, pending)
-return finish(user, session, err)
+// the client's request. CompleteTwoFactor returns a *LoginResult, the same
+// shape Login returns — the session and its raw token are fields on it.
+res, err := auth.CompleteTwoFactor(ctx, user.ID, pending, ri)
+if err != nil {
+    return err
+}
+return finish(res.User, res.Session, res.SessionToken, nil)
 ```
 
 ### Email Verification
@@ -334,6 +342,18 @@ return finish(user, session, err)
 `CreateEmailVerificationToken(ctx, userID)` issues a single-use token proving control of the user's registered address (default TTL 24h), bound to that address: if the user's email changes before redemption, `VerifyEmail` rejects the stale token with `ErrTokenInvalid` rather than verifying the new address. `VerifyEmail(ctx, rawToken)` consumes it and stamps `User.EmailVerifiedAt`. Verification is idempotent — once set, `EmailVerifiedAt` is never overwritten by a later verification (e.g. a second magic-link redemption keeps the original timestamp). By default, an unverified `EmailVerifiedAt` also blocks new sessions elsewhere in the library — see [Operational requirements](#operational-requirements) for `RequireVerifiedEmail`.
 
 The *first* time an account with a password gets verified (via either `VerifyEmail` or a redeemed magic link), all of that user's sessions are revoked unconditionally — regardless of `RevokeSessionsOnPasswordChange`. This closes a residual account-takeover window: an attacker who registered the victim's email with their own password before the victim ever proved mailbox control could otherwise keep a live session through the victim's later verification. Applications should additionally prompt for a password reset on this path, since the attacker's chosen password itself remains valid until changed.
+
+### Changing an email address
+
+An email address is an identity, and on most products it is also the reset channel — so changing one is an account-takeover primitive if it is done in a single step. `sulis` splits it in two.
+
+`ChangeEmail(ctx, userID, newEmail)` **stages** the new address and returns a raw, single-use token to deliver to it. `User.Email` and `User.EmailVerifiedAt` are untouched; only `User.PendingEmail` is set. It returns `ErrInvalidEmail` for a malformed address and `ErrUserAlreadyExists` if `newEmail` is already the live address of any account, including this one. Staging a second address supersedes the first, invalidating the earlier token. The token expires after `EmailVerificationTokenDuration` (default 24h).
+
+`ConfirmEmailChange(ctx, rawToken)` consumes the token and makes the staged address live: `Email` is swapped in from `PendingEmail`, `PendingEmail` is cleared, and **`EmailVerifiedAt` is re-stamped with a fresh timestamp** — the old stamp proved control of the old address, not this one. The swap also **revokes every session on the account and purges its outstanding password-reset and two-factor tokens**, since both were minted against (or reachable through) the identity that just changed. It returns `ErrTokenInvalid` if the token is unknown, expired, already used, of the wrong purpose, or bound to an address that is no longer the account's `PendingEmail` (a later `ChangeEmail` superseded it), and `ErrUserAlreadyExists` if another account claimed the staged address in the meantime.
+
+**`sulis` sends no mail, and two of the notifications are not optional.** Deliver the token to the **new** address — that is what proves the requester can receive there. But you must also notify the **old** address, twice: once when a change is staged, and once when it is confirmed. That notification goes to an address the attacker does not control, and it is the only way a victim catches a takeover — the first while the pending change can still be undone, the second at least in time to start recovery.
+
+Gate `ChangeEmail` behind [`RequireRecentAuth`](#step-up-authentication), not a bare session.
 
 ### Security events
 

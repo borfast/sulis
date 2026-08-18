@@ -339,6 +339,64 @@ func TestAuthenticateTokenSourceCookieOnlyAcceptsCookie(t *testing.T) {
 	}
 }
 
+// TestAuthenticateTokenSourceCookieOnlyIgnoresAuthorizationHeader pins the
+// one interaction the two tests above leave open. extractToken's rule that
+// ANY non-empty Authorization header suppresses the cookie fallback (T507
+// fix round 1) lives *inside* the branch that inspects the header, so under
+// TokenSourceCookieOnly it must not fire at all: a request carrying both a
+// cookie and an Authorization header the developer has explicitly opted out
+// of reading still authenticates by cookie.
+//
+// The property is safe by construction today, which is exactly why it needs
+// pinning — hoisting the header read out of the TokenSource guard would
+// turn every cookie-only request that happens to carry an Authorization
+// header (a proxy adding one, a browser extension, an unrelated API scheme)
+// into a silent 401, and no existing test would notice: RejectsBearer sends
+// no cookie and AcceptsCookie sends no header.
+func TestAuthenticateTokenSourceCookieOnlyIgnoresAuthorizationHeader(t *testing.T) {
+	tests := []struct {
+		name string
+		auth func(sessionTok string) string
+	}{
+		{"a different scheme entirely", func(string) string { return "Basic dXNlcjpwYXNz" }},
+		{"a malformed bearer header", func(string) string { return "Bearer" }},
+		{"a valid bearer token", func(tok string) string { return "Bearer " + tok }},
+		{"a bearer token for nothing at all", func(string) string { return "Bearer not-a-session" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTokenSource(TokenSourceCookieOnly))
+			ctx := context.Background()
+
+			_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			called := false
+			handler := s.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.AddCookie(&http.Cookie{Name: defaultCookieName, Value: sessionTok})
+			req.Header.Set("Authorization", tt.auth(sessionTok))
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200 (cookie-only must ignore the Authorization header entirely), got %d", rec.Code)
+			}
+			if !called {
+				t.Fatal("expected the handler to be called")
+			}
+		})
+	}
+}
+
 // TestAuthenticateTokenSourceBearerOnlyRejectsCookie is the mirror image:
 // with WithTokenSource(TokenSourceBearerOnly), a valid session cookie alone
 // must not authenticate the request.

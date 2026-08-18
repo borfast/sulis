@@ -6,6 +6,37 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/borfast/sulis/recovery"
+	"github.com/borfast/sulis/totp"
+)
+
+// The three Limiter interfaces — sulis.Limiter (config.go), totp.Limiter
+// (totp/totp.go) and recovery.Limiter (recovery/recovery.go) — are declared
+// separately so neither subpackage takes a dependency on the root module,
+// and are deliberately identical so that one implementation (canonically
+// *MemoryLimiter) guards all three via structural typing. Nothing enforced
+// that: adding, renaming or re-typing a method on any one of them compiles
+// cleanly here and breaks only in the application that wired a single
+// limiter into two packages, at a call site none of these packages own.
+//
+// These declarations are the enforcement. Mutual assignability between two
+// interface types is Go's way of saying "identical method sets", so
+// widening any one of the three fails the build in this file, next to the
+// limiter whose doc comment makes the promise.
+var (
+	_ totp.Limiter     = Limiter(nil)
+	_ recovery.Limiter = Limiter(nil)
+	_ Limiter          = totp.Limiter(nil)
+	_ recovery.Limiter = totp.Limiter(nil)
+	_ Limiter          = recovery.Limiter(nil)
+	_ totp.Limiter     = recovery.Limiter(nil)
+
+	// And the concrete promise MemoryLimiter's doc comment makes: one
+	// instance serves all three packages.
+	_ Limiter          = (*MemoryLimiter)(nil)
+	_ totp.Limiter     = (*MemoryLimiter)(nil)
+	_ recovery.Limiter = (*MemoryLimiter)(nil)
 )
 
 // fakeClock lets limiter tests advance time without sleeping.

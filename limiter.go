@@ -35,8 +35,11 @@ var (
 // enforces its own budget. Replace it with a shared implementation (Redis or
 // similar) via WithLimiter for a multi-instance deployment.
 //
-// A single MemoryLimiter satisfies both sulis.Limiter and totp.Limiter, which
-// are structurally identical, so one instance can guard both packages.
+// A single MemoryLimiter satisfies sulis.Limiter, totp.Limiter and
+// recovery.Limiter, which are structurally identical, so one instance can
+// guard all three packages. That identity is compiler-enforced rather than
+// hoped for: see the assignability declarations at the top of
+// limiter_test.go.
 type MemoryLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
