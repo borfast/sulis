@@ -1,6 +1,6 @@
 # sulis
 
-`sulis` is a small Go authentication library for consumer-owned persistence. The root package provides password-based auth, password reset, magic-link login, two-factor pending-login tokens, email verification, server-side sessions, and HTTP middleware for attaching the authenticated user and session to a request context. The `totp`, `passkey`, and `recovery` subpackages add TOTP, WebAuthn passkeys, and recovery codes as second factors or standalone credentials.
+`sulis` is a small Go authentication library for consumer-owned persistence. The root package provides password-based auth, password reset, magic-link login, two-factor pending-login tokens, email verification, server-side sessions, and HTTP middleware for attaching the authenticated user and session to a request context. The `totp`, `passkey`, and `recovery` subpackages add TOTP, WebAuthn passkeys, and recovery codes as second factors or standalone credentials. Because you own persistence, the `storetest` package ships a conformance suite that proves your store implementations satisfy the contracts the library depends on, and `memstore` is a reference in-memory implementation of all of them — see [Proving your stores correct](#proving-your-stores-correct).
 
 Requires Go 1.25+ (matching `go.mod`).
 
@@ -239,6 +239,50 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
 - `recovery.Store`: `ReplaceCodes` atomically swaps a user's full code set; `ConsumeCode` must atomically find-and-delete a matching hash (same race concern as `ConsumeToken`), returning `ErrCodeNotFound` if absent; `CountCodes`; `DeleteCodes`.
 
 These stores are part of the security boundary. They should enforce uniqueness where needed and persist enough data for expiry and revocation. Only some flows depend on specific sentinel errors from stores, such as `ErrUserNotFound`, `ErrUserAlreadyExists`, `ErrTokenNotFound`, and `recovery.ErrCodeNotFound`; other store errors are propagated or normalized by the service.
+
+## Proving your stores correct
+
+Everything above is prose, and none of it is checked by the compiler: a store that returns the wrong error, or splits an atomic check-and-mutate into a read followed by a write, satisfies every interface in this module and still breaks the guarantees the library is built on. The `storetest` package turns those contracts into an executable suite you run against your own implementation. It is supported public API, and it is the intended integration path — not an internal test helper.
+
+```go
+import (
+    "testing"
+
+    "github.com/borfast/sulis"
+    "github.com/borfast/sulis/storetest"
+)
+
+func TestMyUserStore(t *testing.T) {
+    storetest.RunUserStore(t, func() sulis.UserStore { return newMyUserStore(t) })
+}
+```
+
+There is one `Run*` function per interface, all in the same shape:
+
+| Interface | Suite |
+| --- | --- |
+| `sulis.UserStore` | `storetest.RunUserStore(t, factory)` |
+| `sulis.SessionStore` | `storetest.RunSessionStore(t, factory)` |
+| `sulis.TokenStore` | `storetest.RunTokenStore(t, factory)` |
+| `passkey.Store` | `storetest.RunPasskeyStore(t, factory)` |
+| `passkey.ChallengeStore` | `storetest.RunPasskeyChallengeStore(t, factory)` |
+| `totp.Store` | `storetest.RunTOTPStore(t, factory)` |
+| `recovery.Store` | `storetest.RunRecoveryStore(t, factory)` |
+
+The factory must return a store observing no state from any earlier call — an empty database, a truncated schema, a fresh map. Every subtest calls it at least once and the concurrency subtests call it once per iteration, so make the reset cheap. Identifiers, addresses, and hashes the suite generates are unique per process run, and count assertions are always scoped to the users a subtest created, so a factory that can only truncate rather than recreate is still fine.
+
+**Run it with `-race`.** The atomicity requirements are checked by racing goroutines through a shared start gate and asserting on the aggregate outcome: exactly one caller consumed the token, the user still has one passkey, the TOTP counter did not move backwards. Those subtests repeat many times, since a race that loses once proves nothing; pass `-short` to cut the iteration count when you are smoke-testing a slow store rather than certifying it. The suite asserts only on the documented contracts — never on storage, orderings the interfaces do not promise, or timestamp precision — so it is equally valid against SQL, key-value, and in-memory implementations.
+
+`memstore` is the reference implementation: an in-memory version of every interface above, which passes the whole suite. It is worth reading before writing your own — each type shows where the atomic boundary has to be, with one mutex standing in for the transaction or conditional statement a database needs. It is also a working store for tests, examples, and local development:
+
+```go
+users := memstore.NewUserStore()
+sessions := memstore.NewSessionStore()
+tokens := memstore.NewTokenStore()
+auth, err := sulis.New(users, sessions, tokens, sulis.NoSecondFactors{})
+```
+
+It is not for production: nothing survives a restart, nothing is shared between processes, and nothing is bounded except by the delete and cleanup methods.
 
 ## Security Notes
 
