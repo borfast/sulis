@@ -141,6 +141,31 @@ func TestConsumeAcceptsSloppyInput(t *testing.T) {
 	}
 }
 
+// TestCanonicalIsIdempotentWithInteriorWhitespace is a regression test for a
+// bug FuzzRecoveryCanonical (task T402) found within its first two seconds
+// of fuzzing: canonical's old TrimSpace-then-strip-dashes implementation
+// only stripped whitespace from the string's *ends*. A non-space whitespace
+// rune (e.g. a tab) sitting between a leading dash and the rest of the code
+// survived the first canonical() call — the dash hadn't been stripped yet,
+// so the tab wasn't at an edge TrimSpace would touch — but became the new
+// leading character once the dash was removed, so a *second* call trimmed it
+// away. That made canonical non-idempotent: canonical("-\t0") == "\t0", but
+// canonical(canonical("-\t0")) == "0". Two codes differing only in whether
+// canonical happened to run on them once or twice would hash differently,
+// which is exactly the property this test and FuzzRecoveryCanonical both
+// pin so it can't regress silently.
+func TestCanonicalIsIdempotentWithInteriorWhitespace(t *testing.T) {
+	const input = "-\t0"
+	once := canonical(input)
+	twice := canonical(once)
+	if once != twice {
+		t.Fatalf("canonical not idempotent: canonical(%q) = %q, canonical(that) = %q", input, once, twice)
+	}
+	if once != "0" {
+		t.Fatalf("canonical(%q) = %q, want %q", input, once, "0")
+	}
+}
+
 func TestConsumeIsSingleUse(t *testing.T) {
 	store := newMemStore()
 	svc := NewService(store)

@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"unicode"
 )
 
 // ErrCodeInvalid is returned when a supplied recovery code does not match
@@ -127,12 +128,28 @@ func formatCode(s string) string {
 	return strings.Join(groups, "-")
 }
 
-// canonical normalizes a user-supplied code for hashing: it trims
-// surrounding whitespace, strips dashes and internal spaces, and
-// uppercases the result.
+// canonical normalizes a user-supplied code for hashing: it strips every
+// dash and any Unicode whitespace character (anywhere in the string, not
+// just at the ends), and uppercases what remains.
+//
+// It strips whitespace and dashes in a single left-to-right pass rather than
+// TrimSpace-then-strip-dashes: the two-step version was not idempotent — an
+// interior whitespace rune (e.g. a tab) adjacent to a dash could end up at
+// the string's edge only after the dash was removed, so a second call would
+// trim it away when the first call had not, changing the hash a stored code
+// was compared against depending on how many times canonical happened to run
+// on it. FuzzRecoveryCanonical (task T402) found this via the input
+// "-\t0": canonical("-\t0") == "\t0", but canonical("\t0") == "0".
 func canonical(code string) string {
-	code = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
-	return strings.ReplaceAll(code, " ", "")
+	var b strings.Builder
+	b.Grow(len(code))
+	for _, r := range code {
+		if r == '-' || unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(unicode.ToUpper(r))
+	}
+	return b.String()
 }
 
 // hashCode returns the SHA-256 hex digest of the canonical form of code.

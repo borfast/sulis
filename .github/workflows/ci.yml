@@ -60,3 +60,28 @@ jobs:
 
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      # A short, deterministic smoke check, not a fuzzing budget: 10s per
+      # hand-rolled parser is enough to catch a regression the checked-in
+      # seed/crasher corpus alone wouldn't (a mutated property, a re-broken
+      # invariant). The real 60s-per-target runs are done locally; see
+      # PROGRESS.md's T402 entry for what each one found. -run='^$' skips
+      # the package's other tests here, since the main `test` job above
+      # already runs those.
+      - name: fuzz FuzzDecodeHash
+        run: go test -run='^$' -fuzz='^FuzzDecodeHash$' -fuzztime=10s .
+      - name: fuzz FuzzNormalizeEmail
+        run: go test -run='^$' -fuzz='^FuzzNormalizeEmail$' -fuzztime=10s .
+      - name: fuzz FuzzRecoveryCanonical
+        run: go test -run='^$' -fuzz='^FuzzRecoveryCanonical$' -fuzztime=10s ./recovery
+      - name: fuzz FuzzGenerateCode
+        run: go test -run='^$' -fuzz='^FuzzGenerateCode$' -fuzztime=10s ./totp
