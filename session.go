@@ -26,7 +26,21 @@ type Session struct {
 type SessionStore interface {
 	CreateSession(ctx context.Context, session *Session) error
 	GetSessionByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
-	DeleteSession(ctx context.Context, id string) error
+
+	// DeleteSession removes the session identified by id if it belongs to
+	// userID. The membership check and the removal MUST happen as a
+	// single atomic operation scoped to both columns:
+	//
+	//	DELETE FROM sessions WHERE id = ? AND user_id = ?
+	//
+	// Zero rows affected — whether id does not exist at all, or exists
+	// but belongs to a different user — MUST return ErrSessionNotFound
+	// rather than succeeding silently. This is what makes cross-user
+	// revocation impossible through RevokeSession: it passes the
+	// caller's own userID, so guessing or leaking another user's session
+	// ID never deletes anything.
+	DeleteSession(ctx context.Context, userID, id string) error
+
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpired(ctx context.Context) error
 }

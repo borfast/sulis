@@ -380,7 +380,7 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	validated := *session
 
 	if time.Now().After(validated.ExpiresAt) {
-		_ = s.sessions.DeleteSession(ctx, validated.ID)
+		_ = s.sessions.DeleteSession(ctx, validated.UserID, validated.ID)
 		return nil, nil, ErrSessionExpired
 	}
 
@@ -392,9 +392,12 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	return &validated, user, nil
 }
 
-// RevokeSession deletes a single session.
-func (s *Sulis) RevokeSession(ctx context.Context, sessionID string) error {
-	return s.sessions.DeleteSession(ctx, sessionID)
+// RevokeSession deletes a single session belonging to userID. It returns
+// ErrSessionNotFound if sessionID does not exist or belongs to a different
+// user, so a caller can only ever revoke their own sessions — guessing or
+// leaking another user's session ID cannot be used to end their session.
+func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID string) error {
+	return s.sessions.DeleteSession(ctx, userID, sessionID)
 }
 
 // RevokeAllSessions deletes all sessions for a user.

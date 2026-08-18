@@ -76,6 +76,8 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 
 **`Session` has no `Token` field.** The raw token exists only as a return value at issue time — `LoginResult.SessionToken`, or the third result of `Register` and `IssueSession` — so the struct handed to `SessionStore` has no way to carry it and no store can persist a live bearer token by accident. Stores see `TokenHash` and nothing else.
 
+**`RevokeSession(ctx, userID, sessionID)` is scoped to the caller's own userID.** It deletes `sessionID` only if it belongs to `userID`, returning `ErrSessionNotFound` (and leaving the session untouched) otherwise — so a session-management UI wired straight to this method can't let one user revoke another's session by guessing or leaking its ID. Pass the userID of the account the caller is authenticated as, not a value taken from the request body. `RevokeAllSessions(ctx, userID)` deletes every session for a user and has no such ambiguity to begin with.
+
 ### Password Reset
 
 `CreatePasswordResetToken(ctx, email, requestInfo)` creates a password-reset token and returns the raw token so the caller can deliver it out-of-band. Unlike `Login`/`VerifyPassword`, it returns `ErrUserNotFound` verbatim when the email doesn't exist — see [Operational requirements](#operational-requirements) for why that means your HTTP handler, not this method, must equalize the response.
@@ -217,7 +219,7 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
   ```
 
   Zero rows affected means another writer won. Without this check, two flows that each read-modify-write the whole row can clobber each other, and the dangerous direction restores a password hash the user just rotated away from — silently undoing a reset. The library reloads and retries on `ErrConcurrentUpdate`, so a correct store makes the race invisible to callers.
-- `SessionStore`: create sessions, load them by token-hash lookup, revoke one session, revoke all sessions for a user, and `CleanExpired`. `CleanExpired` is never called by the library itself — see [Operational requirements](#operational-requirements).
+- `SessionStore`: create sessions, load them by token-hash lookup, revoke one session, revoke all sessions for a user, and `CleanExpired`. `CleanExpired` is never called by the library itself — see [Operational requirements](#operational-requirements). `DeleteSession(ctx, userID, id)` **must** scope its delete to both columns (`DELETE FROM sessions WHERE id = ? AND user_id = ?`) and return `ErrSessionNotFound` on zero rows affected — whether `id` doesn't exist at all, or exists but belongs to a different user. This is what makes `RevokeSession` safe to expose directly to a session-management UI: it always passes the caller's own `userID`, so a guessed or leaked session ID belonging to someone else is indistinguishable from a nonexistent one.
 - `TokenStore`:
   - `CreateToken` persists a new token.
   - `ConsumeToken(ctx, hash, purpose)` must atomically find the unused token matching hash **and** purpose and mark it used in one operation (e.g. `UPDATE ... WHERE hash=? AND purpose=? AND used=false`), returning `ErrTokenNotFound` if nothing matches and `ErrTokenAlreadyUsed` if it was already consumed. Lookup and mark-used are not allowed to be separate steps — that would open a race where two concurrent redemptions both succeed.

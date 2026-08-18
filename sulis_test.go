@@ -138,9 +138,13 @@ func (s *memSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash str
 	return nil, ErrSessionNotFound
 }
 
-func (s *memSessionStore) DeleteSession(_ context.Context, id string) error {
+func (s *memSessionStore) DeleteSession(_ context.Context, userID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok || sess.UserID != userID {
+		return ErrSessionNotFound
+	}
 	delete(s.sessions, id)
 	return nil
 }
@@ -483,7 +487,7 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	}
 
 	// Revoke the session.
-	if err := s.RevokeSession(ctx, sess.ID); err != nil {
+	if err := s.RevokeSession(ctx, sess.UserID, sess.ID); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 
@@ -491,6 +495,42 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	_, _, err = s.ValidateSession(ctx, sessionTok)
 	if err != ErrSessionNotFound {
 		t.Fatalf("expected ErrSessionNotFound after revoke, got %v", err)
+	}
+}
+
+// TestRevokeSessionRejectsCrossUserAttempt guards against a session-management
+// UI wired straight to RevokeSession letting user A revoke user B's session
+// by guessing or leaking B's session ID: RevokeSession must scope the delete
+// to the caller's own userID, so a mismatched owner leaves B's session
+// completely untouched rather than deleting it.
+func TestRevokeSessionRejectsCrossUserAttempt(t *testing.T) {
+	s, _, sessions, _ := newTestEnv()
+	ctx := context.Background()
+
+	_, sessA, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	_, sessB, tokB, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+
+	// Alice tries to revoke Bob's session by guessing/leaking its ID.
+	if err := s.RevokeSession(ctx, sessA.UserID, sessB.ID); err != ErrSessionNotFound {
+		t.Fatalf("expected ErrSessionNotFound for cross-user revoke, got %v", err)
+	}
+
+	// Bob's session must still be intact and validatable.
+	sess, user, err := s.ValidateSession(ctx, tokB)
+	if err != nil {
+		t.Fatalf("expected bob's session to remain valid, got %v", err)
+	}
+	if sess.ID != sessB.ID || user.ID != sessB.UserID {
+		t.Fatalf("expected bob's original session/user, got session %s user %s", sess.ID, user.ID)
+	}
+	if got := sessions.count(); got != 2 {
+		t.Fatalf("expected both sessions to remain stored, got %d", got)
 	}
 }
 
@@ -598,15 +638,19 @@ func (s *observingSessionStore) GetSessionByTokenHash(_ context.Context, tokenHa
 	return &cp, nil
 }
 
-func (s *observingSessionStore) DeleteSession(_ context.Context, id string) error {
+func (s *observingSessionStore) DeleteSession(_ context.Context, userID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for hash, sess := range s.sessionByHash {
 		if sess.ID == id {
+			if sess.UserID != userID {
+				return ErrSessionNotFound
+			}
 			delete(s.sessionByHash, hash)
+			return nil
 		}
 	}
-	return nil
+	return ErrSessionNotFound
 }
 
 func (s *observingSessionStore) DeleteUserSessions(_ context.Context, userID string) error {
@@ -640,7 +684,7 @@ func (s *sharedSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash 
 	return s.session, nil
 }
 
-func (s *sharedSessionStore) DeleteSession(_ context.Context, _ string) error { return nil }
+func (s *sharedSessionStore) DeleteSession(_ context.Context, _, _ string) error { return nil }
 
 func (s *sharedSessionStore) DeleteUserSessions(_ context.Context, _ string) error { return nil }
 
