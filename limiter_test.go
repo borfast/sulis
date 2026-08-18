@@ -25,7 +25,7 @@ func TestDefaultLimiterThrottlesPasswordGuessing(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestWithoutRateLimitingDisablesThrottling(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

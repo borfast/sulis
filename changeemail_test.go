@@ -43,7 +43,7 @@ func TestChangeEmailStagesWithoutChangingLiveAddress(t *testing.T) {
 	s, users, _, tokens := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestConfirmEmailChangeSwapsAddressAndReStampsVerification(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -127,13 +127,13 @@ func TestConfirmEmailChangeRevokesSessionsAndPurgesResetTokens(t *testing.T) {
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	verifyUserEmail(t, users, user.ID)
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	if sessions.count() == 0 {
@@ -168,14 +168,14 @@ func TestConfirmEmailChangePurgesTwoFactorTokens(t *testing.T) {
 	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	verifyUserEmail(t, users, user.ID)
 	factors.enroll(user.ID)
 
-	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestConfirmEmailChangeRejectsTokenForSupersededAddress(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -246,11 +246,11 @@ func TestChangeEmailRejectsAddressAlreadyInUse(t *testing.T) {
 	s, users, _, tokens := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register(alice): %v", err)
 	}
-	if _, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Register(bob): %v", err)
 	}
 
@@ -277,7 +277,7 @@ func TestChangeEmailRejectsCurrentAddress(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestChangeEmailRejectsInvalidEmail(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestConfirmEmailChangeRejectsAddressTakenSinceStaging(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register(alice): %v", err)
 	}
@@ -321,7 +321,7 @@ func TestConfirmEmailChangeRejectsAddressTakenSinceStaging(t *testing.T) {
 		t.Fatalf("ChangeEmail: %v", err)
 	}
 
-	if _, _, _, err := s.Register(ctx, "contested@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "contested@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Register(claimant): %v", err)
 	}
 
@@ -351,12 +351,12 @@ func TestConfirmEmailChangeAbortsIfAnotherAccountWinsTheRace(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register(alice): %v", err)
 	}
 	verifyUserEmail(t, users, alice.ID)
-	bob, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	bob, _, _, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register(bob): %v", err)
 	}
@@ -411,7 +411,7 @@ func TestEmailChangeTokensArePurposeScoped(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

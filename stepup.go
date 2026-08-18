@@ -51,12 +51,13 @@ func (s *Sulis) RequireRecentAuth(ctx context.Context, session *Session, maxAge 
 //
 // A successful verification here can also upgrade the stored hash, exactly
 // like VerifyPassword's success path: if the hash is weaker than the
-// currently configured Argon2Params, it is re-hashed with the plaintext
-// just verified and written back, best-effort (see password.go's
-// needsRehash and sulis.go's rehashPassword). This is deliberate, not an
-// oversight left over from T504: ReAuthenticate is a real password
-// comparison against a real stored hash, so it upgrades the same as any
-// other one — see the T504 (fix round 1) Decisions row.
+// currently configured Argon2Params, or predates NFKC normalization and
+// matched only through verifyPassword's pre-normalization fallback, it is
+// re-hashed with the plaintext just verified and written back, best-effort
+// (see password.go's needsRehash and sulis.go's rehashPassword). This is
+// deliberate, not an oversight left over from T504: ReAuthenticate is a real
+// password comparison against a real stored hash, so it upgrades the same as
+// any other one — see the T504 (fix round 1) Decisions row.
 //
 // Also returns ErrAccountDisabled/ErrAccountLocked via accountStatus,
 // checked right after loading the user and before spending an Argon2
@@ -90,11 +91,11 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		// Passwordless user: verify against the dummy hash for the same
 		// reason VerifyPassword does — so response timing doesn't reveal
 		// that this account has no password to check.
-		_, _ = verifyPassword(password, s.dummyHash)
+		_, _, _ = verifyPassword(password, s.dummyHash)
 		return ErrInvalidCredentials
 	}
 
-	ok, err := verifyPassword(password, user.PasswordHash)
+	ok, legacyForm, err := verifyPassword(password, user.PasswordHash)
 	if err != nil {
 		return fmt.Errorf("sulis: verifying password: %w", err)
 	}
@@ -103,12 +104,15 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 	}
 
 	// The password just verified, so this is exactly the same
-	// weaker-than-configured-hash opportunity VerifyPassword's success path
+	// hash-should-be-replaced opportunity VerifyPassword's success path
 	// upgrades (see password.go's needsRehash and sulis.go's rehashPassword)
 	// — best-effort and swallowed on failure for the same reason: the caller
 	// already proved they know the password, so only the cost of the next
-	// comparison is at stake, not this call's correctness.
-	if needsRehash(user.PasswordHash, s.cfg.Argon2) {
+	// comparison is at stake, not this call's correctness. legacyForm covers
+	// the second reason to replace a hash: it matched only through
+	// verifyPassword's pre-normalization fallback, so re-deriving it now is
+	// what migrates the account onto the NFKC form (T505).
+	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
 		s.rehashPassword(ctx, user, password)
 	}
 

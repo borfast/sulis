@@ -1,6 +1,6 @@
 # sulis
 
-`sulis` is a small Go authentication library for consumer-owned persistence. The root package provides password-based auth, password reset, magic-link login, two-factor pending-login tokens, email verification, server-side sessions, and HTTP middleware for attaching the authenticated user and session to a request context. The `totp`, `passkey`, and `recovery` subpackages add TOTP, WebAuthn passkeys, and recovery codes as second factors or standalone credentials. Because you own persistence, the `storetest` package ships a conformance suite that proves your store implementations satisfy the contracts the library depends on, and `memstore` is a reference in-memory implementation of all of them — see [Proving your stores correct](#proving-your-stores-correct).
+`sulis` is a small Go authentication library for consumer-owned persistence. The root package provides password-based auth, password reset, magic-link login, two-factor pending-login tokens, email verification, server-side sessions, and HTTP middleware for attaching the authenticated user and session to a request context. The `totp`, `passkey`, and `recovery` subpackages add TOTP, WebAuthn passkeys, and recovery codes as second factors or standalone credentials, and `passwordcheck` screens new passwords against known-compromised values. Because you own persistence, the `storetest` package ships a conformance suite that proves your store implementations satisfy the contracts the library depends on, and `memstore` is a reference in-memory implementation of all of them — see [Proving your stores correct](#proving-your-stores-correct).
 
 Requires Go 1.25+ (matching `go.mod`).
 
@@ -32,13 +32,54 @@ The root package owns the auth logic and data types:
 - `CreateEmailVerificationToken`, `VerifyEmail`
 - `Authenticate`, `UserFromContext`, `SessionFromContext`
 
-Password hashes use Argon2id. Reset, magic-link, two-factor, and email-verification tokens are random, single-use, purpose-scoped, and time-limited.
+Password hashes use Argon2id over the NFKC-normalized password. New passwords are screened for length and against a corpus of known-compromised values — see [Password quality](#password-quality). Reset, magic-link, two-factor, and email-verification tokens are random, single-use, purpose-scoped, and time-limited.
 
 ## Core Flows
 
 ### Register
 
-`Register(ctx, email, password, requestInfo)` returns `(*User, *Session, string, error)` — the third value is the raw session token. It normalizes and validates the email, checks the password against the length policy, hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, and `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
+`Register(ctx, email, password, requestInfo)` returns `(*User, *Session, string, error)` — the third value is the raw session token. It normalizes and validates the email, puts the password through the policy (length, then the configured `PasswordChecker` — see [Password quality](#password-quality)), hashes the password, creates the user, and immediately creates a new session. It returns `ErrUserAlreadyExists` if the email is already taken, `ErrInvalidEmail` for malformed/empty/overlong addresses, `ErrPasswordTooShort`/`ErrPasswordTooLong` if the password falls outside the configured bounds, and `ErrPasswordCompromised` if the checker recognizes it. Registration does not mark the email as verified — only a redeemed magic link or a completed `VerifyEmail` does that.
+
+### Password quality
+
+Every path that stores a password — `Register`, `ChangePassword`, `ResetPassword`, `SetInitialPassword` — puts it through the same three steps, in this order:
+
+1. **NFKC normalization.** The password is folded to its Unicode NFKC form before anything else looks at it, and that form is what gets hashed. Without this, whether a password verifies depends on which keyboard typed it: `café` arrives from macOS as `e` plus a combining acute accent and from Windows as the single precomposed rune, and those are different byte strings with different Argon2 hashes. NFKC rather than NFC so the compatibility mappings fold too — the `ﬁ` ligature, fullwidth digits, and friends, which are one keystroke on some input methods and plain ASCII on others.
+2. **Length.** `MinPasswordLength` (default **12**, raised from 8 in this release) and `MaxPasswordLength` (default 1024), measured in bytes of the *normalized* password, since that is what Argon2 actually consumes. Twelve fullwidth digits are 36 raw bytes and 12 normalized ones; measuring the raw form would wave a password through a minimum it does not meet. `WithPasswordLengthLimits(min, max)` changes both.
+3. **The `PasswordChecker`.** Length alone lets `iloveyou1234` through. The configured checker gets the normalized password and returns `ErrPasswordCompromised` to reject it.
+
+```go
+type PasswordChecker interface {
+    Check(ctx context.Context, password string) error
+}
+```
+
+**A checker is configured by default.** `sulis.New` installs `passwordcheck.NewBlocklist()`, which compares against an embedded corpus of the ten thousand most common passwords: no network, no third party, nothing to switch on. Comparison folds case, since an attacker's dictionary does too. Note the interaction with the raised minimum, though — common passwords are short, so at `MinPasswordLength` 12 only ten of those ten thousand entries are even reachable; the length gate rejects the rest first. The blocklist earns its keep when you *lower* the minimum, and when you pass site-specific words to `NewBlocklist("Acme-Corp", "acme-stadium", ...)` — exactly the long passwords a targeted attacker tries first, which no general corpus can know about.
+
+**For real breadth, add Have I Been Pwned.** `passwordcheck.NewHIBP()` queries the range API using k-anonymity: only the first five hexadecimal digits of the password's SHA-1 leave the process, and the match against the several hundred suffixes that come back is made locally. The password, its full hash, and even the hash's suffix are never transmitted — a property pinned by a test that inspects the entire outbound request and fails if any of the three appears in it. Compose rather than replace, or you silently drop the local blocklist:
+
+```go
+s, err := sulis.New(users, sessions, tokens, factors,
+    sulis.WithPasswordChecker(passwordcheck.All(
+        passwordcheck.NewBlocklist(),   // local, free, always available
+        passwordcheck.NewHIBP(),        // network, opt-in
+    )),
+)
+```
+
+**HIBP fails open by default.** If the service is unreachable — connection refused, timeout, 5xx, 429 — the password is allowed through unchecked rather than rejected. The alternative makes another organization's uptime a hard dependency of your registration *and* password-reset flows, including the reset someone is doing because they were just breached; failing open costs a few unscreened passwords during an outage, and they still face the length policy and the local blocklist. `passwordcheck.WithHIBPFailClosed()` inverts it for deployments whose policy demands it — pair it with alerting, because "nobody can change their password" is the failure mode to actually fear. Either way, an unreachable service produces an ordinary error and never `ErrPasswordCompromised`: surface it as "try again in a moment", not as "your password is compromised", because nobody looked. `WithHIBPBaseURL`, `WithHIBPTimeout` (default 5s, applied to the request context), and `WithHIBPHTTPClient` cover self-hosted mirrors, tests, and shared transports.
+
+Pass `WithPasswordChecker(nil)` to disable screening entirely.
+
+**Verification never consults the checker.** `VerifyPassword`, `Login`, and `ReAuthenticate` do not screen the password they are checking, and cannot return `ErrPasswordCompromised`. Screening at verification time would lock out every existing user whose password is in the corpus the moment one is added or refreshed — a hardening change turned into a mass outage whose only remedy is itself a login-adjacent flow. A password is screened where it is chosen. If you want existing users moved off a now-known-bad password, detect that out of band and require a change, which leaves the user in control of when it happens.
+
+#### Upgrading: what NFKC normalization does to existing hashes
+
+A hash written before this release was derived from the raw bytes the user typed, not from the NFKC form. **Nobody is locked out.** Verification tries the normalized form first and, only if that fails *and* the two forms differ, falls back to comparing the raw bytes — so a pre-existing hash still verifies against the spelling it was created from. A match that way is treated exactly like a hash with outdated Argon2 parameters: it is re-derived from the normalized form and written back on the spot, through the same best-effort, concurrency-guarded path described under [Login and VerifyPassword](#login-and-verifypassword). After one successful login (or one `ReAuthenticate`) the account is migrated, every equivalent spelling of its password starts working, and the fallback never fires for it again.
+
+The fallback widens nothing: it compares the caller's exact bytes against the stored hash, so the only password it can accept is the one that hash was already derived from. No string that failed before this change succeeds after it. It also costs nothing for an already-normalized password — every ASCII password, so very nearly all of them — because there is no second form to compare.
+
+Two things genuinely do change for existing deployments. The **default minimum length is now 12**, so accounts with shorter passwords keep working but cannot re-use them on a change or reset; set `WithPasswordLengthLimits(8, 1024)` to keep the old behavior. And **`ChangePassword`/`ResetPassword` can now fail with `ErrPasswordCompromised`**, which your handlers should present as "choose a different password" rather than as a credential error.
 
 ### Login and VerifyPassword
 
@@ -155,7 +196,7 @@ Every session-issuance path checks account status: `VerifyPassword` (and so `Log
 
 `CreatePasswordResetTokenStrict(ctx, email, requestInfo)` is the same call with the safe default turned off: it returns `ErrUserNotFound` verbatim for an unknown address. It exists for admin tooling that has already authenticated an operator and genuinely needs to know whether the address is registered — never wire it to a public-facing endpoint, or you reopen the enumeration oracle `CreatePasswordResetToken` exists to close.
 
-`ResetPassword(ctx, rawToken, newPassword)` checks the password policy first (so a policy failure doesn't burn the token), then atomically consumes the token (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token and `ErrTokenExpired` for an expired one. A replay's error depends on timing: redeeming the same still-live token twice (e.g. a concurrent racing request) returns `ErrTokenAlreadyUsed` for the loser; redeeming it again *after* a successful reset returns `ErrTokenInvalid` instead, because a successful reset purges the user's outstanding password-reset tokens, so the replay finds nothing to consume rather than an already-used row.
+`ResetPassword(ctx, rawToken, newPassword)` checks the password policy first — length and the configured `PasswordChecker`, see [Password quality](#password-quality) — so a policy failure doesn't burn the token, then atomically consumes it (hash + purpose, single-use), loads the user, and updates the password hash. It returns `ErrTokenInvalid` for an unknown or wrong-purpose token and `ErrTokenExpired` for an expired one. A replay's error depends on timing: redeeming the same still-live token twice (e.g. a concurrent racing request) returns `ErrTokenAlreadyUsed` for the loser; redeeming it again *after* a successful reset returns `ErrTokenInvalid` instead, because a successful reset purges the user's outstanding password-reset tokens, so the replay finds nothing to consume rather than an already-used row.
 
 By default, both `ChangePassword` and `ResetPassword` revoke every session belonging to the user and delete any other outstanding password-reset tokens for that user — see [Operational requirements](#operational-requirements).
 
@@ -276,6 +317,12 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
 
 **Ceremony response bodies are size-capped.** go-webauthn's own body decoding (`protocol.decodeBody`) is a bare `json.NewDecoder(body).Decode(v)` with no limit, so an attacker who can reach a finish endpoint could otherwise send an arbitrarily large body and have it read fully into memory before any validation runs. `passkey.WithMaxCeremonyBody(max int64)` caps this (default 64 KiB); a larger body is rejected with `ErrCeremonyBodyTooLarge` up front, before the challenge is consumed or any JSON parsing happens. The `*http.Request` methods (`FinishRegistration`, `FinishLogin`, `FinishDiscoverableLogin`) are thin wrappers that read `r.Body` through `http.MaxBytesReader`, so the cap stops the read itself rather than buffering an oversized body first and rejecting it afterward. `passkey`'s core no longer imports `net/http` at all — it works from `[]byte` via `FinishRegistrationResponse`, `FinishLoginResponse`, and `FinishDiscoverableLoginResponse`, which non-`net/http` callers (or callers who parse the body some other way) can call directly, subject to the same cap.
 
+### `passwordcheck`
+
+`passwordcheck` holds the checkers behind [Password quality](#password-quality): `NewBlocklist(extra ...string)` over an embedded common-password corpus, `NewHIBP(opts...)` for the k-anonymous Have I Been Pwned range API, and `All(checkers...)` to run several in order and stop at the first rejection. `ErrCompromised` is the *same* error value the root package exports as `sulis.ErrPasswordCompromised`, so `errors.Is` matches under either name — the sentinel lives here because the root package's default configuration constructs a `Blocklist`, and an import the other way would be a cycle.
+
+`Checker` there and `sulis.PasswordChecker` here are the same method set, so anything written against either interface satisfies both. A checker used outside sulis is handed whatever its caller passes; sulis always hands it the NFKC-normalized password.
+
 ### `recovery`
 
 `recovery` implements one-time recovery codes as a fallback second factor for when a user loses their TOTP device or passkey. `NewService(store, opts...)` defaults to generating 10 codes (`WithCount` to change it); each code is 10 bytes of `crypto/rand`, base32-encoded and displayed as `xxxx-xxxx-xxxx-xxxx`.
@@ -392,6 +439,8 @@ Token-redemption calls (`ResetPassword`, `RedeemMagicLink`, `CompleteTwoFactor`,
 **Schedule cleanup yourself.** `TokenStore.DeleteExpiredTokens` and `SessionStore.CleanExpired` exist so expired rows don't accumulate forever, but `sulis` never calls either — it runs no background workers. Run them on a periodic job (cron, a ticker goroutine, etc.). `ValidateSession` does delete a session it discovers is expired at validation time, but that's incidental to the read path, not a substitute for sweeping sessions and tokens that are never revisited.
 
 **Cookie-mode `Authenticate` needs CSRF defenses.** The middleware accepts a session token from either an `Authorization: Bearer` header or a `session` cookie. Bearer tokens aren't auto-attached by browsers, so they're not CSRF-exposed; cookies are. If you use the cookie path, add your own CSRF defenses — `SameSite=Strict`/`Lax` plus a synchronizer or double-submit token, or strict `Origin`/`Sec-Fetch-Site` checks. `sulis` does not add anything cookie-specific.
+
+**A `PasswordChecker` that reaches the network is your outbound dependency.** The default (`passwordcheck.NewBlocklist()`) makes no requests at all. Adding `passwordcheck.NewHIBP()` puts an HTTPS call to `api.pwnedpasswords.com` on the critical path of registration, password change, and password reset — allow it through egress filtering, watch its latency (it is bounded at 5s by default, on top of the Argon2 hash the user is already waiting for), and decide deliberately whether it fails open (the default) or closed. It is never on the login path.
 
 **Encrypt TOTP secrets at rest.** `totp.Service` hands your `totp.Store` a plaintext base32 secret (`Credential.Secret`) — there is no application-layer encryption. Encrypt it at rest (e.g. envelope encryption via a KMS) in your store implementation, since a database compromise would otherwise hand an attacker every enrolled user's shared secret, usable to generate valid codes indefinitely.
 

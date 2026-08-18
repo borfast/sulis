@@ -11,7 +11,7 @@ func TestAuthenticateAttachesUserAndSession(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestAuthenticateAcceptsSessionCookie(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestAuthenticateBearerTakesPrecedenceOverCookie(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

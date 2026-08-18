@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/borfast/sulis/passwordcheck"
 )
 
 // In-memory store implementations for testing.
@@ -495,7 +497,7 @@ func TestRegisterAndLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -509,7 +511,7 @@ func TestRegisterAndLogin(t *testing.T) {
 	verifyUserEmail(t, users, user.ID)
 
 	// Login with correct credentials.
-	res2, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res2, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -531,7 +533,7 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 
 	// Login with non-existent user.
-	_, err = s.Login(ctx, "nobody@example.com", "password123", RequestInfo{})
+	_, err = s.Login(ctx, "nobody@example.com", "correct-battery-staple", RequestInfo{})
 	if err != ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
@@ -541,12 +543,12 @@ func TestRegisterDuplicate(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	_, _, _, err = s.Register(ctx, "alice@example.com", "password456", RequestInfo{})
+	_, _, _, err = s.Register(ctx, "alice@example.com", "another-battery-staple", RequestInfo{})
 	if err != ErrUserAlreadyExists {
 		t.Fatalf("expected ErrUserAlreadyExists, got %v", err)
 	}
@@ -582,7 +584,7 @@ func TestValidateAndRevokeSession(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, _, sessionTok, _ := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, _ := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 
 	// Validate the session.
 	sess, user, err := s.ValidateSession(ctx, sessionTok)
@@ -614,11 +616,11 @@ func TestRevokeSessionRejectsCrossUserAttempt(t *testing.T) {
 	s, _, sessions, _ := newTestEnv()
 	ctx := context.Background()
 
-	_, sessA, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, sessA, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register alice: %v", err)
 	}
-	_, sessB, tokB, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	_, sessB, tokB, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register bob: %v", err)
 	}
@@ -1031,7 +1033,7 @@ func TestCreateSessionStoresOnlyTokenHash(t *testing.T) {
 	sessions := newObservingSessionStore()
 	s := mustNew(users, sessions, newMemTokenStore())
 
-	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1173,7 +1175,7 @@ func TestSetInitialPasswordRejectsExistingPassword(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1464,7 +1466,7 @@ func TestValidateSessionDoesNotEchoRawToken(t *testing.T) {
 	s, _, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1541,7 +1543,7 @@ func TestEmailsAreNormalized(t *testing.T) {
 	s, users, _, _ := newTestEnv()
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "Foo@X.com ", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "Foo@X.com ", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1549,7 +1551,7 @@ func TestEmailsAreNormalized(t *testing.T) {
 	verifyUserEmail(t, users, user.ID)
 
 	// A differently-cased, untrimmed variant of the same address must log in.
-	_, err = s.Login(ctx, "foo@x.com", "password123", RequestInfo{})
+	_, err = s.Login(ctx, "foo@x.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login with normalized email: %v", err)
 	}
@@ -1567,7 +1569,7 @@ func TestRegisterRejectsInvalidEmail(t *testing.T) {
 	}
 
 	for _, email := range cases {
-		_, _, _, err := s.Register(ctx, email, "password123", RequestInfo{})
+		_, _, _, err := s.Register(ctx, email, "correct-battery-staple", RequestInfo{})
 		if err != ErrInvalidEmail {
 			t.Fatalf("Register(%q): expected ErrInvalidEmail, got %v", email, err)
 		}
@@ -1698,14 +1700,14 @@ func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Register creates its own session; clear it so we can observe
 	// VerifyPassword's effect in isolation.
 	sessions.sessions = make(map[string]*Session)
 
-	user, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("VerifyPassword: %v", err)
 	}
@@ -1723,7 +1725,7 @@ func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	if _, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -1731,7 +1733,7 @@ func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 
-	if _, err := s.VerifyPassword(ctx, "nobody@example.com", "password123", RequestInfo{}); err != ErrInvalidCredentials {
+	if _, err := s.VerifyPassword(ctx, "nobody@example.com", "correct-battery-staple", RequestInfo{}); err != ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials for unknown user, got %v", err)
 	}
 }
@@ -1759,7 +1761,7 @@ func TestIssueSessionReturnsValidatableSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1795,7 +1797,7 @@ func TestIssueSessionUncheckedCreatesValidatableSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1827,14 +1829,14 @@ func TestLoginStillReturnsUserAndSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Verification is incidental to this test; the gate is covered elsewhere.
 	verifyUserEmail(t, users, user.ID)
 
-	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -1867,7 +1869,7 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1877,7 +1879,7 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 	// two-factor flow's effect in isolation.
 	sessions.sessions = make(map[string]*Session)
 
-	gotUser, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{})
+	gotUser, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("VerifyPassword: %v", err)
 	}
@@ -1914,7 +1916,7 @@ func TestTwoFactorTokenIsSingleUse(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -1945,11 +1947,11 @@ func TestCompleteTwoFactorRejectsMismatchedUserID(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	userA, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	userA, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register (A): %v", err)
 	}
-	userB, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	userB, _, _, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register (B): %v", err)
 	}
@@ -1978,7 +1980,7 @@ func TestTwoFactorTokenExpires(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithTwoFactorTokenDuration(-time.Second))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2002,7 +2004,7 @@ func TestTwoFactorTokenRejectedByOtherFlows(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2026,7 +2028,7 @@ func TestRegisterLeavesEmailUnverified(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2042,7 +2044,7 @@ func TestVerifyEmailStampsEmailVerifiedAt(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2075,7 +2077,7 @@ func TestVerifyEmailTokenIsSingleUse(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2103,7 +2105,7 @@ func TestVerifyEmailRejectsTokenForChangedEmail(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2324,7 +2326,7 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2332,7 +2334,7 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 		t.Fatal("expected Register's auto-session to still be issued")
 	}
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != ErrEmailNotVerified {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != ErrEmailNotVerified {
 		t.Fatalf("Login: expected ErrEmailNotVerified, got %v", err)
 	}
 
@@ -2370,7 +2372,7 @@ func TestLoginSucceedsAfterEmailVerification(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2383,7 +2385,7 @@ func TestLoginSucceedsAfterEmailVerification(t *testing.T) {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after verification: expected success, got %v", err)
 	}
 }
@@ -2419,7 +2421,7 @@ func TestRegisterStillReturnsSession(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, _, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: expected success under default RequireVerifiedEmail, got %v", err)
 	}
@@ -2435,7 +2437,7 @@ func TestWithRequireVerifiedEmailFalseRestoresOldBehavior(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithRequireVerifiedEmail(false))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2443,7 +2445,7 @@ func TestWithRequireVerifiedEmailFalseRestoresOldBehavior(t *testing.T) {
 		t.Fatal("expected EmailVerifiedAt nil; this test is about unverified accounts")
 	}
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login: expected success with WithRequireVerifiedEmail(false), got %v", err)
 	}
 }
@@ -2513,10 +2515,10 @@ func TestConcurrentResetAndVerifyDoesNotResurrectOldHash(t *testing.T) {
 		t.Fatalf("GetUserByID: %v", err)
 	}
 
-	if ok, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
 		t.Error("the reset was silently undone: the old password still verifies")
 	}
-	ok, err := verifyPassword(newPassword, stored.PasswordHash)
+	ok, _, err := verifyPassword(newPassword, stored.PasswordHash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -2536,7 +2538,7 @@ func TestLoginWithSecondFactorReturnsPendingTokenNotSession(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2545,7 +2547,7 @@ func TestLoginWithSecondFactorReturnsPendingTokenNotSession(t *testing.T) {
 
 	before := sessions.count()
 
-	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -2573,13 +2575,13 @@ func TestLoginWithoutSecondFactorReturnsSession(t *testing.T) {
 	s, users, _, _, _ := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	verifyUserEmail(t, users, user.ID)
 
-	res, err := s.Login(ctx, "bob@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -2597,7 +2599,7 @@ func TestLoginFailsClosedWhenCheckerErrors(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "carol@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "carol@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2607,7 +2609,7 @@ func TestLoginFailsClosedWhenCheckerErrors(t *testing.T) {
 	factors.failWith(checkerErr)
 	before := sessions.count()
 
-	res, err := s.Login(ctx, "carol@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "carol@example.com", "correct-battery-staple", RequestInfo{})
 	if err == nil {
 		t.Fatal("expected Login to fail when the second-factor check fails")
 	}
@@ -2640,7 +2642,7 @@ func TestRedeemMagicLinkWithSecondFactorRequiresSecondFactor(t *testing.T) {
 	s, users, sessions, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2684,7 +2686,7 @@ func TestRedeemMagicLinkStampsVerifiedEvenWhenSecondFactorPending(t *testing.T) 
 	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "dave@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "dave@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2774,7 +2776,7 @@ func TestVerifyEmailIsANoOpWhenAnotherRequestVerifiesFirst(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2829,7 +2831,7 @@ func TestVerifyEmailPropagatesUserUpdateFailure(t *testing.T) {
 	tokens := newMemTokenStore()
 	s := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2860,7 +2862,7 @@ func TestVerifyEmailPropagatesSessionRevocationFailure(t *testing.T) {
 	sessions := &failSessionStore{memSessionStore: newMemSessionStore()}
 	s := mustNew(users, sessions, newMemTokenStore(), WithArgon2Params(testArgon2Params))
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2888,7 +2890,7 @@ func TestEmailVerificationPropagatesUserLookupFailures(t *testing.T) {
 	users := &failGetUserStore{memUserStore: newMemUserStore()}
 	s := mustNew(users, newMemSessionStore(), newMemTokenStore(), WithArgon2Params(testArgon2Params))
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2951,7 +2953,7 @@ func TestReAuthenticateCorrectPasswordRefreshesAuthenticatedAt(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, sessionTok, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -2963,7 +2965,7 @@ func TestReAuthenticateCorrectPasswordRefreshesAuthenticatedAt(t *testing.T) {
 	sessions.sessions[session.ID].AuthenticatedAt = old
 	sessions.mu.Unlock()
 
-	if err := s.ReAuthenticate(ctx, session, "password123", RequestInfo{}); err != nil {
+	if err := s.ReAuthenticate(ctx, session, "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("ReAuthenticate: %v", err)
 	}
 
@@ -3038,7 +3040,7 @@ func TestReAuthenticateUpgradesWeakStoredHash(t *testing.T) {
 		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
 	}
 
-	ok, err := verifyPassword(password, after.PasswordHash)
+	ok, _, err := verifyPassword(password, after.PasswordHash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -3054,7 +3056,7 @@ func TestReAuthenticateWrongPasswordDoesNotRefreshStamp(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3107,7 +3109,7 @@ func TestReAuthenticateConsultsLimiter(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
 	ctx := context.Background()
 
-	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3137,7 +3139,7 @@ func TestCreateSessionRecordsAuthenticatedAtAndMethod(t *testing.T) {
 	ctx := context.Background()
 
 	before := time.Now()
-	user, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3149,7 +3151,7 @@ func TestCreateSessionRecordsAuthenticatedAtAndMethod(t *testing.T) {
 	}
 
 	verifyUserEmail(t, users, user.ID)
-	loginRes, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	loginRes, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -3179,14 +3181,14 @@ func TestCompleteTwoFactorRecordsTwoFactorMethod(t *testing.T) {
 	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	verifyUserEmail(t, users, user.ID)
 	factors.enroll(user.ID)
 
-	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -3255,7 +3257,7 @@ func TestDisableUserBlocksLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3265,7 +3267,7 @@ func TestDisableUserBlocksLogin(t *testing.T) {
 		t.Fatalf("DisableUser: %v", err)
 	}
 
-	_, err = s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, err = s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("Login error = %v, want ErrAccountDisabled", err)
 	}
@@ -3286,7 +3288,7 @@ func TestValidateSessionRejectsDisabledAccountsExistingSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, token, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3305,7 +3307,7 @@ func TestDisableUserRevokesAllSessions(t *testing.T) {
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3332,7 +3334,7 @@ func TestEnableUserRestoresLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3345,7 +3347,7 @@ func TestEnableUserRestoresLogin(t *testing.T) {
 		t.Fatalf("EnableUser: %v", err)
 	}
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after EnableUser: %v", err)
 	}
 
@@ -3390,7 +3392,7 @@ func TestAccountLockBlocksLoginUntilDeadlinePasses(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3398,7 +3400,7 @@ func TestAccountLockBlocksLoginUntilDeadlinePasses(t *testing.T) {
 
 	lockUserUntil(t, users, user.ID, time.Now().Add(time.Hour))
 
-	_, err = s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, err = s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if !errors.Is(err, ErrAccountLocked) {
 		t.Fatalf("Login error = %v, want ErrAccountLocked", err)
 	}
@@ -3408,7 +3410,7 @@ func TestAccountLockBlocksLoginUntilDeadlinePasses(t *testing.T) {
 
 	lockUserUntil(t, users, user.ID, time.Now().Add(-time.Minute))
 
-	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after LockedUntil passed: %v", err)
 	}
 }
@@ -3423,7 +3425,7 @@ func TestVerifyPasswordChecksAccountStatusOnlyAfterPasswordVerifies(t *testing.T
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3450,14 +3452,14 @@ func TestCompleteTwoFactorRejectsDisabledAccount(t *testing.T) {
 	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	verifyUserEmail(t, users, user.ID)
 	factors.enroll(user.ID)
 
-	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	res, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -3482,7 +3484,7 @@ func TestIssueSessionUncheckedRejectsDisabledAccount(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3505,7 +3507,7 @@ func TestRedeemMagicLinkRejectsDisabledAccount(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3535,7 +3537,7 @@ func TestFailureLockoutDisabledByDefault(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3558,7 +3560,7 @@ func TestFailureLockoutDisabledByDefault(t *testing.T) {
 		t.Errorf("LockedUntil = %v, want nil with lockout disabled", after.LockedUntil)
 	}
 
-	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("VerifyPassword with the correct password after 20 failures: %v", err)
 	}
 }
@@ -3577,7 +3579,7 @@ func TestWithFailureLockoutLocksAfterThreshold(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3602,7 +3604,7 @@ func TestWithFailureLockoutLocksAfterThreshold(t *testing.T) {
 
 	// The correct password no longer authenticates immediately: the account
 	// is locked until the backoff passes.
-	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); !errors.Is(err, ErrAccountLocked) {
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); !errors.Is(err, ErrAccountLocked) {
 		t.Fatalf("VerifyPassword with the correct password while locked error = %v, want ErrAccountLocked", err)
 	}
 
@@ -3612,7 +3614,7 @@ func TestWithFailureLockoutLocksAfterThreshold(t *testing.T) {
 	// needed.
 	lockUserUntil(t, users, user.ID, time.Now().Add(-time.Minute))
 
-	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("VerifyPassword after the lockout window: %v", err)
 	}
 
@@ -3671,7 +3673,7 @@ func TestResetPasswordClearsLockoutButNotDisable(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3692,13 +3694,13 @@ func TestResetPasswordClearsLockoutButNotDisable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePasswordResetToken: %v", err)
 	}
-	if err := s.ResetPassword(ctx, rawToken, "newpassword123"); err != nil {
+	if err := s.ResetPassword(ctx, rawToken, "new-correct-battery-staple"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
 	// Login with the new password must succeed immediately — no
 	// ErrAccountLocked left over from before the reset.
-	if _, err := s.Login(ctx, "alice@example.com", "newpassword123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "new-correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after ResetPassword: %v", err)
 	}
 
@@ -3723,10 +3725,10 @@ func TestResetPasswordClearsLockoutButNotDisable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePasswordResetToken (second): %v", err)
 	}
-	if err := s.ResetPassword(ctx, rawToken2, "anothernewpassword123"); err != nil {
+	if err := s.ResetPassword(ctx, rawToken2, "another-new-battery-staple"); err != nil {
 		t.Fatalf("ResetPassword (second): %v", err)
 	}
-	_, err = s.Login(ctx, "alice@example.com", "anothernewpassword123", RequestInfo{})
+	_, err = s.Login(ctx, "alice@example.com", "another-new-battery-staple", RequestInfo{})
 	if !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("Login after a password reset on a disabled account error = %v, want ErrAccountDisabled", err)
 	}
@@ -3739,7 +3741,7 @@ func TestChangePasswordClearsLockout(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3756,11 +3758,11 @@ func TestChangePasswordClearsLockout(t *testing.T) {
 		t.Fatalf("UpdateUser: %v", err)
 	}
 
-	if err := s.ChangePassword(ctx, user.ID, "password123", "newpassword123", RequestInfo{}); err != nil {
+	if err := s.ChangePassword(ctx, user.ID, "correct-battery-staple", "new-correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
 
-	if _, err := s.Login(ctx, "alice@example.com", "newpassword123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "alice@example.com", "new-correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after ChangePassword: %v", err)
 	}
 
@@ -3807,11 +3809,11 @@ func TestSetInitialPasswordClearsLockoutFields(t *testing.T) {
 		t.Fatalf("UpdateUser: %v", err)
 	}
 
-	if err := s.SetInitialPassword(ctx, user.ID, "newpassword123"); err != nil {
+	if err := s.SetInitialPassword(ctx, user.ID, "new-correct-battery-staple"); err != nil {
 		t.Fatalf("SetInitialPassword: %v", err)
 	}
 
-	if _, err := s.Login(ctx, "bob@example.com", "newpassword123", RequestInfo{}); err != nil {
+	if _, err := s.Login(ctx, "bob@example.com", "new-correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Login after SetInitialPassword: %v", err)
 	}
 
@@ -3860,7 +3862,7 @@ func TestSessionsRecordRequestInfoAtIssuance(t *testing.T) {
 	ctx := context.Background()
 	ri := RequestInfo{IP: "203.0.113.5", UserAgent: "test-agent/1.0"}
 
-	_, regSession, _, err := s.Register(ctx, "alice@example.com", "password123", ri)
+	_, regSession, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", ri)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3869,7 +3871,7 @@ func TestSessionsRecordRequestInfoAtIssuance(t *testing.T) {
 	}
 
 	verifyUserEmail(t, users, regSession.UserID)
-	loginRes, err := s.Login(ctx, "alice@example.com", "password123", ri)
+	loginRes, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", ri)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -3893,7 +3895,7 @@ func TestSessionsRecordRequestInfoAtIssuance(t *testing.T) {
 	}
 
 	factors.enroll(regSession.UserID)
-	pending, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	pending, err := s.Login(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Login (2FA pending): %v", err)
 	}
@@ -3919,7 +3921,7 @@ func TestListUserSessionsStripsTokenHash(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3942,11 +3944,11 @@ func TestListUserSessionsScopedToTheGivenUser(t *testing.T) {
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register alice: %v", err)
 	}
-	if _, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{}); err != nil {
+	if _, _, _, err := s.Register(ctx, "bob@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
 		t.Fatalf("Register bob: %v", err)
 	}
 
@@ -3976,7 +3978,7 @@ func TestValidateSessionRejectsPastIdleExpiryBeforeAbsoluteExpiry(t *testing.T) 
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithIdleTimeout(time.Hour))
 	ctx := context.Background()
 
-	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, token, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -3998,7 +4000,7 @@ func TestValidateSessionAcceptsSessionBeforeIdleExpiry(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithIdleTimeout(time.Hour))
 	ctx := context.Background()
 
-	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, token, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4029,7 +4031,7 @@ func TestValidateSessionThrottlesTheLastSeenTouch(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, token, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4077,7 +4079,7 @@ func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
 	ctx := context.Background()
 	ri := RequestInfo{IP: "203.0.113.9", UserAgent: "refresh-test-agent/1.0"}
 
-	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", ri)
+	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", ri)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4144,7 +4146,7 @@ func TestRefreshSessionAfterRevokeSessionFailsClosed(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	user, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	user, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4171,7 +4173,7 @@ func TestRefreshSessionAfterDisableUserFailsClosed(t *testing.T) {
 	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4200,7 +4202,7 @@ func TestRefreshSessionRejectsDisabledAccountWhoseSessionSurvived(t *testing.T) 
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4230,7 +4232,7 @@ func TestReAuthenticateRejectsDisabledAccount(t *testing.T) {
 	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 
-	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -4243,7 +4245,7 @@ func TestReAuthenticateRejectsDisabledAccount(t *testing.T) {
 
 	disableUserDirect(t, users, session.UserID, "reported for abuse")
 
-	if err := s.ReAuthenticate(ctx, session, "password123", RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
+	if err := s.ReAuthenticate(ctx, session, "correct-battery-staple", RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("ReAuthenticate error = %v, want ErrAccountDisabled", err)
 	}
 
@@ -4336,7 +4338,7 @@ func TestLoginUpgradesWeakStoredHash(t *testing.T) {
 		t.Fatalf("upgraded hash params = %+v, want the configured %+v", gotParams, testArgon2Params)
 	}
 
-	ok, err := verifyPassword(password, after.PasswordHash)
+	ok, _, err := verifyPassword(password, after.PasswordHash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -4576,14 +4578,423 @@ func TestRehashDoesNotClobberConcurrentPasswordChange(t *testing.T) {
 		t.Fatalf("GetUserByID: %v", err)
 	}
 
-	if ok, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
+	if ok, _, _ := verifyPassword(oldPassword, stored.PasswordHash); ok {
 		t.Fatal("the rehash resurrected the old password: it still verifies after a concurrent ChangePassword")
 	}
-	ok, err := verifyPassword(newPassword, stored.PasswordHash)
+	ok, _, err := verifyPassword(newPassword, stored.PasswordHash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
 	if !ok {
 		t.Fatal("the concurrently-set new password does not verify; it was overwritten by the rehash")
+	}
+}
+
+// The same password, typed three ways. NFKC folds all of them onto the
+// composed form, so all three must hash and verify identically once
+// normalization is applied (T505).
+//
+//   - nfkcComposedForm is already NFKC-normal: é is the single rune U+00E9.
+//   - nfkcDecomposedForm is the NFD spelling of the same text: "e" followed
+//     by the combining acute accent U+0301. macOS/iOS keyboards and file
+//     systems routinely produce this form where Linux and Windows produce
+//     the composed one, so the same human password genuinely arrives both
+//     ways.
+//   - nfkcCompatibilityForm exercises the *compatibility* half of NFKC that
+//     plain NFC leaves alone: U+FB01, the "fi" ligature, which NFKC maps to
+//     the two ASCII letters "fi".
+const (
+	nfkcComposedForm      = "café-passphrase"
+	nfkcDecomposedForm    = "café-passphrase"
+	nfkcCompatibilityForm = "ﬁnal-passphrase"
+	nfkcCompatibilityNFKC = "final-passphrase"
+)
+
+// TestDefaultMinPasswordLengthIsTwelve pins the raised default (T505). Eight
+// was below what NIST SP 800-63B expects of a memorized secret, and the API
+// was already breaking in this series, so this is the moment to raise it.
+func TestDefaultMinPasswordLengthIsTwelve(t *testing.T) {
+	if got := defaultConfig().MinPasswordLength; got != 12 {
+		t.Fatalf("defaultConfig().MinPasswordLength = %d, want 12", got)
+	}
+
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	if _, _, _, err := s.Register(ctx, "eleven@example.com", "abcdefghijk", RequestInfo{}); !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("Register with an 11-character password: error = %v, want ErrPasswordTooShort", err)
+	}
+	if _, _, _, err := s.Register(ctx, "twelve@example.com", "abcdefghijkl", RequestInfo{}); err != nil {
+		t.Fatalf("Register with a 12-character password: %v", err)
+	}
+}
+
+// TestEquivalentUnicodePasswordFormsVerify is the end-to-end statement of
+// why NFKC normalization is here at all: a password registered in one
+// Unicode spelling must log in when typed in an equivalent one. Without
+// normalization the two byte strings hash differently and the second login
+// is an ordinary ErrInvalidCredentials the user has no way to diagnose.
+func TestEquivalentUnicodePasswordFormsVerify(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		registerWith string
+		loginWith    string
+	}{
+		{"decomposed registered, composed typed", nfkcDecomposedForm, nfkcComposedForm},
+		{"composed registered, decomposed typed", nfkcComposedForm, nfkcDecomposedForm},
+		{"ligature registered, expanded typed", nfkcCompatibilityForm, nfkcCompatibilityNFKC},
+		{"expanded registered, ligature typed", nfkcCompatibilityNFKC, nfkcCompatibilityForm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+			ctx := context.Background()
+
+			user, _, _, err := s.Register(ctx, "unicode@example.com", tc.registerWith, RequestInfo{})
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			verifyUserEmail(t, users, user.ID)
+
+			if _, err := s.VerifyPassword(ctx, "unicode@example.com", tc.loginWith, RequestInfo{}); err != nil {
+				t.Fatalf("VerifyPassword with an NFKC-equivalent form of the registered password: %v", err)
+			}
+		})
+	}
+}
+
+// blocklistedPassword is an entry from the embedded common-password corpus
+// that is exactly twelve characters long — long enough to clear the default
+// MinPasswordLength, so a rejection can only have come from the password
+// checker and never from the length gate.
+const blocklistedPassword = "unbelievable"
+
+// recordingChecker captures what the configured PasswordChecker is handed
+// and how often, and can be made to reject or to fail operationally.
+type recordingChecker struct {
+	mu   sync.Mutex
+	seen []string
+	err  error
+}
+
+func (c *recordingChecker) Check(_ context.Context, password string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seen = append(c.seen, password)
+	return c.err
+}
+
+func (c *recordingChecker) calls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.seen...)
+}
+
+// TestCompromisedPasswordRejectedOnEveryPasswordSetPath is the task's
+// headline property: every route by which a password can come to be stored
+// consults the checker, and the default configuration has one. A path that
+// forgot to call it would be a hole exactly as large as the whole feature —
+// an attacker only needs one way in.
+func TestCompromisedPasswordRejectedOnEveryPasswordSetPath(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Register", func(t *testing.T) {
+		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		_, _, _, err := s.Register(ctx, "alice@example.com", blocklistedPassword, RequestInfo{})
+		if !errors.Is(err, ErrPasswordCompromised) {
+			t.Fatalf("Register = %v, want ErrPasswordCompromised", err)
+		}
+	})
+
+	t.Run("ChangePassword", func(t *testing.T) {
+		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		err = s.ChangePassword(ctx, user.ID, "correct-battery-staple", blocklistedPassword, RequestInfo{})
+		if !errors.Is(err, ErrPasswordCompromised) {
+			t.Fatalf("ChangePassword = %v, want ErrPasswordCompromised", err)
+		}
+	})
+
+	t.Run("ResetPassword", func(t *testing.T) {
+		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		if _, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com", RequestInfo{})
+		if err != nil {
+			t.Fatalf("CreatePasswordResetToken: %v", err)
+		}
+		if err := s.ResetPassword(ctx, rawToken, blocklistedPassword); !errors.Is(err, ErrPasswordCompromised) {
+			t.Fatalf("ResetPassword = %v, want ErrPasswordCompromised", err)
+		}
+		// The policy check runs before the token is consumed, so a rejected
+		// password must not have burned the reset token.
+		if err := s.ResetPassword(ctx, rawToken, "brand-new-passphrase"); err != nil {
+			t.Fatalf("ResetPassword with an acceptable password after a rejected one: %v", err)
+		}
+	})
+
+	t.Run("SetInitialPassword", func(t *testing.T) {
+		s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		user := &User{ID: generateID(), Email: "passwordless@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		if err := users.CreateUser(ctx, user); err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		if err := s.SetInitialPassword(ctx, user.ID, blocklistedPassword); !errors.Is(err, ErrPasswordCompromised) {
+			t.Fatalf("SetInitialPassword = %v, want ErrPasswordCompromised", err)
+		}
+	})
+}
+
+func TestErrPasswordCompromisedCarriesTheRatifiedMessage(t *testing.T) {
+	if got, want := ErrPasswordCompromised.Error(), "sulis: password appears in a breach corpus"; got != want {
+		t.Fatalf("ErrPasswordCompromised.Error() = %q, want %q", got, want)
+	}
+	// One error value, reachable under either name: passwordcheck cannot
+	// import sulis (that would be an import cycle, since sulis's default
+	// checker comes from passwordcheck), so the sentinel is born there and
+	// re-exported here. Two distinct values would silently break errors.Is
+	// for anyone comparing against the other package's name.
+	if ErrPasswordCompromised != passwordcheck.ErrCompromised {
+		t.Fatal("passwordcheck.ErrCompromised and sulis.ErrPasswordCompromised are not the same error value")
+	}
+}
+
+// TestVerifyPasswordDoesNotConsultTheChecker: checking at verification time
+// would lock out every existing user the day a corpus is added or updated,
+// turning a hardening change into a mass outage. The check belongs where a
+// password is chosen, not where it is proven.
+func TestVerifyPasswordDoesNotConsultTheChecker(t *testing.T) {
+	ctx := context.Background()
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+
+	// Set the password up through a Sulis with checking disabled, exactly as
+	// a pre-T505 deployment would have.
+	lax, err := New(users, sessions, tokens, newFakeFactors(), WithArgon2Params(testArgon2Params), WithPasswordChecker(nil))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	user, _, _, err := lax.Register(ctx, "alice@example.com", blocklistedPassword, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register with checking disabled: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	checker := &recordingChecker{err: ErrPasswordCompromised}
+	strict, err := New(users, sessions, tokens, newFakeFactors(), WithArgon2Params(testArgon2Params), WithPasswordChecker(checker))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := strict.VerifyPassword(ctx, "alice@example.com", blocklistedPassword, RequestInfo{}); err != nil {
+		t.Fatalf("VerifyPassword for an existing user whose password is now blocklisted: %v", err)
+	}
+	if calls := checker.calls(); len(calls) != 0 {
+		t.Fatalf("the password checker was consulted %d time(s) during verification: %v", len(calls), calls)
+	}
+}
+
+// TestPasswordCheckerRunsAfterTheLengthGateAndOnTheNormalizedForm pins two
+// things at once. The checker is handed the NFKC form, because that is what
+// is actually hashed and stored — comparing a corpus against the raw form
+// would let a decorated spelling of a corpus entry through. And it runs
+// after the cheap length checks, so an obviously-too-short password never
+// costs a network round trip to a checker like HIBP.
+func TestPasswordCheckerRunsAfterTheLengthGateAndOnTheNormalizedForm(t *testing.T) {
+	ctx := context.Background()
+	checker := &recordingChecker{}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithPasswordChecker(checker))
+
+	if _, _, _, err := s.Register(ctx, "short@example.com", "abc", RequestInfo{}); !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("Register = %v, want ErrPasswordTooShort", err)
+	}
+	if calls := checker.calls(); len(calls) != 0 {
+		t.Fatalf("the checker was consulted for a password the length gate had already rejected: %v", calls)
+	}
+
+	if _, _, _, err := s.Register(ctx, "unicode@example.com", nfkcDecomposedForm, RequestInfo{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	calls := checker.calls()
+	if len(calls) != 1 {
+		t.Fatalf("checker calls = %v, want exactly one", calls)
+	}
+	if calls[0] != nfkcComposedForm {
+		t.Fatalf("the checker was handed %q, want the NFKC form %q", calls[0], nfkcComposedForm)
+	}
+}
+
+// TestPasswordCheckerOperationalErrorIsNotReportedAsCompromised: a checker
+// that cannot reach its data source (a fail-closed HIBP client, say) must
+// surface as an operational failure, not as a verdict about the password.
+func TestPasswordCheckerOperationalErrorIsNotReportedAsCompromised(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("breach corpus unreachable")
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithPasswordChecker(&recordingChecker{err: boom}))
+
+	_, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Register = %v, want the checker's own error", err)
+	}
+	if errors.Is(err, ErrPasswordCompromised) {
+		t.Fatal("an unreachable checker was reported as evidence that the password is compromised")
+	}
+}
+
+func TestWithPasswordCheckerNilDisablesChecking(t *testing.T) {
+	ctx := context.Background()
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithPasswordChecker(nil))
+	if _, _, _, err := s.Register(ctx, "alice@example.com", blocklistedPassword, RequestInfo{}); err != nil {
+		t.Fatalf("Register with checking disabled: %v", err)
+	}
+}
+
+func TestDefaultConfigUsesTheEmbeddedBlocklist(t *testing.T) {
+	if defaultConfig().PasswordChecker == nil {
+		t.Fatal("the default configuration has no PasswordChecker; a safe default is the whole point of shipping an embedded corpus")
+	}
+}
+
+// TestPasswordLengthPolicyMeasuresTheNormalizedForm: the bounds exist to
+// bound what Argon2 actually consumes, and what Argon2 consumes is the NFKC
+// form. Measuring the raw form would let a password that normalizes to three
+// characters through a twelve-character minimum.
+func TestPasswordLengthPolicyMeasuresTheNormalizedForm(t *testing.T) {
+	ctx := context.Background()
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+
+	// Twelve U+FF10 FULLWIDTH DIGIT ZERO: 36 bytes raw, 12 bytes once NFKC
+	// folds each onto ASCII "0". Long enough either way, so it must be
+	// accepted — and it pins that the measurement happens on some form
+	// consistently rather than by accident.
+	wide := strings.Repeat("０", 12)
+	if _, _, _, err := s.Register(ctx, "wide@example.com", wide, RequestInfo{}); err != nil {
+		t.Fatalf("Register with a 12-character fullwidth password: %v", err)
+	}
+
+	// Eleven of the same: 33 bytes raw, 11 after normalization. Measured on
+	// the raw form this would sail past a twelve-*byte* minimum.
+	narrow := strings.Repeat("０", 11)
+	if _, _, _, err := s.Register(ctx, "narrow@example.com", narrow, RequestInfo{}); !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("Register with an 11-character fullwidth password = %v, want ErrPasswordTooShort", err)
+	}
+}
+
+// TestLegacyPasswordHashIsUpgradedToTheNormalizedFormOnLogin is the
+// compatibility story end to end. A hash written before T505 was derived
+// from raw bytes; the first successful login after the upgrade re-hashes it
+// from the NFKC form, on exactly the machinery T504 built for raising Argon2
+// parameters. After that one login the account is fully migrated and every
+// equivalent spelling of the password works.
+func TestLegacyPasswordHashIsUpgradedToTheNormalizedFormOnLogin(t *testing.T) {
+	ctx := context.Background()
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+
+	user := &User{
+		ID:           generateID(),
+		Email:        "legacy@example.com",
+		PasswordHash: legacyHash(t, nfkcCompatibilityForm, testArgon2Params),
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	if err := users.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+	before, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	// The pre-normalization form still logs in.
+	if _, err := s.Login(ctx, "legacy@example.com", nfkcCompatibilityForm, RequestInfo{}); err != nil {
+		t.Fatalf("Login with the form the legacy hash was derived from: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.PasswordHash == before.PasswordHash {
+		t.Fatal("the stored hash was not upgraded; the account stays on the pre-normalization form forever and the equivalent spellings never start working")
+	}
+
+	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("the password no longer verifies against its own upgraded hash")
+	}
+	if legacy {
+		t.Fatal("the upgraded hash still only matches through the pre-normalization fallback; it was not re-derived from the normalized form")
+	}
+
+	// And now the equivalent spelling works too, which it could not before.
+	if _, err := s.Login(ctx, "legacy@example.com", nfkcCompatibilityNFKC, RequestInfo{}); err != nil {
+		t.Fatalf("Login with the NFKC form after the upgrade: %v", err)
+	}
+}
+
+// TestReAuthenticateUpgradesALegacyPasswordHash: ReAuthenticate is the other
+// real password comparison in the library (T504 fix round 1), so it must
+// migrate a pre-normalization hash the same way Login does. Otherwise an
+// account whose owner only ever re-authenticates for step-up operations
+// stays on the legacy form indefinitely.
+func TestReAuthenticateUpgradesALegacyPasswordHash(t *testing.T) {
+	ctx := context.Background()
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+
+	user := &User{
+		ID:           generateID(),
+		Email:        "legacy@example.com",
+		PasswordHash: legacyHash(t, nfkcCompatibilityForm, testArgon2Params),
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	if err := users.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	session, _, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPassword)
+	if err != nil {
+		t.Fatalf("IssueSessionUnchecked: %v", err)
+	}
+	if err := s.ReAuthenticate(ctx, session, nfkcCompatibilityForm, RequestInfo{}); err != nil {
+		t.Fatalf("ReAuthenticate: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, after.PasswordHash)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok || legacy {
+		t.Fatal("ReAuthenticate did not migrate the pre-normalization hash to the normalized form")
+	}
+}
+
+// TestChangePasswordAcceptsAnEquivalentSpellingOfTheOldPassword: the old
+// password is compared through the same normalizing path as any other
+// verification, so a user who types it in a different but equivalent form
+// must not be told their current password is wrong.
+func TestChangePasswordAcceptsAnEquivalentSpellingOfTheOldPassword(t *testing.T) {
+	ctx := context.Background()
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", nfkcDecomposedForm, RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := s.ChangePassword(ctx, user.ID, nfkcComposedForm, "brand-new-passphrase", RequestInfo{}); err != nil {
+		t.Fatalf("ChangePassword with an NFKC-equivalent spelling of the old password: %v", err)
 	}
 }

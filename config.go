@@ -3,6 +3,8 @@ package sulis
 import (
 	"context"
 	"time"
+
+	"github.com/borfast/sulis/passwordcheck"
 )
 
 // Limiter enforces a rate limit for a caller-supplied key. Implementations
@@ -11,6 +13,26 @@ import (
 // should be denied.
 type Limiter interface {
 	Allow(ctx context.Context, key string) error
+}
+
+// PasswordChecker screens a candidate password for known-compromised values,
+// beyond what the length policy can judge. It is consulted on every path that
+// sets a password — Register, ChangePassword, ResetPassword,
+// SetInitialPassword — and never on a path that merely verifies one; see
+// WithPasswordChecker.
+//
+// Check receives the password in its NFKC-normalized form, which is exactly
+// the string that will be hashed and stored. It returns nil if the password
+// is acceptable, ErrPasswordCompromised (or an error wrapping it) to reject
+// it, and any other error if it could not reach a verdict — that last case
+// propagates to the caller unchanged and must not be presented to a user as
+// "your password is compromised", because nobody actually looked.
+//
+// Implementations must be safe for concurrent use. This is the same method
+// set as passwordcheck.Checker, so the checkers in that package satisfy it
+// directly and so does anything written against either interface.
+type PasswordChecker interface {
+	Check(ctx context.Context, password string) error
 }
 
 // Argon2Params holds the parameters for argon2id password hashing.
@@ -32,10 +54,11 @@ type Config struct {
 	ResetTokenBytes                int           // length of random reset/magic link tokens in bytes (default: 32)
 	RevokeSessionsOnPasswordChange bool          // revoke all sessions when a password is changed or reset (default: true)
 	RequireVerifiedEmail           bool          // block new sessions for unverified accounts (default: true)
-	MinPasswordLength              int           // minimum accepted password length in bytes (default: 8)
+	MinPasswordLength              int           // minimum accepted password length in bytes (default: 12)
 	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
-	Limiter                        Limiter // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
+	Limiter                        Limiter         // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
+	PasswordChecker                PasswordChecker // screens new passwords for known-compromised values (default: passwordcheck.NewBlocklist())
 
 	// FailureLockoutThreshold, FailureLockoutBaseBackoff, and
 	// FailureLockoutMaxBackoff configure the optional automatic-lockout
@@ -67,9 +90,10 @@ func defaultConfig() Config {
 		ResetTokenBytes:                32,
 		RevokeSessionsOnPasswordChange: true,
 		RequireVerifiedEmail:           true,
-		MinPasswordLength:              8,
+		MinPasswordLength:              12,
 		MaxPasswordLength:              1024,
 		Limiter:                        NewMemoryLimiter(),
+		PasswordChecker:                passwordcheck.NewBlocklist(),
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -118,6 +142,21 @@ func WithRevokeSessionsOnPasswordChange(revoke bool) Option {
 // characters — deliberately, to bound Argon2's input size regardless of
 // encoding, so multi-byte UTF-8 passwords count for more than one unit per
 // character.
+//
+// The bytes counted are those of the NFKC-normalized password (see
+// normalizePassword), because that is the string Argon2 actually consumes.
+// Normalization can shorten a password — twelve fullwidth digits are 36 raw
+// bytes and 12 normalized ones — so measuring the raw form would let a
+// password through a minimum it does not actually meet.
+//
+// The default minimum is 12. It was 8 before this series; NIST SP 800-63B
+// treats 8 as the floor for a memorized secret and expects more from anything
+// that is not backed by a second factor, and this series was already breaking
+// the API. Lowering it is supported and sometimes right — a deployment where
+// every account has a passkey or TOTP, for instance — and doing so makes the
+// embedded blocklist (see WithPasswordChecker) matter far more, since most
+// common passwords are shorter than 12 characters and are otherwise rejected
+// by this policy before the checker ever sees them.
 func WithPasswordLengthLimits(minLength, maxLength int) Option {
 	return func(c *Config) {
 		c.MinPasswordLength = minLength
@@ -197,6 +236,40 @@ func WithFailureLockout(threshold int, baseBackoff, maxBackoff time.Duration) Op
 // no options never checks or writes IdleExpiresAt at all.
 func WithIdleTimeout(d time.Duration) Option {
 	return func(c *Config) { c.IdleTimeout = d }
+}
+
+// WithPasswordChecker replaces the checker consulted on every password-setting
+// path — Register, ChangePassword, ResetPassword, SetInitialPassword — after
+// the length policy passes and before the password is hashed. A checker that
+// returns ErrPasswordCompromised rejects the password; any other error is an
+// operational failure and propagates to the caller unchanged.
+//
+// The default is passwordcheck.NewBlocklist(), an embedded corpus of the ten
+// thousand most common passwords: no network, no third party, nothing to
+// configure, and on by default because a check that has to be discovered in
+// documentation mostly does not run. To also query Have I Been Pwned, compose
+// rather than replace — passing the HIBP checker alone silently drops the
+// local blocklist:
+//
+//	sulis.WithPasswordChecker(passwordcheck.All(
+//		passwordcheck.NewBlocklist(),
+//		passwordcheck.NewHIBP(),
+//	))
+//
+// Passing nil disables password checking entirely, which is the right call
+// only when something outside sulis already screens passwords.
+//
+// The checker is deliberately NOT consulted by VerifyPassword, Login, or
+// ReAuthenticate. Screening at verification time would lock out every
+// existing user whose password happens to be in the corpus the moment one is
+// added or refreshed — turning a hardening change into a mass outage, and
+// worse, one whose only remedy (a password reset) is itself a login-adjacent
+// flow. A password is screened where it is chosen, not where it is proven.
+// Applications that want existing users moved off a now-known-bad password
+// should detect that out of band and require a change, which keeps the user
+// in control of when it happens.
+func WithPasswordChecker(c PasswordChecker) Option {
+	return func(cfg *Config) { cfg.PasswordChecker = c }
 }
 
 // WithoutRateLimiting disables rate limiting entirely.

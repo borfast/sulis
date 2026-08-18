@@ -1,6 +1,10 @@
 package sulis
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/borfast/sulis/passwordcheck"
+)
 
 var (
 	// User errors.
@@ -42,6 +46,21 @@ var (
 	// Password policy errors.
 	ErrPasswordTooShort = errors.New("sulis: password too short")
 	ErrPasswordTooLong  = errors.New("sulis: password too long")
+	// ErrPasswordCompromised is returned by every path that sets a password
+	// — Register, ChangePassword, ResetPassword, SetInitialPassword — when
+	// the configured PasswordChecker recognises the password as commonly
+	// used, expected, or previously breached. It is never returned by
+	// VerifyPassword, Login, or ReAuthenticate: see WithPasswordChecker for
+	// why screening happens where a password is chosen and not where it is
+	// proven.
+	//
+	// It is the very same error value as passwordcheck.ErrCompromised, not a
+	// copy of it, so errors.Is matches under either name. The value has to be
+	// born in that package rather than here: sulis's default configuration
+	// constructs a passwordcheck.Blocklist, so an import in the other
+	// direction would be a cycle, and two separate sentinels would silently
+	// break errors.Is for anyone who compared against the wrong one.
+	ErrPasswordCompromised = passwordcheck.ErrCompromised
 
 	// Email validation errors.
 	ErrInvalidEmail = errors.New("sulis: invalid email")

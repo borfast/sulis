@@ -2,9 +2,13 @@ package sulis
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/argon2"
 )
 
 func TestHashAndVerifyPassword(t *testing.T) {
@@ -17,7 +21,7 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	}
 
 	// Correct password should verify.
-	ok, err := verifyPassword(password, hash)
+	ok, _, err := verifyPassword(password, hash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -26,7 +30,7 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	}
 
 	// Wrong password should not verify.
-	ok, err = verifyPassword("wrong-password", hash)
+	ok, _, err = verifyPassword("wrong-password", hash)
 	if err != nil {
 		t.Fatalf("verifyPassword: %v", err)
 	}
@@ -45,7 +49,7 @@ func TestHashUniqueSalts(t *testing.T) {
 }
 
 func TestDecodeHashInvalid(t *testing.T) {
-	_, err := verifyPassword("anything", "not-a-valid-hash")
+	_, _, err := verifyPassword("anything", "not-a-valid-hash")
 	if err == nil {
 		t.Fatal("expected error for invalid hash format")
 	}
@@ -73,7 +77,7 @@ func tamperHash(hash string, index int, replacement string) string {
 func TestDecodeHashRejectsWrongAlgorithm(t *testing.T) {
 	tampered := tamperHash(mustHash(t), 1, "argon2i")
 
-	_, err := verifyPassword("correct-horse-battery-staple", tampered)
+	_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 	if err == nil {
 		t.Fatal("expected error for wrong algorithm label")
 	}
@@ -85,7 +89,7 @@ func TestDecodeHashRejectsWrongAlgorithm(t *testing.T) {
 func TestDecodeHashRejectsOversizedMemory(t *testing.T) {
 	tampered := tamperHash(mustHash(t), 3, "m=4294967295,t=1,p=1")
 
-	_, err := verifyPassword("correct-horse-battery-staple", tampered)
+	_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 	if err == nil {
 		t.Fatal("expected error for oversized memory parameter")
 	}
@@ -100,7 +104,7 @@ func TestDecodeHashRejectsZeroParams(t *testing.T) {
 	t.Run("ZeroIterations", func(t *testing.T) {
 		tampered := tamperHash(hash, 3, "m=8192,t=0,p=1")
 
-		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 		if err == nil {
 			t.Fatal("expected error for zero iterations")
 		}
@@ -109,7 +113,7 @@ func TestDecodeHashRejectsZeroParams(t *testing.T) {
 	t.Run("ZeroParallelism", func(t *testing.T) {
 		tampered := tamperHash(hash, 3, "m=8192,t=1,p=0")
 
-		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 		if err == nil {
 			t.Fatal("expected error for zero parallelism")
 		}
@@ -122,7 +126,7 @@ func TestDecodeHashRejectsBadSaltOrKeySize(t *testing.T) {
 	t.Run("ShortSalt", func(t *testing.T) {
 		tampered := tamperHash(hash, 4, base64.RawStdEncoding.EncodeToString(make([]byte, 4)))
 
-		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 		if err == nil {
 			t.Fatal("expected error for undersized salt")
 		}
@@ -131,7 +135,7 @@ func TestDecodeHashRejectsBadSaltOrKeySize(t *testing.T) {
 	t.Run("ShortKey", func(t *testing.T) {
 		tampered := tamperHash(hash, 5, base64.RawStdEncoding.EncodeToString(make([]byte, 8)))
 
-		_, err := verifyPassword("correct-horse-battery-staple", tampered)
+		_, _, err := verifyPassword("correct-horse-battery-staple", tampered)
 		if err == nil {
 			t.Fatal("expected error for undersized key/hash")
 		}
@@ -300,4 +304,155 @@ func TestPolicyAppliesToChangeSetInitialAndReset(t *testing.T) {
 			t.Fatalf("ResetPassword with valid password: %v", err)
 		}
 	})
+}
+
+// legacyHash builds a PHC-format argon2id hash of the *raw* bytes of
+// password, deliberately skipping the NFKC normalization hashPassword
+// applies (T505). It reproduces a hash written by a pre-T505 sulis, which is
+// the only way to test the compatibility path from inside a tree where
+// hashPassword always normalizes.
+//
+// Kept deliberately close to hashPassword's body: if that function's PHC
+// assembly ever changes, this must change with it or the fixture stops
+// representing a real stored hash.
+func legacyHash(t *testing.T, password string, params Argon2Params) string {
+	t.Helper()
+	salt := make([]byte, params.SaltLength)
+	if _, err := rand.Read(salt); err != nil {
+		t.Fatalf("generating salt: %v", err)
+	}
+	hash := argon2.IDKey([]byte(password), salt, params.Iterations, params.Memory, params.Parallelism, params.KeyLength)
+	return fmt.Sprintf(
+		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		params.Memory,
+		params.Iterations,
+		params.Parallelism,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(hash),
+	)
+}
+
+func TestNormalizePassword(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"already normal", nfkcComposedForm, nfkcComposedForm},
+		{"decomposed folds onto composed", nfkcDecomposedForm, nfkcComposedForm},
+		{"ligature expands", nfkcCompatibilityForm, nfkcCompatibilityNFKC},
+		{"ascii is untouched", "correct-battery-staple", "correct-battery-staple"},
+		{"empty is untouched", "", ""},
+		{"invalid utf-8 is passed through unchanged", "\xff\xfe-passphrase", "\xff\xfe-passphrase"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizePassword(tc.input); got != tc.want {
+				t.Fatalf("normalizePassword(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+			// NFKC is idempotent, and everything downstream (double
+			// normalization in hashPassword after checkPasswordPolicy has
+			// already normalized, for one) relies on that.
+			if got := normalizePassword(normalizePassword(tc.input)); got != tc.want {
+				t.Fatalf("normalizePassword is not idempotent for %q", tc.input)
+			}
+		})
+	}
+}
+
+// TestHashPasswordNormalizes pins the core of the T505 change: hashing is
+// defined over the NFKC form of a password, not over the bytes the caller
+// happened to hand in. Without it, whether a password verifies depends on
+// which keyboard or platform produced the composition — a silent lockout for
+// anyone whose password contains a character with more than one spelling.
+func TestHashPasswordNormalizes(t *testing.T) {
+	hash, err := hashPassword(nfkcDecomposedForm, testArgon2Params)
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		password string
+	}{
+		{"the form that was hashed", nfkcDecomposedForm},
+		{"the NFKC-equivalent composed form", nfkcComposedForm},
+	} {
+		ok, legacy, err := verifyPassword(tc.password, hash)
+		if err != nil {
+			t.Fatalf("%s: verifyPassword: %v", tc.name, err)
+		}
+		if !ok {
+			t.Fatalf("%s: does not verify against a hash of an NFKC-equivalent form", tc.name)
+		}
+		if legacy {
+			t.Fatalf("%s: reported as a pre-normalization match, but the stored hash is already normalized", tc.name)
+		}
+	}
+}
+
+// TestVerifyPasswordFallsBackToThePreNormalizationForm is the compatibility
+// half of the NFKC change. A hash written before T505 was derived from the
+// raw bytes the user typed. If verification only ever compared the NFKC form,
+// every such user whose password is not already NFKC-normal would be locked
+// out of their own account with an ordinary "invalid credentials" and no
+// route back in short of a password reset.
+func TestVerifyPasswordFallsBackToThePreNormalizationForm(t *testing.T) {
+	stored := legacyHash(t, nfkcCompatibilityForm, testArgon2Params)
+
+	ok, legacy, err := verifyPassword(nfkcCompatibilityForm, stored)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("a password stored before NFKC normalization no longer verifies against the form it was typed in")
+	}
+	if !legacy {
+		t.Fatal("the match was not reported as a pre-normalization one, so nothing upstream can know to upgrade the stored hash")
+	}
+}
+
+// TestVerifyPasswordFallbackAcceptsNoPasswordItDidNotAcceptBefore is the
+// security statement that makes the fallback safe: it can only ever match
+// the exact bytes the stored hash was derived from, so it widens nothing.
+func TestVerifyPasswordFallbackAcceptsNoPasswordItDidNotAcceptBefore(t *testing.T) {
+	stored := legacyHash(t, nfkcCompatibilityForm, testArgon2Params)
+
+	// The NFKC form is a *different* string from the one that was hashed, so
+	// it must not verify against a legacy hash of the ligature form. (It
+	// starts working once a successful login rehashes the stored value; see
+	// TestLegacyPasswordHashIsUpgradedToTheNormalizedFormOnLogin.)
+	ok, _, err := verifyPassword(nfkcCompatibilityNFKC, stored)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if ok {
+		t.Fatal("the expanded form verified against a hash of the ligature form; the fallback compares raw bytes and must not")
+	}
+
+	ok, _, err = verifyPassword("totally-different-password", stored)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if ok {
+		t.Fatal("an unrelated password verified through the pre-normalization fallback")
+	}
+}
+
+// TestVerifyPasswordSkipsTheFallbackForANormalPassword pins the cost story:
+// an already-NFKC-normal password (every ASCII password, so nearly all of
+// them) must never pay for a second Argon2 comparison, because there is no
+// second form to compare.
+func TestVerifyPasswordSkipsTheFallbackForANormalPassword(t *testing.T) {
+	stored := legacyHash(t, "correct-battery-staple", testArgon2Params)
+	ok, legacy, err := verifyPassword("correct-battery-staple", stored)
+	if err != nil {
+		t.Fatalf("verifyPassword: %v", err)
+	}
+	if !ok {
+		t.Fatal("an ASCII password does not verify against a pre-T505 hash of itself; normalization must be a no-op for it")
+	}
+	if legacy {
+		t.Fatal("an ASCII password matched through the pre-normalization fallback; its normalized and raw forms are identical, so the primary comparison must have matched")
+	}
 }

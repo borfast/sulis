@@ -68,7 +68,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 		return nil, nil, "", err
 	}
 
-	if err := s.checkPasswordPolicy(password); err != nil {
+	if err := s.checkPasswordPolicy(ctx, password); err != nil {
 		return nil, nil, "", err
 	}
 
@@ -141,7 +141,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		if errors.Is(err, ErrUserNotFound) {
 			// Run the same Argon2 work a real verification would, so the
 			// response time doesn't reveal whether the account exists.
-			_, _ = verifyPassword(password, s.dummyHash)
+			_, _, _ = verifyPassword(password, s.dummyHash)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
@@ -149,11 +149,11 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 
 	if user.PasswordHash == "" {
 		// Passwordless user: verify against the dummy hash for the same reason.
-		_, _ = verifyPassword(password, s.dummyHash)
+		_, _, _ = verifyPassword(password, s.dummyHash)
 		return nil, ErrInvalidCredentials
 	}
 
-	ok, err := verifyPassword(password, user.PasswordHash)
+	ok, legacyForm, err := verifyPassword(password, user.PasswordHash)
 	if err != nil {
 		return nil, fmt.Errorf("sulis: verifying password: %w", err)
 	}
@@ -164,14 +164,16 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, ErrInvalidCredentials
 	}
 
-	// The password just verified against a hash weaker than the currently
-	// configured Argon2Params (e.g. an operator raised the cost since this
-	// user last logged in) — upgrade the stored hash now, while the
-	// plaintext is still in hand. Only a successful verification reaches
-	// this point, so a failed or unknown-user/passwordless login never
-	// rehashes anything, and this runs after the ok check above rather than
-	// changing its timing.
-	if needsRehash(user.PasswordHash, s.cfg.Argon2) {
+	// The password just verified against a hash that should be replaced —
+	// either because it is weaker than the currently configured
+	// Argon2Params (e.g. an operator raised the cost since this user last
+	// logged in), or because it predates NFKC normalization and only
+	// matched through verifyPassword's pre-normalization fallback. Either
+	// way, upgrade the stored hash now, while the plaintext is still in
+	// hand. Only a successful verification reaches this point, so a failed
+	// or unknown-user/passwordless login never rehashes anything, and this
+	// runs after the ok check above rather than changing its timing.
+	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
 		s.rehashPassword(ctx, user, password)
 	}
 
@@ -253,10 +255,12 @@ func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string)
 var errRehashPasswordChanged = errors.New("sulis: password changed during rehash")
 
 // ChangePassword changes a user's password after verifying the old password.
-// The length policy applies only to the new password; the old one was
-// already validated when it was set.
+// The password policy — length, then the configured PasswordChecker —
+// applies only to the new password; the old one was already validated when
+// it was set, and re-judging it here would refuse the change to exactly the
+// user who most needs to make it.
 func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string, ri RequestInfo) error {
-	if err := s.checkPasswordPolicy(newPassword); err != nil {
+	if err := s.checkPasswordPolicy(ctx, newPassword); err != nil {
 		return err
 	}
 
@@ -279,7 +283,10 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		if u.PasswordHash == "" {
 			return ErrInvalidCredentials
 		}
-		ok, err := verifyPassword(oldPassword, u.PasswordHash)
+		// The legacy-form flag is ignored here: whichever form matched, the
+		// stored hash is about to be replaced by a hash of the new password,
+		// which setPassword derives from its normalized form anyway.
+		ok, _, err := verifyPassword(oldPassword, u.PasswordHash)
 		if err != nil {
 			return fmt.Errorf("sulis: verifying old password: %w", err)
 		}
@@ -294,7 +301,7 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 
 // SetInitialPassword sets the first password for a passwordless user.
 func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword string) error {
-	if err := s.checkPasswordPolicy(newPassword); err != nil {
+	if err := s.checkPasswordPolicy(ctx, newPassword); err != nil {
 		return err
 	}
 
@@ -308,14 +315,44 @@ func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword stri
 	})
 }
 
-// checkPasswordPolicy enforces the configured minimum and maximum password
-// length. Lengths are measured in bytes.
-func (s *Sulis) checkPasswordPolicy(password string) error {
-	if len(password) < s.cfg.MinPasswordLength {
+// checkPasswordPolicy enforces everything sulis has to say about a password
+// that is about to be stored: the configured length bounds, and then the
+// configured PasswordChecker. It runs on every path that sets a password
+// (Register, ChangePassword, ResetPassword, SetInitialPassword) and on none
+// that merely verifies one — see WithPasswordChecker for why.
+//
+// Both stages see the NFKC-normalized password (see normalizePassword), not
+// the caller's raw bytes, because that is the string that will actually be
+// hashed and stored. Measuring or screening the raw form would judge
+// something other than what ends up in the database: twelve fullwidth digits
+// are 36 raw bytes but 12 normalized ones, and a corpus lookup against a
+// spelling nobody will ever store is not a check, it is theatre.
+//
+// Length is checked first, deliberately. It is free, it is local, and a
+// checker may not be — an obviously too-short password must not cost a
+// network round trip to a service like Have I Been Pwned before being
+// rejected for a reason that needed no lookup at all.
+//
+// An error from the checker that is not ErrPasswordCompromised is an
+// operational failure — a fail-closed HIBP client that could not reach the
+// service, say — and is returned unchanged rather than being flattened into
+// a verdict about the password. Callers must keep the two apart: telling
+// someone their password was found in a breach when nothing was actually
+// looked up is a lie that costs the message its credibility.
+func (s *Sulis) checkPasswordPolicy(ctx context.Context, password string) error {
+	normalized := normalizePassword(password)
+
+	if len(normalized) < s.cfg.MinPasswordLength {
 		return ErrPasswordTooShort
 	}
-	if len(password) > s.cfg.MaxPasswordLength {
+	if len(normalized) > s.cfg.MaxPasswordLength {
 		return ErrPasswordTooLong
+	}
+
+	if s.cfg.PasswordChecker != nil {
+		if err := s.cfg.PasswordChecker.Check(ctx, normalized); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -491,7 +528,7 @@ func (s *Sulis) createPasswordResetToken(ctx context.Context, email string, ri R
 // password policy is checked before the token is consumed, so a policy
 // failure does not burn the token.
 func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
-	if err := s.checkPasswordPolicy(newPassword); err != nil {
+	if err := s.checkPasswordPolicy(ctx, newPassword); err != nil {
 		return err
 	}
 
