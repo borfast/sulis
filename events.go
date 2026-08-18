@@ -12,65 +12,6 @@ import (
 	"time"
 )
 
-// Security events.
-//
-// Every security-relevant decision this package makes — a password refused, a
-// second factor demanded, a session issued or expired, a limiter tripped, an
-// account disabled — is reported to the EventSink configured with
-// WithEventSink. Without that option nothing is emitted and nothing is
-// allocated: the default sink is nil, and every emission site is a nil check
-// away from doing nothing at all.
-//
-// That second half is a real constraint on how emissions are written, not a
-// hopeful description. Arguments are evaluated before a call, so an event's
-// Metadata map must NOT be built at the call site — it would be allocated on
-// every decision whether or not anybody was listening. emit takes variadic
-// key/value labels and builds the map after its nil check instead, and
-// TestNilSinkPathAllocatesNothing (events_test.go) holds the claim to
-// account with testing.AllocsPerRun.
-//
-// # The no-secrets rule
-//
-// No event ever carries credential material. There is deliberately no field
-// on Event that could hold one: no token, no password, no hash, no nonce.
-// Beyond that, this package never copies ANY caller-supplied string into an
-// event except the RequestInfo the caller explicitly passed for this purpose.
-// In particular an event never carries:
-//
-//   - a raw password, session token, reset/magic-link/two-factor/email
-//     token, or magic-link binding nonce;
-//   - a stored password hash or session token hash;
-//   - the submitted email address (people type passwords into the email
-//     field, and an event taxonomy that copies caller input is one bad day
-//     away from being a credential log);
-//   - the operator-supplied reason passed to DisableUser, for the same
-//     reason.
-//
-// Accounts are identified by UserID, sessions by SessionID. Both are opaque
-// identifiers this package generated; neither authenticates anything on its
-// own (see SessionStore.DeleteSession for why knowing a session ID is not
-// enough to act on it). The rule is enforced by test, not only by
-// convention — see TestNoEventCarriesSecretMaterial in events_test.go, which
-// drives every emitting flow and scans every field of every emitted event
-// for every secret those flows were fed.
-//
-// # Best effort, after the fact
-//
-// EventSink.Emit returns nothing, so a sink cannot fail a flow: there is no
-// error for a caller to propagate and none to ignore. Emissions happen AFTER
-// the decision they report, never before, so an event is a record of what
-// already happened rather than an announcement of what is about to. Emit
-// runs on the caller's goroutine and inside the caller's latency budget; see
-// EventSink's doc comment (the copy that actually renders on pkg.go.dev) for
-// what happens when a sink panics.
-//
-// # Scope
-//
-// The taxonomy covers the root package's flows. The totp, passkey, and
-// recovery subpackages have their own services and their own stores and do
-// NOT emit events; wiring a sink through them is a separate piece of work
-// (see the T509 Decisions row in PROGRESS.md).
-
 // EventKind names one security-relevant decision. The values are stable,
 // lowercase, dot-namespaced strings safe to use as log field values, metric
 // labels, or database enum entries.
@@ -187,7 +128,7 @@ const (
 
 	// EventEmailChangeStaged reports that ChangeEmail staged a new address
 	// and issued a confirmation token. The address itself is not in the
-	// event; see the no-secrets rule above.
+	// event; see Event's doc comment for the no-secrets rule.
 	EventEmailChangeStaged EventKind = "email.change_staged"
 
 	// EventEmailChangeConfirmed reports that ConfirmEmailChange made a
@@ -336,9 +277,32 @@ const (
 //
 // Every field is either an identifier this package generated, a timestamp, a
 // RequestInfo the caller explicitly supplied, or a label drawn from the
-// closed sets above. There is deliberately no field that could carry
-// credential material — see the no-secrets rule in this file's leading
-// comment.
+// closed sets above.
+//
+// # The no-secrets rule
+//
+// No event ever carries credential material. There is deliberately no field
+// on Event that could hold one: no token, no password, no hash, no nonce.
+// Beyond that, this package never copies ANY caller-supplied string into an
+// event except the RequestInfo the caller explicitly passed for this purpose.
+// In particular an event never carries:
+//
+//   - a raw password, session token, reset/magic-link/two-factor/email
+//     token, or magic-link binding nonce;
+//   - a stored password hash or session token hash;
+//   - the submitted email address (people type passwords into the email
+//     field, and an event taxonomy that copies caller input is one bad day
+//     away from being a credential log);
+//   - the operator-supplied reason passed to DisableUser, for the same
+//     reason.
+//
+// Accounts are identified by UserID, sessions by SessionID. Both are opaque
+// identifiers this package generated; neither authenticates anything on its
+// own (see SessionStore.DeleteSession for why knowing a session ID is not
+// enough to act on it). The rule is enforced by test, not only by
+// convention — see TestNoEventCarriesSecretMaterial in events_test.go, which
+// drives every emitting flow and scans every field of every emitted event
+// for every secret those flows were fed.
 type Event struct {
 	// Kind is which decision this is. Always set.
 	Kind EventKind
@@ -396,16 +360,25 @@ type EventSink interface {
 	Emit(ctx context.Context, e Event)
 }
 
-// WithEventSink routes security events to sink. The default is nil: no sink,
-// no events, and nothing on any flow's hot path but a nil check.
+// WithEventSink routes security events to sink. Every security-relevant
+// decision this package makes — a password refused, a second factor
+// demanded, a session issued or expired, a limiter tripped, an account
+// disabled, and more — is reported to it. See EventKind's constants for the
+// full taxonomy and Event's doc comment for what a reported event may and
+// may not contain.
+//
+// The default is nil: no sink, no events, and nothing on any flow's hot
+// path but a nil check. That is not just a description of the default —
+// arguments are evaluated before a call, so an event's Metadata map is
+// built only after the nil-sink check inside emit, never at the call site
+// where it would be allocated on every decision whether or not anybody was
+// listening. TestNilSinkPathAllocatesNothing (events_test.go) holds that
+// guarantee to account with testing.AllocsPerRun.
 //
 // The one-line wiring for an application that already has a *slog.Logger:
 //
 //	auth, err := sulis.New(users, sessions, tokens, factors,
 //	    sulis.WithEventSink(sulis.NewSlogSink(logger)))
-//
-// See this file's leading comment for what an event may and may not contain,
-// and EventKind's constants for the taxonomy.
 func WithEventSink(sink EventSink) Option {
 	return func(c *Config) { c.EventSink = sink }
 }

@@ -99,6 +99,24 @@
 // module (root and subpackages), written to be read end to end and proven,
 // by that same suite, to satisfy every contract it documents.
 //
+// # Security events
+//
+// EventKind's constants (events.go) are a closed, dot-namespaced taxonomy of
+// this root package's own security-relevant decisions — a password refused,
+// a second factor demanded, a session issued or expired, a limiter tripped,
+// an account disabled, and more. WithEventSink wires a sink through;
+// NewSlogSink adapts a *slog.Logger in one line. See Event's doc comment for
+// what a reported event may and may not contain.
+//
+// The totp and passkey subpackages have no event sink of their own; wiring
+// one through them is a separate piece of work (see the T509 Decisions row
+// in PROGRESS.md). recovery does: its own independent EventKind, Event,
+// EventSink, and WithEventSink (recovery/events.go), deliberately not
+// wire-compatible with the root taxonomy — see that file's leading comment
+// for why. An application wanting one unified event stream writes a small
+// adapter translating a recovery.Event into whatever shape its own sink
+// expects.
+//
 // # Where to go next
 //
 // The README documents every flow (password reset, magic link, two-factor,
