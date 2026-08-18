@@ -26,6 +26,12 @@ var (
 	// exceeds the configured WithMaxCeremonyBody limit. See that option's
 	// GoDoc for why the cap exists.
 	ErrCeremonyBodyTooLarge = errors.New("passkey: ceremony response body too large")
+
+	// ErrLastCredential is returned by Service.DeleteCredential when id
+	// names the only credential userID has registered and
+	// DeleteOptions.AllowLast was not set. See DeleteOptions for why this
+	// package can't decide that on its own.
+	ErrLastCredential = errors.New("passkey: cannot delete the account's last credential without DeleteOptions.AllowLast")
 )
 
 // defaultMaxCeremonyBody is WithMaxCeremonyBody's default: generous enough
@@ -282,6 +288,9 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 		AAGUID:          waCredential.Authenticator.AAGUID,
 		SignCount:       waCredential.Authenticator.SignCount,
 		Discoverable:    credPropsResidentKey(parsedResponse.ClientExtensionResults),
+		Transports:      waCredential.Transport,
+		BackupEligible:  waCredential.Flags.BackupEligible,
+		BackupState:     waCredential.Flags.BackupState,
 		CreatedAt:       time.Now(),
 	}
 
@@ -460,18 +469,67 @@ func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyI
 
 // finishLoginCredential applies the post-verification checks and bookkeeping
 // for a successfully verified assertion: it rejects credentials flagged as
-// possibly cloned, then persists the updated sign count and returns the
-// stored credential.
+// possibly cloned, then persists the updated sign count, backup state, and
+// last-used timestamp, and returns the stored credential.
 func (s *Service) finishLoginCredential(ctx context.Context, waCred *webauthn.Credential) (*Credential, error) {
 	if waCred.Authenticator.CloneWarning {
 		return nil, ErrCloneWarning
 	}
 
-	if err := s.store.UpdateCredentialSignCount(ctx, waCred.ID, waCred.Authenticator.SignCount); err != nil {
+	if err := s.store.UpdateCredentialAfterLogin(ctx, waCred.ID, waCred.Authenticator.SignCount, waCred.Flags.BackupState, time.Now()); err != nil {
 		return nil, err
 	}
 
 	return s.store.GetCredentialByID(ctx, waCred.ID)
+}
+
+// DeleteOptions configures Service.DeleteCredential.
+type DeleteOptions struct {
+	// AllowLast permits removing a user's only remaining credential.
+	// passkey has no visibility into whether userID's application account
+	// has any other way to authenticate (a password, another second
+	// factor) — it only knows about its own credentials — so the caller
+	// must set this to true only after establishing, through its own
+	// re-authentication or explicit confirmation flow, that removing the
+	// account's last passkey is intentional and the account will remain
+	// reachable afterward.
+	AllowLast bool
+}
+
+// DeleteCredential removes the credential identified by id (a Credential.ID
+// value — the store's own opaque ID, not the raw WebAuthn
+// Credential.CredentialID) after confirming it belongs to userID.
+//
+// Deleting a user's only remaining credential is rejected with
+// ErrLastCredential unless opts.AllowLast is set — see DeleteOptions for why
+// this package can't make that call on its own and what the caller must
+// establish before setting it. The guard only ever sees passkey's own
+// credential count for userID: it has no way to know whether the account
+// has a password or another second factor, so a caller whose account can
+// only ever authenticate via passkey must set AllowLast with particular
+// care.
+func (s *Service) DeleteCredential(ctx context.Context, userID, id string, opts DeleteOptions) error {
+	creds, err := s.store.GetCredentialsByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	var found bool
+	for _, c := range creds {
+		if c.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrPasskeyNotFound
+	}
+
+	if len(creds) <= 1 && !opts.AllowLast {
+		return ErrLastCredential
+	}
+
+	return s.store.DeleteCredential(ctx, id)
 }
 
 // checkCeremonyBodySize rejects a ceremony response body larger than the
@@ -502,7 +560,19 @@ func credPropsResidentKey(ext protocol.AuthenticationExtensionsClientOutputs) bo
 	return rk
 }
 
-// toWebAuthnCreds converts our Credential type to the webauthn library's type.
+// toWebAuthnCreds converts our Credential type to the webauthn library's
+// type.
+//
+// Flags and Transport are carried over deliberately, not just for
+// completeness: go-webauthn's own login verification
+// (webauthn.validateLogin, invoked via wa.ValidateLogin/
+// wa.ValidateDiscoverableLogin) compares the credential's Flags.BackupEligible
+// bit against the fresh assertion's — a mismatch fails the login with
+// "Backup Eligible flag inconsistency detected". Since BackupEligible is
+// re-derived from the signed authenticator data on every ceremony (see
+// Credential.BackupEligible), the value fed back in here must match what
+// was last persisted, or a genuinely backup-eligible credential's next
+// login would always fail this check.
 func toWebAuthnCreds(creds []Credential) []webauthn.Credential {
 	result := make([]webauthn.Credential, len(creds))
 	for i, c := range creds {
@@ -510,6 +580,11 @@ func toWebAuthnCreds(creds []Credential) []webauthn.Credential {
 			ID:              c.CredentialID,
 			PublicKey:       c.PublicKey,
 			AttestationType: c.AttestationType,
+			Transport:       c.Transports,
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: c.BackupEligible,
+				BackupState:    c.BackupState,
+			},
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    c.AAGUID,
 				SignCount: c.SignCount,

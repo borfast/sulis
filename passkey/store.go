@@ -3,6 +3,8 @@ package passkey
 import (
 	"context"
 	"time"
+
+	"github.com/go-webauthn/webauthn/protocol"
 )
 
 // Credential represents a registered WebAuthn/passkey credential.
@@ -14,6 +16,48 @@ type Credential struct {
 	AttestationType string
 	AAGUID          []byte
 	SignCount       uint32
+
+	// Name is caller-supplied display metadata for this credential (e.g.
+	// "YubiKey 5C", "Work laptop"). passkey never generates, infers, or
+	// validates it — it starts empty and is only ever set through
+	// Store.RenameCredential. A management UI should fall back to something
+	// derived from CreatedAt/Transports when Name is empty.
+	Name string
+
+	// Transports lists the transports the client reported the authenticator
+	// supports (e.g. "usb", "nfc", "ble", "hybrid", "internal") — the
+	// registration response's "transports" field, populated from
+	// waCredential.Transport in FinishRegistration. It reflects what the
+	// client reported once, at registration time, and is not re-verified or
+	// refreshed on subsequent logins.
+	Transports []protocol.AuthenticatorTransport
+
+	// BackupEligible reports whether the credential's authenticator is
+	// capable of being backed up or synced across devices (the "BE" bit in
+	// the authenticator data). Unlike Discoverable this is a verified
+	// property, not merely client-reported: go-webauthn derives it from the
+	// signed authenticator data on every ceremony and — critically —
+	// re-checks it for consistency on every subsequent login. The value
+	// persisted here must be fed back into every later ceremony's
+	// credential list (see toWebAuthnCreds), or a genuinely backup-eligible
+	// credential's next login is rejected with "Backup Eligible flag
+	// inconsistency detected".
+	BackupEligible bool
+
+	// BackupState reports whether the credential is *currently* backed up
+	// (the "BS" bit). Unlike BackupEligible this can change over a
+	// credential's lifetime — e.g. a synced passkey moves in or out of a
+	// device's keychain backup — so it is re-derived and re-persisted on
+	// every successful login (see Store.UpdateCredentialAfterLogin), not
+	// only set once at registration.
+	BackupState bool
+
+	// LastUsedAt records when this credential last completed a successful
+	// login assertion — FinishLogin, FinishDiscoverableLogin, or their
+	// []byte cores. It is nil until the credential's first
+	// post-registration login: registering a credential does not count as
+	// using it.
+	LastUsedAt *time.Time
 
 	// Discoverable records whether the authenticator created a client-side
 	// discoverable ("resident key") credential — the kind
@@ -49,8 +93,43 @@ type Store interface {
 	SaveCredential(ctx context.Context, cred *Credential) error
 	GetCredentialsByUserID(ctx context.Context, userID string) ([]Credential, error)
 	GetCredentialByID(ctx context.Context, credentialID []byte) (*Credential, error)
-	UpdateCredentialSignCount(ctx context.Context, credentialID []byte, signCount uint32) error
+
+	// UpdateCredentialAfterLogin persists the bookkeeping that must change
+	// on every successful login assertion: SignCount (clone detection),
+	// BackupState (can flip independently of BackupEligible — see
+	// Credential.BackupState), and LastUsedAt. go-webauthn's own storage
+	// guidance (the "Storage" section of the
+	// github.com/go-webauthn/webauthn/webauthn package doc) says sign
+	// count, clone-warning, and BackupState-when-BackupEligible MUST be
+	// written back on every successful FinishLogin/ValidateLogin so the
+	// next ceremony observes current values; bundling all three in one
+	// store call keeps that invariant enforceable in one place, rather
+	// than splitting it across calls a caller could apply out of order or
+	// only partially. This replaces the narrower UpdateCredentialSignCount.
+	UpdateCredentialAfterLogin(ctx context.Context, credentialID []byte, signCount uint32, backupState bool, lastUsedAt time.Time) error
+
+	// DeleteCredential removes the credential identified by id (a
+	// Credential.ID value — the store's own opaque ID, not the raw
+	// WebAuthn Credential.CredentialID). It performs no last-credential
+	// check of its own: callers that must guard against deleting a
+	// passwordless account's only remaining credential should go through
+	// Service.DeleteCredential instead, which enforces that guard before
+	// calling this method.
 	DeleteCredential(ctx context.Context, id string) error
+
+	// DeleteCredentialsByUserID removes every credential owned by userID —
+	// e.g. as part of deleting the user's whole account. It does not apply
+	// the last-credential guard Service.DeleteCredential enforces:
+	// deleting an entire account is a stronger action that the caller has
+	// presumably already gated on its own, and silently leaving one
+	// credential behind because it "happened to be last" would be
+	// surprising here.
+	DeleteCredentialsByUserID(ctx context.Context, userID string) error
+
+	// RenameCredential sets Credential.Name — caller-supplied display
+	// metadata that passkey itself never generates or validates. Returns
+	// ErrPasskeyNotFound if id does not match a stored credential.
+	RenameCredential(ctx context.Context, id, name string) error
 }
 
 // ChallengeStore handles the transient WebAuthn challenge/session data

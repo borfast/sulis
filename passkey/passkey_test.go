@@ -9,9 +9,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -279,8 +281,8 @@ func TestFinishLoginRejectsClonedAuthenticator(t *testing.T) {
 	if cred != nil {
 		t.Fatalf("finishLoginCredential() credential = %#v, want nil", cred)
 	}
-	if store.updateSignCountCalls != 0 {
-		t.Fatalf("UpdateCredentialSignCount() calls = %d, want 0", store.updateSignCountCalls)
+	if store.updateAfterLoginCalls != 0 {
+		t.Fatalf("UpdateCredentialAfterLogin() calls = %d, want 0", store.updateAfterLoginCalls)
 	}
 }
 
@@ -421,11 +423,17 @@ func keysOf(m map[string][]byte) []string {
 }
 
 type fakeStore struct {
-	credentialsByUser    map[string][]Credential
-	credentialByID       map[string]*Credential
-	getCredentialsCalls  int
-	lastUserID           string
-	updateSignCountCalls int
+	credentialsByUser     map[string][]Credential
+	credentialByID        map[string]*Credential
+	getCredentialsCalls   int
+	lastUserID            string
+	updateAfterLoginCalls int
+
+	deleteCredentialCalls int
+	deletedCredentialID   string
+
+	deleteCredentialsByUserIDCalls int
+	deletedUserID                  string
 }
 
 func (f *fakeStore) SaveCredential(context.Context, *Credential) error { return nil }
@@ -450,12 +458,63 @@ func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*
 	return cred, nil
 }
 
-func (f *fakeStore) UpdateCredentialSignCount(context.Context, []byte, uint32) error {
-	f.updateSignCountCalls++
+// UpdateCredentialAfterLogin mutates the credentialByID entry in place, when
+// one is registered under credentialID, so that a subsequent
+// GetCredentialByID call — exactly what finishLoginCredential makes right
+// after this one — observes the update, the same as a real store would.
+func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID []byte, signCount uint32, backupState bool, lastUsedAt time.Time) error {
+	f.updateAfterLoginCalls++
+	if f.credentialByID == nil {
+		return nil
+	}
+	cred, ok := f.credentialByID[string(credentialID)]
+	if !ok {
+		return nil
+	}
+	cred.SignCount = signCount
+	cred.BackupState = backupState
+	cred.LastUsedAt = &lastUsedAt
 	return nil
 }
 
-func (f *fakeStore) DeleteCredential(context.Context, string) error { return nil }
+func (f *fakeStore) DeleteCredential(_ context.Context, id string) error {
+	f.deleteCredentialCalls++
+	f.deletedCredentialID = id
+	return nil
+}
+
+// DeleteCredentialsByUserID removes every credential fakeStore has on record
+// for userID from both of its lookup maps, mirroring what a real store's
+// equivalent bulk delete would do.
+func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) error {
+	f.deleteCredentialsByUserIDCalls++
+	f.deletedUserID = userID
+	if f.credentialsByUser == nil {
+		return nil
+	}
+	for _, c := range f.credentialsByUser[userID] {
+		delete(f.credentialByID, string(c.CredentialID))
+	}
+	delete(f.credentialsByUser, userID)
+	return nil
+}
+
+// RenameCredential looks id up across every user's credential list (fakeStore
+// has no separate by-ID index keyed by Credential.ID) and sets Name, or
+// returns ErrPasskeyNotFound if no credential has that ID — matching the
+// contract documented on Store.RenameCredential.
+func (f *fakeStore) RenameCredential(_ context.Context, id, name string) error {
+	for userID, creds := range f.credentialsByUser {
+		for i := range creds {
+			if creds[i].ID == id {
+				creds[i].Name = name
+				f.credentialsByUser[userID] = creds
+				return nil
+			}
+		}
+	}
+	return ErrPasskeyNotFound
+}
 
 type fakeChallengeStore struct {
 	mu    sync.Mutex
@@ -941,16 +1000,22 @@ func TestNewServiceRejectsNonPositiveMaxCeremonyBody(t *testing.T) {
 // for a "none"-attestation ES256 registration
 // (https://www.w3.org/TR/webauthn-3/#sctn-test-vectors-none-es256), adapted
 // to optionally carry a top-level "clientExtensionResults.credProps.rk"
-// value — credProps is a client (browser) extension output, not part of the
-// signed attestation object, so it can be added or omitted independently of
-// the rest of the fixture. Pass a nil credPropsRK to simulate a client that
-// omits the extension entirely (e.g. an older browser).
+// value and/or a "response.transports" list — both are client (browser)
+// reported values, not part of the signed attestation object, so either can
+// be added or omitted independently of the rest of the fixture. Pass a nil
+// credPropsRK to simulate a client that omits the credProps extension
+// entirely (e.g. an older browser); pass a nil transports to simulate a
+// client that omits the transports list.
+//
+// The fixture's signed authenticator data (part of the attestation object,
+// not client-reported) has both the Backup Eligible and Backup State flags
+// set, independent of either of the above.
 //
 // The fixture's RP ID is "example.org" (baked into the authenticator data's
 // RP ID hash) and its origin is "https://example.org" (baked into the
 // client data JSON): callers must configure the Service with that RPID and
 // origin for verification to succeed.
-func registrationSpecVectorNoneES256(t *testing.T, credPropsRK *bool) (body []byte, challenge string, credentialID []byte) {
+func registrationSpecVectorNoneES256(t *testing.T, credPropsRK *bool, transports []string) (body []byte, challenge string, credentialID []byte) {
 	t.Helper()
 
 	const (
@@ -980,14 +1045,18 @@ func registrationSpecVectorNoneES256(t *testing.T, credPropsRK *bool) (body []by
 	}
 
 	id := base64.RawURLEncoding.EncodeToString(credentialID)
+	attestationResponse := map[string]any{
+		"attestationObject": base64.RawURLEncoding.EncodeToString(attObjBytes),
+		"clientDataJSON":    base64.RawURLEncoding.EncodeToString(cdjBytes),
+	}
+	if transports != nil {
+		attestationResponse["transports"] = transports
+	}
 	response := map[string]any{
-		"id":    id,
-		"rawId": id,
-		"type":  "public-key",
-		"response": map[string]any{
-			"attestationObject": base64.RawURLEncoding.EncodeToString(attObjBytes),
-			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(cdjBytes),
-		},
+		"id":       id,
+		"rawId":    id,
+		"type":     "public-key",
+		"response": attestationResponse,
 	}
 	if credPropsRK != nil {
 		response["clientExtensionResults"] = map[string]any{
@@ -1034,7 +1103,7 @@ func TestFinishRegistrationRecordsDiscoverableWhenCredPropsSaysResidentKey(t *te
 	t.Parallel()
 
 	rk := true
-	body, challenge, credentialID := registrationSpecVectorNoneES256(t, &rk)
+	body, challenge, credentialID := registrationSpecVectorNoneES256(t, &rk, nil)
 
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
@@ -1073,7 +1142,7 @@ func TestFinishRegistrationRecordsDiscoverableWhenCredPropsSaysResidentKey(t *te
 func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent(t *testing.T) {
 	t.Parallel()
 
-	body, challenge, _ := registrationSpecVectorNoneES256(t, nil)
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil, nil)
 
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
@@ -1100,5 +1169,339 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent(t *testing.
 	}
 	if cred.Discoverable {
 		t.Error("Discoverable = true, want false when the client omits credProps")
+	}
+}
+
+// TestFinishRegistrationRecordsBackupFlags is part of the regression coverage
+// for audit finding C12: BackupEligible/BackupState were discarded even
+// though go-webauthn already verifies them from the signed authenticator
+// data. The W3C "none ES256" spec vector's authenticator data has both the
+// Backup Eligible and Backup State bits set, so — unlike Discoverable's
+// client-reported credProps signal — this is a verified property of the
+// response itself.
+func TestFinishRegistrationRecordsBackupFlags(t *testing.T) {
+	t.Parallel()
+
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil, nil)
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if !cred.BackupEligible {
+		t.Error("BackupEligible = false, want true (spec vector's authenticator data has the BE bit set)")
+	}
+	if !cred.BackupState {
+		t.Error("BackupState = false, want true (spec vector's authenticator data has the BS bit set)")
+	}
+}
+
+// TestFinishRegistrationRecordsTransports covers Credential.Transports: the
+// client's reported transport list (the registration response's
+// "response.transports" field) must be persisted from waCredential.Transport.
+func TestFinishRegistrationRecordsTransports(t *testing.T) {
+	t.Parallel()
+
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil, []string{"usb", "internal"})
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	want := []protocol.AuthenticatorTransport{protocol.USB, protocol.Internal}
+	if !slices.Equal(cred.Transports, want) {
+		t.Errorf("Transports = %v, want %v", cred.Transports, want)
+	}
+}
+
+// TestFinishRegistrationRecordsNoTransportsWhenOmitted covers the case where
+// the client's response doesn't include a transports list at all.
+func TestFinishRegistrationRecordsNoTransportsWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil, nil)
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if len(cred.Transports) != 0 {
+		t.Errorf("Transports = %v, want none", cred.Transports)
+	}
+}
+
+// TestToWebAuthnCredsPreservesBackupFlagsAndTransport is the regression test
+// for a non-obvious consequence of persisting BackupEligible/BackupState:
+// every ceremony rebuilds its webauthn.User from the store's credential list
+// via toWebAuthnCreds, and go-webauthn's own login verification
+// (webauthn.validateLogin) compares the credential's stored BackupEligible
+// bit against the fresh assertion's bit, rejecting the login with "Backup
+// Eligible flag inconsistency detected" on any mismatch. If toWebAuthnCreds
+// silently dropped these fields, the zero-value Flags it produced would
+// never match a real client whose credential is genuinely backup-eligible,
+// so every login after the first would be rejected.
+func TestToWebAuthnCredsPreservesBackupFlagsAndTransport(t *testing.T) {
+	t.Parallel()
+
+	creds := []Credential{{
+		CredentialID:   []byte("credential-1"),
+		BackupEligible: true,
+		BackupState:    true,
+		Transports:     []protocol.AuthenticatorTransport{protocol.USB, protocol.Internal},
+	}}
+
+	got := toWebAuthnCreds(creds)
+	if len(got) != 1 {
+		t.Fatalf("toWebAuthnCreds() returned %d credentials, want 1", len(got))
+	}
+	if !got[0].Flags.BackupEligible {
+		t.Error("Flags.BackupEligible = false, want true")
+	}
+	if !got[0].Flags.BackupState {
+		t.Error("Flags.BackupState = false, want true")
+	}
+	want := []protocol.AuthenticatorTransport{protocol.USB, protocol.Internal}
+	if !slices.Equal(got[0].Transport, want) {
+		t.Errorf("Transport = %v, want %v", got[0].Transport, want)
+	}
+}
+
+// TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState is the
+// regression test for the finish-login half of finding C12. go-webauthn's
+// own storage guidance (webauthn package doc, "Storage" section) says
+// BackupState must be written back on every successful login — it can flip
+// independently of BackupEligible over a credential's lifetime — and
+// LastUsedAt is new bookkeeping a management UI needs; sign count alone is
+// not enough.
+func TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialByID: map[string]*Credential{
+		"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")},
+	}}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	waCred := &webauthn.Credential{
+		ID: []byte("credential-1"),
+		Flags: webauthn.CredentialFlags{
+			BackupEligible: true,
+			BackupState:    true,
+		},
+		Authenticator: webauthn.Authenticator{SignCount: 7},
+	}
+
+	before := time.Now()
+	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	if err != nil {
+		t.Fatalf("finishLoginCredential() error = %v", err)
+	}
+	if cred.SignCount != 7 {
+		t.Errorf("SignCount = %d, want 7", cred.SignCount)
+	}
+	if !cred.BackupState {
+		t.Error("BackupState = false, want true")
+	}
+	if cred.LastUsedAt == nil {
+		t.Fatal("LastUsedAt = nil, want a timestamp")
+	}
+	if cred.LastUsedAt.Before(before) {
+		t.Errorf("LastUsedAt = %v, want at or after %v", cred.LastUsedAt, before)
+	}
+	if store.updateAfterLoginCalls != 1 {
+		t.Errorf("UpdateCredentialAfterLogin() calls = %d, want 1", store.updateAfterLoginCalls)
+	}
+}
+
+// TestDeleteCredentialRejectsLastCredentialWithoutOverride is the regression
+// test for the last-factor deletion guard (finding C12): passkey has no
+// visibility into whether userID's account has any other way to
+// authenticate, so removing a user's only remaining credential must require
+// the caller to say so explicitly via DeleteOptions.AllowLast.
+func TestDeleteCredentialRejectsLastCredentialWithoutOverride(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	}}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{})
+	if !errors.Is(err, ErrLastCredential) {
+		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrLastCredential)
+	}
+	if store.deleteCredentialCalls != 0 {
+		t.Errorf("DeleteCredential() store calls = %d, want 0 (rejected before reaching the store)", store.deleteCredentialCalls)
+	}
+}
+
+// TestDeleteCredentialAllowsLastCredentialWithOverride covers the override:
+// once the caller has established (through its own re-auth/confirmation
+// flow) that removing the account's last credential is intentional, the
+// same call must succeed.
+func TestDeleteCredentialAllowsLastCredentialWithOverride(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	}}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{AllowLast: true})
+	if err != nil {
+		t.Fatalf("DeleteCredential() error = %v, want nil", err)
+	}
+	if store.deleteCredentialCalls != 1 {
+		t.Fatalf("DeleteCredential() store calls = %d, want 1", store.deleteCredentialCalls)
+	}
+	if store.deletedCredentialID != "cred-1" {
+		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
+	}
+}
+
+// TestDeleteCredentialAllowsNonLastCredentialWithoutOverride covers the
+// common case: deleting one of several credentials never needs the override.
+func TestDeleteCredentialAllowsNonLastCredentialWithoutOverride(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")},
+			{ID: "cred-2", UserID: "user-1", CredentialID: []byte("credential-2")},
+		},
+	}}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	if err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{}); err != nil {
+		t.Fatalf("DeleteCredential() error = %v, want nil", err)
+	}
+	if store.deletedCredentialID != "cred-1" {
+		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
+	}
+}
+
+// TestDeleteCredentialReturnsErrPasskeyNotFoundForUnknownCredential covers a
+// credentialID that doesn't belong to (or exist for) userID at all — this
+// must fail with ErrPasskeyNotFound before the last-credential guard is even
+// consulted, and regardless of AllowLast.
+func TestDeleteCredentialReturnsErrPasskeyNotFoundForUnknownCredential(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	}}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	err := service.DeleteCredential(context.Background(), "user-1", "does-not-exist", DeleteOptions{AllowLast: true})
+	if !errors.Is(err, ErrPasskeyNotFound) {
+		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrPasskeyNotFound)
+	}
+	if store.deleteCredentialCalls != 0 {
+		t.Errorf("DeleteCredential() store calls = %d, want 0", store.deleteCredentialCalls)
+	}
+}
+
+// TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound
+// exercises the Store.RenameCredential contract documented on the interface:
+// a caller-supplied Name is set on success, and an unknown id is rejected
+// with ErrPasskeyNotFound rather than silently succeeding or panicking.
+func TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	}}
+
+	if err := store.RenameCredential(context.Background(), "cred-1", "My YubiKey"); err != nil {
+		t.Fatalf("RenameCredential() error = %v, want nil", err)
+	}
+	if got := store.credentialsByUser["user-1"][0].Name; got != "My YubiKey" {
+		t.Errorf("Name = %q, want %q", got, "My YubiKey")
+	}
+
+	err := store.RenameCredential(context.Background(), "missing-id", "x")
+	if !errors.Is(err, ErrPasskeyNotFound) {
+		t.Fatalf("RenameCredential() error = %v, want %v", err, ErrPasskeyNotFound)
+	}
+}
+
+// TestFakeStoreDeleteCredentialsByUserIDRemovesOnlyThatUsersCredentials
+// exercises the Store.DeleteCredentialsByUserID contract: every credential
+// for the named user is gone, and other users' credentials are untouched.
+func TestFakeStoreDeleteCredentialsByUserIDRemovesOnlyThatUsersCredentials(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{ID: "cred-1", CredentialID: []byte("credential-1")},
+			{ID: "cred-2", CredentialID: []byte("credential-2")},
+		},
+		"user-2": {{ID: "cred-3", CredentialID: []byte("credential-3")}},
+	}}
+
+	if err := store.DeleteCredentialsByUserID(context.Background(), "user-1"); err != nil {
+		t.Fatalf("DeleteCredentialsByUserID() error = %v, want nil", err)
+	}
+	if got := store.credentialsByUser["user-1"]; len(got) != 0 {
+		t.Errorf("user-1 credentials = %v, want none", got)
+	}
+	if got := store.credentialsByUser["user-2"]; len(got) != 1 {
+		t.Errorf("user-2 credentials = %v, want 1 untouched", got)
 	}
 }
