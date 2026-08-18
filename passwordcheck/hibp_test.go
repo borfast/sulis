@@ -272,6 +272,50 @@ func TestHIBPToleratesMalformedRows(t *testing.T) {
 	}
 }
 
+// TestHIBPMalformedCountOnTheMatchingRowFailsOpen pins the case that
+// TestHIBPToleratesMalformedRows does not cover: the garbage is on the row
+// that actually matches our suffix, not on an unrelated one. lookup cannot
+// parse "notanumber" as a count, treats the row as "no verdict" the same way
+// it treats any other line it cannot parse, and keeps scanning; with no
+// other row for this suffix, the password is accepted under the default
+// fail-open policy — a real breach hit is silently missed here, which is why
+// this needs a comment at the parse site (see lookup) and a test that would
+// fail if a mutation ever turned "unparsable" into "compromised".
+func TestHIBPMalformedCountOnTheMatchingRowFailsOpen(t *testing.T) {
+	_, _, suffix := hibpHash(hibpTestPassword)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, suffix+":notanumber\r\n")
+	}))
+	defer srv.Close()
+
+	h := NewHIBP(WithHIBPBaseURL(srv.URL + "/range/"))
+	if err := h.Check(context.Background(), hibpTestPassword); err != nil {
+		t.Fatalf("Check = %v, want nil — a matching row this client cannot parse is not a verdict, so the default fail-open policy applies", err)
+	}
+}
+
+// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed pins the same
+// response as above with WithHIBPFailClosed set. Fail-closed only changes
+// what happens when lookup itself returns an error (connection failure, bad
+// status, a truncated body) — it does not change how a row is parsed. A
+// malformed count on the matching row makes lookup return (false, nil), the
+// same as a clean "not found" response, so Check returns nil here too: as
+// implemented today, fail-closed does not surface a parse failure on the
+// matching row as an error. That is pinned here as the documented current
+// behavior, not asserted to be the ideal one.
+func TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed(t *testing.T) {
+	_, _, suffix := hibpHash(hibpTestPassword)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, suffix+":notanumber\r\n")
+	}))
+	defer srv.Close()
+
+	h := NewHIBP(WithHIBPBaseURL(srv.URL+"/range/"), WithHIBPFailClosed())
+	if err := h.Check(context.Background(), hibpTestPassword); err != nil {
+		t.Fatalf("Check = %v, want nil — fail-closed governs errors lookup returns, and a malformed count on the matching row does not produce one", err)
+	}
+}
+
 func TestHIBPAcceptsABaseURLWithoutATrailingSlash(t *testing.T) {
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

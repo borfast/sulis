@@ -230,6 +230,22 @@ func (h *HIBP) lookup(ctx context.Context, prefix, suffix string) (bool, error) 
 		}
 		// Zero means a padding row: a fabricated suffix the API added because
 		// of the Add-Padding header above.
+		//
+		// A count this client cannot parse at all — even on this row, the one
+		// that matches our suffix — falls into the same continue and is
+		// therefore also "no verdict", not "compromised": a real API has
+		// never sent one, so there is no expectation this branch fires in
+		// practice, but the alternative of treating unparsable data as proof
+		// of a breach would let a misbehaving or compromised mirror lock
+		// users out of their own accounts on demand, just by corrupting a
+		// count. The row is skipped and scanning continues; a well-formed
+		// hit later in the same response is still honored (see
+		// TestHIBPToleratesMalformedRows), and if no such row exists the
+		// password is allowed through — the same outcome, deliberately, as
+		// an unreachable service under the fail-open default (see
+		// [WithHIBPFailClosed]'s doc comment). Fail-closed does not change
+		// this: it only governs errors lookup itself returns, and a
+		// malformed count on a matching row never becomes one.
 		n, err := strconv.ParseInt(strings.TrimSpace(count), 10, 64)
 		if err != nil || n <= 0 {
 			continue
