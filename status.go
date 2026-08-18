@@ -66,9 +66,14 @@ func (s *Sulis) EnableUser(ctx context.Context, userID string) error {
 // VerifyPassword also calls it, but only AFTER the password has already
 // verified: an unauthenticated caller who has not proven the password must
 // not be able to use a distinct error to learn that an account exists and
-// is disabled or locked. See the README's "Account disable and lockout"
-// section for the full reasoning, including why ValidateSession checks only
-// DisabledAt and not LockedUntil.
+// is disabled or locked. ReAuthenticate (stepup.go) calls it too, even
+// though it issues no session — without that check it could still refresh
+// AuthenticatedAt for a disabled or locked account's already-held session;
+// its caller already holds a valid *Session for this exact account, so
+// there is no equivalent unauthenticated-oracle concern to order the check
+// around. See the README's "Account disable and lockout" section for the
+// full reasoning, including why ValidateSession checks only DisabledAt and
+// not LockedUntil.
 func (s *Sulis) accountStatus(user *User) error {
 	if user.DisabledAt != nil {
 		return ErrAccountDisabled

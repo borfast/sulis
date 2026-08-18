@@ -75,7 +75,7 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	// what an Authentication would otherwise vouch for. The session records
 	// AuthMethodTwoFactor, not whichever method passed the first factor:
 	// the second factor is what actually authorized this session.
-	session, sessionToken, err := s.createSession(ctx, user.ID, AuthMethodTwoFactor, time.Now())
+	session, sessionToken, err := s.createSession(ctx, user.ID, AuthMethodTwoFactor, time.Now(), ri)
 	if err != nil {
 		return nil, err
 	}

@@ -90,7 +90,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 		return nil, nil, "", err
 	}
 
-	session, token, err := s.createSession(ctx, user.ID, AuthMethodPassword, now)
+	session, token, err := s.createSession(ctx, user.ID, AuthMethodPassword, now, ri)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -115,7 +115,7 @@ func (s *Sulis) Login(ctx context.Context, email, password string, ri RequestInf
 	if err != nil {
 		return nil, err
 	}
-	return s.completeFirstFactor(ctx, user, AuthMethodPassword)
+	return s.completeFirstFactor(ctx, user, AuthMethodPassword, ri)
 }
 
 // VerifyPassword checks an email and password against the stored credentials
@@ -439,6 +439,20 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 
 // ValidateSession validates a session token and returns the session and user.
 // Returns ErrSessionNotFound or ErrSessionExpired on failure.
+//
+// A session past its idle deadline (IdleExpiresAt, set only when
+// WithIdleTimeout is configured) is rejected the same way as one past its
+// absolute ExpiresAt — checked first, since idle expiry exists to end a
+// session well before its absolute lifetime in the common case, and either
+// way the outcome (ErrSessionExpired, the row deleted) is identical.
+//
+// On success, LastSeenAt/IdleExpiresAt are refreshed via TouchSession, but
+// only when the session's current LastSeenAt is already older than
+// sessionTouchInterval — see that constant's doc comment (session.go) for
+// why this is throttled rather than written on every call. The touch is
+// best effort: a failed write does not fail validation, since the session
+// itself is still valid regardless of whether its liveness bookkeeping
+// happens to update this time.
 func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *User, error) {
 	tokenHash := hashSessionToken(token)
 	session, err := s.sessions.GetSessionByTokenHash(ctx, tokenHash)
@@ -447,7 +461,12 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	}
 	validated := *session
 
-	if time.Now().After(validated.ExpiresAt) {
+	now := time.Now()
+	if validated.IdleExpiresAt != nil && now.After(*validated.IdleExpiresAt) {
+		_ = s.sessions.DeleteSession(ctx, validated.UserID, validated.ID)
+		return nil, nil, ErrSessionExpired
+	}
+	if now.After(validated.ExpiresAt) {
 		_ = s.sessions.DeleteSession(ctx, validated.UserID, validated.ID)
 		return nil, nil, ErrSessionExpired
 	}
@@ -466,6 +485,14 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	// session already issued before the lockout began.
 	if user.DisabledAt != nil {
 		return nil, nil, ErrAccountDisabled
+	}
+
+	if now.Sub(validated.LastSeenAt) >= s.sessionTouchInterval() {
+		idleExpiresAt := s.idleExpiresAt(now)
+		if err := s.sessions.TouchSession(ctx, validated.ID, now, idleExpiresAt); err == nil {
+			validated.LastSeenAt = now
+			validated.IdleExpiresAt = idleExpiresAt
+		}
 	}
 
 	return &validated, user, nil

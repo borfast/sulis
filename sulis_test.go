@@ -163,6 +163,10 @@ func cloneTestSession(sess *Session) *Session {
 	if sess.Metadata != nil {
 		cp.Metadata = maps.Clone(sess.Metadata)
 	}
+	if sess.IdleExpiresAt != nil {
+		idle := *sess.IdleExpiresAt
+		cp.IdleExpiresAt = &idle
+	}
 	return &cp
 }
 
@@ -215,6 +219,46 @@ func (s *memSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at
 		return ErrSessionNotFound
 	}
 	sess.AuthenticatedAt = at
+	return nil
+}
+
+func (s *memSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Session
+	for _, sess := range s.sessions {
+		if sess.UserID == userID {
+			out = append(out, *cloneTestSession(sess))
+		}
+	}
+	return out, nil
+}
+
+func (s *memSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	sess.LastSeenAt = lastSeen
+	if idleExpires == nil {
+		sess.IdleExpiresAt = nil
+	} else {
+		idle := *idleExpires
+		sess.IdleExpiresAt = &idle
+	}
+	return nil
+}
+
+func (s *memSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sess := range s.sessions {
+		if sess.UserID == userID && id != keepSessionID {
+			delete(s.sessions, id)
+		}
+	}
 	return nil
 }
 
@@ -815,6 +859,42 @@ func (s *observingSessionStore) UpdateAuthenticatedAt(_ context.Context, id stri
 	return ErrSessionNotFound
 }
 
+func (s *observingSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Session
+	for _, sess := range s.sessionByHash {
+		if sess.UserID == userID {
+			out = append(out, *sess)
+		}
+	}
+	return out, nil
+}
+
+func (s *observingSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessionByHash {
+		if sess.ID == id {
+			sess.LastSeenAt = lastSeen
+			sess.IdleExpiresAt = idleExpires
+			return nil
+		}
+	}
+	return ErrSessionNotFound
+}
+
+func (s *observingSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for hash, sess := range s.sessionByHash {
+		if sess.UserID == userID && sess.ID != keepSessionID {
+			delete(s.sessionByHash, hash)
+		}
+	}
+	return nil
+}
+
 type sharedSessionStore struct {
 	session *Session
 }
@@ -842,6 +922,29 @@ func (s *sharedSessionStore) UpdateAuthenticatedAt(_ context.Context, id string,
 		return ErrSessionNotFound
 	}
 	s.session.AuthenticatedAt = at
+	return nil
+}
+
+func (s *sharedSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+	if s.session == nil || s.session.UserID != userID {
+		return nil, nil
+	}
+	return []Session{*s.session}, nil
+}
+
+func (s *sharedSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+	if s.session == nil || s.session.ID != id {
+		return ErrSessionNotFound
+	}
+	s.session.LastSeenAt = lastSeen
+	s.session.IdleExpiresAt = idleExpires
+	return nil
+}
+
+func (s *sharedSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+	if s.session != nil && s.session.UserID == userID && s.session.ID != keepSessionID {
+		s.session = nil
+	}
 	return nil
 }
 
@@ -3647,5 +3750,334 @@ func TestSetInitialPasswordClearsLockoutFields(t *testing.T) {
 	}
 	if after.LockedUntil != nil {
 		t.Errorf("LockedUntil = %v, want nil after SetInitialPassword", after.LockedUntil)
+	}
+}
+
+// --- T503: session visibility and lifecycle -------------------------------
+//
+// See session.go (Session.LastSeenAt/IdleExpiresAt/IP/UserAgent,
+// SessionStore.ListUserSessions/TouchSession/DeleteUserSessionsExcept),
+// issue.go/sulis.go/magiclink.go/twofactor.go (RequestInfo threaded into
+// createSession), and config.go (WithIdleTimeout). ListUserSessions and
+// RefreshSession are the two new Sulis-level methods.
+
+// touchCountingSessionStore wraps a real memSessionStore and counts calls to
+// TouchSession, so a test can assert ValidateSession's liveness touch is
+// throttled rather than written on every single validation.
+type touchCountingSessionStore struct {
+	*memSessionStore
+	touches int
+}
+
+func (s *touchCountingSessionStore) TouchSession(ctx context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+	s.touches++
+	return s.memSessionStore.TouchSession(ctx, id, lastSeen, idleExpires)
+}
+
+// TestSessionsRecordRequestInfoAtIssuance asserts that every issuance path
+// that already has a RequestInfo in hand stamps Session.IP/UserAgent from
+// it: Register, Login/RedeemMagicLink (via completeFirstFactor), and
+// CompleteTwoFactor. IssueSession/IssueSessionUnchecked are deliberately
+// not covered here — their Appendix A signatures carry no RequestInfo, so
+// sessions minted through them get the zero value; see the PROGRESS.md
+// Decisions row.
+func TestSessionsRecordRequestInfoAtIssuance(t *testing.T) {
+	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+	ri := RequestInfo{IP: "203.0.113.5", UserAgent: "test-agent/1.0"}
+
+	_, regSession, _, err := s.Register(ctx, "alice@example.com", "password123", ri)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if regSession.IP != ri.IP || regSession.UserAgent != ri.UserAgent {
+		t.Errorf("Register session IP/UserAgent = %q/%q, want %q/%q", regSession.IP, regSession.UserAgent, ri.IP, ri.UserAgent)
+	}
+
+	verifyUserEmail(t, users, regSession.UserID)
+	loginRes, err := s.Login(ctx, "alice@example.com", "password123", ri)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if loginRes.Session.IP != ri.IP || loginRes.Session.UserAgent != ri.UserAgent {
+		t.Errorf("Login session IP/UserAgent = %q/%q, want %q/%q", loginRes.Session.IP, loginRes.Session.UserAgent, ri.IP, ri.UserAgent)
+	}
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	magicRes, err := s.RedeemMagicLink(ctx, rawToken, ri)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+	if magicRes.NeedsSecondFactor {
+		t.Fatal("this test does not expect a second-factor demand")
+	}
+	if magicRes.Session.IP != ri.IP || magicRes.Session.UserAgent != ri.UserAgent {
+		t.Errorf("RedeemMagicLink session IP/UserAgent = %q/%q, want %q/%q", magicRes.Session.IP, magicRes.Session.UserAgent, ri.IP, ri.UserAgent)
+	}
+
+	factors.enroll(regSession.UserID)
+	pending, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login (2FA pending): %v", err)
+	}
+	if !pending.NeedsSecondFactor {
+		t.Fatal("expected NeedsSecondFactor")
+	}
+	res2, err := s.CompleteTwoFactor(ctx, regSession.UserID, pending.PendingToken, ri)
+	if err != nil {
+		t.Fatalf("CompleteTwoFactor: %v", err)
+	}
+	if res2.Session.IP != ri.IP || res2.Session.UserAgent != ri.UserAgent {
+		t.Errorf("CompleteTwoFactor session IP/UserAgent = %q/%q, want %q/%q", res2.Session.IP, res2.Session.UserAgent, ri.IP, ri.UserAgent)
+	}
+}
+
+// TestListUserSessionsStripsTokenHash pins this task's core security
+// property: no session returned by the service-level ListUserSessions ever
+// carries a TokenHash, even though SessionStore.ListUserSessions itself
+// returns whatever the store stores (see that method's doc comment) — a
+// "where you're signed in" screen has no legitimate reason to see even a
+// hash of a bearer credential.
+func TestListUserSessionsStripsTokenHash(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	sessions, err := s.ListUserSessions(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("ListUserSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("ListUserSessions returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].TokenHash != "" {
+		t.Errorf("TokenHash = %q, want empty — ListUserSessions must never return token material", sessions[0].TokenHash)
+	}
+}
+
+// TestListUserSessionsScopedToTheGivenUser asserts that ListUserSessions for
+// one user never returns another user's sessions.
+func TestListUserSessionsScopedToTheGivenUser(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register alice: %v", err)
+	}
+	if _, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{}); err != nil {
+		t.Fatalf("Register bob: %v", err)
+	}
+
+	sessions, err := s.ListUserSessions(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("ListUserSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("ListUserSessions(alice) returned %d sessions, want 1", len(sessions))
+	}
+	for _, sess := range sessions {
+		if sess.UserID != alice.ID {
+			t.Errorf("ListUserSessions(alice) returned a session for UserID %q", sess.UserID)
+		}
+	}
+}
+
+// TestValidateSessionRejectsPastIdleExpiryBeforeAbsoluteExpiry asserts that
+// an idle session fails validation with ErrSessionExpired once its
+// IdleExpiresAt deadline passes, even though its absolute ExpiresAt is
+// still comfortably in the future: idle expiry is meant to end a session
+// well before that. IdleExpiresAt is backdated directly in the store,
+// isolated from whatever cadence ValidateSession's own touch-throttling
+// would otherwise apply — the companion test below is the "one second
+// before" half of the same pin.
+func TestValidateSessionRejectsPastIdleExpiryBeforeAbsoluteExpiry(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithIdleTimeout(time.Hour))
+	ctx := context.Background()
+
+	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	pastDeadline := time.Now().Add(-time.Second)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].IdleExpiresAt = &pastDeadline
+	sessions.mu.Unlock()
+
+	if _, _, err := s.ValidateSession(ctx, token); !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("ValidateSession one second past IdleExpiresAt: error = %v, want ErrSessionExpired", err)
+	}
+}
+
+// TestValidateSessionAcceptsSessionBeforeIdleExpiry is the companion to the
+// above: one second before the idle deadline, the same kind of session
+// still validates.
+func TestValidateSessionAcceptsSessionBeforeIdleExpiry(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithIdleTimeout(time.Hour))
+	ctx := context.Background()
+
+	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	almostDeadline := time.Now().Add(time.Second)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].IdleExpiresAt = &almostDeadline
+	sessions.mu.Unlock()
+
+	if _, _, err := s.ValidateSession(ctx, token); err != nil {
+		t.Fatalf("ValidateSession one second before IdleExpiresAt: %v", err)
+	}
+}
+
+// TestValidateSessionThrottlesTheLastSeenTouch asserts that ValidateSession
+// does not write a fresh LastSeenAt/IdleExpiresAt on every single call —
+// only once the session's current LastSeenAt is stale enough. See
+// sessionTouchInterval's doc comment (session.go) for the cost rationale:
+// without this, every authenticated request would cost an extra store
+// write.
+func TestValidateSessionThrottlesTheLastSeenTouch(t *testing.T) {
+	users := newMemUserStore()
+	sessions := &touchCountingSessionStore{memSessionStore: newMemSessionStore()}
+	tokens := newMemTokenStore()
+	s, err := New(users, sessions, tokens, NoSecondFactors{}, WithArgon2Params(testArgon2Params))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+
+	_, session, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Freshly issued: LastSeenAt is already "now", so the very next
+	// validation is well inside the throttle interval and must not write.
+	if _, _, err := s.ValidateSession(ctx, token); err != nil {
+		t.Fatalf("ValidateSession (1st): %v", err)
+	}
+	if sessions.touches != 0 {
+		t.Fatalf("touches after a validation immediately following issuance = %d, want 0", sessions.touches)
+	}
+
+	// Backdate LastSeenAt past the throttle interval directly in the store.
+	stale := time.Now().Add(-time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].LastSeenAt = stale
+	sessions.mu.Unlock()
+
+	if _, _, err := s.ValidateSession(ctx, token); err != nil {
+		t.Fatalf("ValidateSession (2nd): %v", err)
+	}
+	if sessions.touches != 1 {
+		t.Fatalf("touches after a validation past the throttle interval = %d, want 1", sessions.touches)
+	}
+
+	// Immediately again: LastSeenAt was just refreshed to "now" by the
+	// write above, so this one must not write either.
+	if _, _, err := s.ValidateSession(ctx, token); err != nil {
+		t.Fatalf("ValidateSession (3rd): %v", err)
+	}
+	if sessions.touches != 1 {
+		t.Fatalf("touches after a validation immediately following a touch = %d, want still 1", sessions.touches)
+	}
+}
+
+// TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt asserts that
+// RefreshSession mints a working new token, retires the old one, mints a
+// new session ID (see the PROGRESS.md Decisions row on why), and leaves
+// AuthenticatedAt exactly as it was: a refresh is a token rotation, not a
+// fresh authentication proof, and must not reset the step-up clock
+// RequireRecentAuth reads.
+func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, oldToken, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Backdate AuthenticatedAt directly, so "preserved" is distinguishable
+	// from "coincidentally close to time.Now()".
+	old := time.Now().Add(-2 * time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].AuthenticatedAt = old
+	sessions.mu.Unlock()
+	session.AuthenticatedAt = old
+
+	fresh, newToken, err := s.RefreshSession(ctx, session)
+	if err != nil {
+		t.Fatalf("RefreshSession: %v", err)
+	}
+	if newToken == "" || newToken == oldToken {
+		t.Fatalf("RefreshSession returned token %q, want a new non-empty token", newToken)
+	}
+	if fresh.ID == session.ID {
+		t.Fatalf("RefreshSession kept the same session ID %q — expected a new ID (see the PROGRESS.md Decisions row)", fresh.ID)
+	}
+	if !fresh.AuthenticatedAt.Equal(old) {
+		t.Fatalf("RefreshSession AuthenticatedAt = %v, want unchanged %v", fresh.AuthenticatedAt, old)
+	}
+	if fresh.UserID != session.UserID {
+		t.Fatalf("RefreshSession UserID = %q, want %q", fresh.UserID, session.UserID)
+	}
+	if fresh.Method != session.Method {
+		t.Fatalf("RefreshSession Method = %q, want %q", fresh.Method, session.Method)
+	}
+
+	// The old token must stop validating...
+	if _, _, err := s.ValidateSession(ctx, oldToken); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("ValidateSession(oldToken) after refresh: error = %v, want ErrSessionNotFound", err)
+	}
+	// ...and the new one must work, still carrying the preserved stamp.
+	validated, _, err := s.ValidateSession(ctx, newToken)
+	if err != nil {
+		t.Fatalf("ValidateSession(newToken) after refresh: %v", err)
+	}
+	if !validated.AuthenticatedAt.Equal(old) {
+		t.Fatalf("validated session AuthenticatedAt = %v, want unchanged %v", validated.AuthenticatedAt, old)
+	}
+}
+
+// TestReAuthenticateRejectsDisabledAccount closes the gap the T501 Decisions
+// row flagged and deferred: ReAuthenticate did not call accountStatus, so it
+// could refresh AuthenticatedAt for a disabled account's already-held
+// session. See status.go's accountStatus and stepup.go's ReAuthenticate.
+func TestReAuthenticateRejectsDisabledAccount(t *testing.T) {
+	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].AuthenticatedAt = old
+	sessions.mu.Unlock()
+	session.AuthenticatedAt = old
+
+	disableUserDirect(t, users, session.UserID, "reported for abuse")
+
+	if err := s.ReAuthenticate(ctx, session, "password123", RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("ReAuthenticate error = %v, want ErrAccountDisabled", err)
+	}
+
+	sessions.mu.Lock()
+	got := sessions.sessions[session.ID].AuthenticatedAt
+	sessions.mu.Unlock()
+	if !got.Equal(old) {
+		t.Fatalf("AuthenticatedAt changed on a ReAuthenticate against a disabled account: got %v, want unchanged %v", got, old)
 	}
 }

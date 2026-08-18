@@ -45,6 +45,13 @@ type Config struct {
 	FailureLockoutThreshold   int
 	FailureLockoutBaseBackoff time.Duration
 	FailureLockoutMaxBackoff  time.Duration
+
+	// IdleTimeout, if positive, is how long a session may go unused before
+	// ValidateSession rejects it with ErrSessionExpired — independent of,
+	// and typically much shorter than, SessionDuration. Zero (the default)
+	// disables idle expiry entirely: sessions live until SessionDuration
+	// regardless of use. See WithIdleTimeout.
+	IdleTimeout time.Duration
 }
 
 // Option is a functional option for configuring Sulis.
@@ -175,6 +182,21 @@ func WithFailureLockout(threshold int, baseBackoff, maxBackoff time.Duration) Op
 		c.FailureLockoutBaseBackoff = baseBackoff
 		c.FailureLockoutMaxBackoff = maxBackoff
 	}
+}
+
+// WithIdleTimeout enables idle expiry: a session unused for longer than d is
+// rejected by ValidateSession with ErrSessionExpired, even if its absolute
+// SessionDuration lifetime has not yet elapsed. "Unused" is tracked via
+// Session.LastSeenAt/IdleExpiresAt, refreshed by ValidateSession on a
+// throttled cadence (see sessionTouchInterval in session.go) rather than on
+// every single call — the idle deadline can therefore lag true last-use by
+// up to that interval, which trades a small amount of precision for not
+// writing to the session store on every authenticated request.
+//
+// Passing d <= 0 disables idle expiry — the default, so a Sulis built with
+// no options never checks or writes IdleExpiresAt at all.
+func WithIdleTimeout(d time.Duration) Option {
+	return func(c *Config) { c.IdleTimeout = d }
 }
 
 // WithoutRateLimiting disables rate limiting entirely.

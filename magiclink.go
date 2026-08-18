@@ -95,7 +95,7 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken string, ri Request
 		return nil, err
 	}
 
-	return s.completeFirstFactor(ctx, user, AuthMethodMagicLink)
+	return s.completeFirstFactor(ctx, user, AuthMethodMagicLink, ri)
 }
 
 // getOrCreatePasswordlessUser looks up a user by email, creating a

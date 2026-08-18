@@ -79,6 +79,38 @@ func (s *SessionStore) DeleteUserSessions(_ context.Context, userID string) erro
 	return nil
 }
 
+// DeleteUserSessionsExcept removes every session belonging to userID except
+// the one identified by keepSessionID. keepSessionID naming a session that
+// doesn't exist, or one belonging to someone else, is not an error — every
+// other session for userID is removed regardless. See
+// sulis.SessionStore.DeleteUserSessionsExcept's doc comment.
+func (s *SessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, sess := range s.sessions {
+		if sess.UserID == userID && id != keepSessionID {
+			delete(s.sessions, id)
+		}
+	}
+	return nil
+}
+
+// ListUserSessions returns a copy of every session belonging to userID.
+// Matching nothing is not an error — a nil slice and a nil error.
+func (s *SessionStore) ListUserSessions(_ context.Context, userID string) ([]sulis.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []sulis.Session
+	for _, sess := range s.sessions {
+		if sess.UserID == userID {
+			out = append(out, *cloneSession(sess))
+		}
+	}
+	return out, nil
+}
+
 // UpdateAuthenticatedAt stamps the session identified by id with at, leaving
 // every other field untouched, and returns sulis.ErrSessionNotFound if id
 // does not exist. This is the write path behind sulis.Sulis.ReAuthenticate.
@@ -91,6 +123,29 @@ func (s *SessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at ti
 		return sulis.ErrSessionNotFound
 	}
 	sess.AuthenticatedAt = at
+	return nil
+}
+
+// TouchSession stamps the session identified by id with a fresh lastSeen and
+// idleExpires, leaving every other field untouched, and returns
+// sulis.ErrSessionNotFound if id does not exist. A nil idleExpires clears
+// any previously-stored deadline. This is the write path behind
+// sulis.Sulis.ValidateSession's throttled liveness touch.
+func (s *SessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return sulis.ErrSessionNotFound
+	}
+	sess.LastSeenAt = lastSeen
+	if idleExpires == nil {
+		sess.IdleExpiresAt = nil
+	} else {
+		deadline := *idleExpires
+		sess.IdleExpiresAt = &deadline
+	}
 	return nil
 }
 
@@ -120,6 +175,10 @@ func cloneSession(sess *sulis.Session) *sulis.Session {
 	cp := *sess
 	if sess.Metadata != nil {
 		cp.Metadata = maps.Clone(sess.Metadata)
+	}
+	if sess.IdleExpiresAt != nil {
+		deadline := *sess.IdleExpiresAt
+		cp.IdleExpiresAt = &deadline
 	}
 	return &cp
 }

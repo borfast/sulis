@@ -68,12 +68,13 @@ type LoginResult struct {
 
 // completeFirstFactor decides what a verified first factor earns. A user with
 // an enrolled second factor gets a pending token and no session; everyone else
-// gets a session.
+// gets a session. ri is recorded on the minted session (Session.IP/UserAgent)
+// when one is minted; it is unused on the pending-token branch.
 //
 // Every flow that authenticates a user by a single credential — password,
 // magic link — must go through here. Calling createSession directly bypasses
 // two-factor authentication.
-func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method AuthMethod) (*LoginResult, error) {
+func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method AuthMethod, ri RequestInfo) (*LoginResult, error) {
 	// This is the choke point Login (via VerifyPassword) and RedeemMagicLink
 	// both pass through. VerifyPassword already checked account status, but
 	// the magic-link path never calls VerifyPassword at all, so this is the
@@ -102,7 +103,7 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 		return &LoginResult{User: user, NeedsSecondFactor: true, PendingToken: pending}, nil
 	}
 
-	session, token, err := s.createSession(ctx, user.ID, method, time.Now())
+	session, token, err := s.createSession(ctx, user.ID, method, time.Now(), ri)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +202,15 @@ func (s *Sulis) issueSession(ctx context.Context, auth Authentication) (*Session
 // minted Session; issueSession passes auth.method and auth.at through
 // unchanged, so the session's AuthenticatedAt reflects the moment the proof
 // was actually minted rather than this call's own, slightly later, clock read.
+//
+// This is IssueSession/IssueSessionUnchecked's only path to createSession,
+// and neither of those methods' Appendix A signatures carries a RequestInfo
+// — so the session minted here always gets RequestInfo{} (Session.IP/
+// UserAgent left empty), never a caller-supplied one. See the PROGRESS.md
+// Decisions row for T503: adding ri to either public signature was rejected
+// as an unnecessary deviation for a Low-severity finding (C10), given both
+// methods are already-shipped public API with no in-repo callers to
+// migrate.
 func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method AuthMethod, authenticatedAt time.Time) (*Session, string, error) {
 	// Gates IssueSession and IssueSessionUnchecked too: a caller vouching
 	// for a factor sulis doesn't verify itself (e.g. a finished passkey
@@ -211,7 +221,7 @@ func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method Auth
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, "", err
 	}
-	return s.createSession(ctx, user.ID, method, authenticatedAt)
+	return s.createSession(ctx, user.ID, method, authenticatedAt, RequestInfo{})
 }
 
 // createSession creates a new session and returns it alongside the raw session
@@ -221,8 +231,12 @@ func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method Auth
 // callers that authenticate and create the session in the same breath (e.g.
 // completeFirstFactor, CompleteTwoFactor) pass time.Now(), while the
 // Authentication-carrying path passes the proof's own timestamp instead — see
-// issueSessionForUser.
-func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMethod, authenticatedAt time.Time) (*Session, string, error) {
+// issueSessionForUser. ri is copied onto Session.IP/UserAgent; LastSeenAt is
+// stamped to now and IdleExpiresAt to now+IdleTimeout (nil if idle expiry is
+// disabled — see WithIdleTimeout), the same as a fresh TouchSession would
+// compute, so a brand new session already carries a correct idle deadline
+// rather than one that only appears after its first touched validation.
+func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMethod, authenticatedAt time.Time, ri RequestInfo) (*Session, string, error) {
 	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
 	if err != nil {
 		return nil, "", err
@@ -237,6 +251,10 @@ func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMet
 		CreatedAt:       now,
 		AuthenticatedAt: authenticatedAt,
 		Method:          method,
+		LastSeenAt:      now,
+		IdleExpiresAt:   s.idleExpiresAt(now),
+		IP:              ri.IP,
+		UserAgent:       ri.UserAgent,
 	}
 
 	if err := s.sessions.CreateSession(ctx, session); err != nil {

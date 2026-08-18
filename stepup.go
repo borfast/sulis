@@ -48,6 +48,18 @@ func (s *Sulis) RequireRecentAuth(ctx context.Context, session *Session, maxAge 
 // running the same Argon2 work against an internal dummy hash rather than
 // returning early. Returns ErrInvalidCredentials for a passwordless account
 // or a wrong password — in neither case is AuthenticatedAt touched.
+//
+// Also returns ErrAccountDisabled/ErrAccountLocked via accountStatus,
+// checked right after loading the user and before spending an Argon2
+// verification on a call that cannot succeed either way. Unlike
+// VerifyPassword's oracle-ordering concern (an unauthenticated caller must
+// not learn account status without proving a password first),
+// ReAuthenticate has no equivalent exposure to guard against: the caller
+// already holds a valid *Session for this exact account — proof enough
+// that the account exists — so checking status before the password costs
+// nothing extra in exchange for not refreshing AuthenticatedAt on a
+// disabled or locked account's already-held session. This closes the gap
+// the T501 Decisions row deferred: see PROGRESS.md.
 func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password string, ri RequestInfo) error {
 	user, err := s.users.GetUserByID(ctx, session.UserID)
 	if err != nil {
@@ -58,6 +70,10 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		return err
 	}
 	if err := s.allowIP(ctx, "password:", ri); err != nil {
+		return err
+	}
+
+	if err := s.accountStatus(user); err != nil {
 		return err
 	}
 
