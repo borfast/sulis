@@ -32,11 +32,11 @@
 // before any other option is set; new passwords are screened against a
 // breach corpus; a new session is refused for an account whose email isn't
 // verified yet, including the rotation RefreshSession would otherwise mint
-// from a signup session; a WebAuthn passkey requires user verification (a PIN or a
-// biometric), not bare possession of an unlocked device; cookie sessions
-// carry HttpOnly, Secure, SameSite=Lax, and a __Host- name; and changing a
-// password revokes every other session on the account. Every one of these
-// can be turned off — WithoutRateLimiting, WithPasswordChecker(nil),
+// from a signup session; a WebAuthn passkey requires user verification (a
+// PIN or a biometric), not bare possession of an unlocked device; cookie
+// sessions carry HttpOnly, Secure, SameSite=Lax, and a __Host- name; and
+// changing a password revokes every other session on the account. Every one
+// of these can be turned off — WithoutRateLimiting, WithPasswordChecker(nil),
 // WithRequireVerifiedEmail(false), passkey.WithUserVerification with
 // protocol.VerificationDiscouraged, WithRevokeSessionsOnPasswordChange(false)
 // — but each is a visible call a reviewer can find, never the silent
