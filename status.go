@@ -109,7 +109,7 @@ func (s *Sulis) accountStatus(user *User) error {
 // bookkeeping, and a write failure here must not turn a correctly detected
 // wrong password into a different error for the caller, who is about to
 // receive ErrInvalidCredentials regardless.
-func (s *Sulis) recordFailedLogin(ctx context.Context, userID string) {
+func (s *Sulis) recordFailedLogin(ctx context.Context, userID string, ri RequestInfo) {
 	now := time.Now()
 	// Set inside the closure and reset on every attempt, so a retry that
 	// re-reads a row someone else has meanwhile unlocked reports what the
@@ -133,7 +133,7 @@ func (s *Sulis) recordFailedLogin(ctx context.Context, userID string) {
 	// the EventLoginFailed its caller emits; saying "locked" for it would
 	// make the event mean nothing.
 	if err == nil && locked {
-		s.emit(ctx, Event{Kind: EventAccountLocked, UserID: userID})
+		s.emit(ctx, Event{Kind: EventAccountLocked, UserID: userID, RequestInfo: ri})
 	}
 }
 
@@ -144,7 +144,7 @@ func (s *Sulis) recordFailedLogin(ctx context.Context, userID string) {
 // errors for the same reason recordFailedLogin does: the caller is about to
 // receive a successful result, and a bookkeeping failure here must not turn
 // that into an error instead.
-func (s *Sulis) clearFailedLogins(ctx context.Context, userID string) {
+func (s *Sulis) clearFailedLogins(ctx context.Context, userID string, ri RequestInfo) {
 	_, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
 		u.FailedLoginAttempts = 0
 		u.LockedUntil = nil
@@ -152,7 +152,7 @@ func (s *Sulis) clearFailedLogins(ctx context.Context, userID string) {
 		return nil
 	})
 	if err == nil {
-		s.emit(ctx, Event{Kind: EventAccountLockoutCleared, UserID: userID})
+		s.emit(ctx, Event{Kind: EventAccountLockoutCleared, UserID: userID, RequestInfo: ri})
 	}
 }
 

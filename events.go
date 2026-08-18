@@ -18,8 +18,16 @@ import (
 // second factor demanded, a session issued or expired, a limiter tripped, an
 // account disabled — is reported to the EventSink configured with
 // WithEventSink. Without that option nothing is emitted and nothing is
-// allocated: the default sink is nil and every emission site is a nil check
+// allocated: the default sink is nil, and every emission site is a nil check
 // away from doing nothing at all.
+//
+// That second half is a real constraint on how emissions are written, not a
+// hopeful description. Arguments are evaluated before a call, so an event's
+// Metadata map must NOT be built at the call site — it would be allocated on
+// every decision whether or not anybody was listening. emit takes variadic
+// key/value labels and builds the map after its nil check instead, and
+// TestNilSinkPathAllocatesNothing (events_test.go) holds the claim to
+// account with testing.AllocsPerRun.
 //
 // # The no-secrets rule
 //
@@ -400,41 +408,47 @@ func WithEventSink(sink EventSink) Option {
 // emit delivers e to the configured sink, if there is one. It is the only
 // way this package produces an event.
 //
+// metaPairs is alternating key/value strings, from which emit builds
+// e.Metadata — AFTER the nil-sink check, which is the whole reason it is a
+// variadic parameter rather than a map the caller builds and passes in.
+// A map built at the call site would be allocated whether or not anybody is
+// listening, since the argument is evaluated before the call; the pairs are
+// a variadic slice escape analysis can keep on the stack, because emit
+// copies the strings out of it and never retains the slice itself. Call
+// sites must therefore leave e.Metadata zero and pass their labels here.
+// An odd trailing argument is a programming error in this package and is
+// dropped rather than panicking a flow over an observability detail.
+//
 // Everything about it is best effort. The nil-sink check comes first, so an
-// unconfigured Sulis pays one comparison and nothing else — no allocation,
-// no timestamp, no deferred call. A sink that panics is contained rather
-// than allowed to unwind the flow that emitted: an observability hook must
-// not be able to deny authentication. That containment is a backstop for a
-// buggy sink, not a licence to write one — a recovered panic here is
-// silent, because there is nowhere left to report it to.
+// unconfigured Sulis pays one comparison and nothing else — no map, no
+// timestamp, no deferred call, nothing on the heap. That claim is checked,
+// not asserted: TestNilSinkPathAllocatesNothing (events_test.go) drives the
+// emitting flows through testing.AllocsPerRun with no sink configured. A
+// sink that panics is contained rather than allowed to unwind the flow that
+// emitted: an observability hook must not be able to deny authentication.
+// That containment is a backstop for a buggy sink, not a licence to write
+// one — a recovered panic here is silent, because there is nowhere left to
+// report it to.
 //
 // s may be nil: the package-level middleware helpers share their
 // implementation with the Sulis-bound ones and pass a nil *Sulis to mean
 // "no events".
-func (s *Sulis) emit(ctx context.Context, e Event) {
+func (s *Sulis) emit(ctx context.Context, e Event, metaPairs ...string) {
 	if s == nil || s.cfg.EventSink == nil {
 		return
+	}
+	if len(metaPairs) >= 2 {
+		m := make(map[MetadataKey]string, len(metaPairs)/2)
+		for i := 0; i+1 < len(metaPairs); i += 2 {
+			m[MetadataKey(metaPairs[i])] = metaPairs[i+1]
+		}
+		e.Metadata = m
 	}
 	if e.At.IsZero() {
 		e.At = time.Now()
 	}
 	defer func() { _ = recover() }()
 	s.cfg.EventSink.Emit(ctx, e)
-}
-
-// meta builds an Event.Metadata map from alternating key/value pairs. It
-// exists so emission sites stay one line each; a stray odd argument is a
-// programming error in this package and is dropped rather than panicking a
-// flow over an observability detail.
-func meta(pairs ...string) map[MetadataKey]string {
-	if len(pairs) < 2 {
-		return nil
-	}
-	m := make(map[MetadataKey]string, len(pairs)/2)
-	for i := 0; i+1 < len(pairs); i += 2 {
-		m[MetadataKey(pairs[i])] = pairs[i+1]
-	}
-	return m
 }
 
 // gateReason maps the verdict of the two gates every session-issuing path

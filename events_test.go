@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -653,6 +654,132 @@ func TestSessionIssuedEventCarriesTheAuthMethod(t *testing.T) {
 	}
 }
 
+// TestBestEffortHelperEventsCarryRequestInfo pins the fix round's minor
+// finding: the four events emitted from best-effort bookkeeping helpers
+// (rehashPassword's two, recordFailedLogin's, clearFailedLogins's) are
+// attributable to the request that triggered them.
+//
+// These are exactly the events an operator reaches for when something looks
+// wrong — a store quietly refusing every hash upgrade, an account being
+// walked into lockout — and every one of their callers has a RequestInfo in
+// hand. That distinguishes them from ValidateSession's and RefreshSession's
+// events, which stay zero because their methods take none and the session's
+// own IP describes a different, older request.
+func TestBestEffortHelperEventsCarryRequestInfo(t *testing.T) {
+	t.Run("password.rehashed", func(t *testing.T) {
+		sink := &recordingSink{}
+		users, sessions, tokens := newMemUserStore(), newMemSessionStore(), newMemTokenStore()
+		weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params), WithEventSink(sink), WithoutRateLimiting())
+		u, _, _, err := weak.Register(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		verifyUserEmail(t, users, u.ID)
+		strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params), WithEventSink(sink), WithoutRateLimiting())
+		if _, err := strong.Login(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		assertCarriesSweepRequestInfo(t, sink, EventPasswordRehashed)
+	})
+
+	t.Run("password.rehash_failed", func(t *testing.T) {
+		sink := &recordingSink{}
+		mem := newMemUserStore()
+		users := &failUpdateUserStore{memUserStore: mem}
+		sessions, tokens := newMemSessionStore(), newMemTokenStore()
+		weak := mustNew(users, sessions, tokens, WithArgon2Params(weakerArgon2Params), WithEventSink(sink), WithoutRateLimiting())
+		u, _, _, err := weak.Register(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		verifyUserEmail(t, mem, u.ID)
+		users.updateErr = fmt.Errorf("store unavailable")
+		strong := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params), WithEventSink(sink), WithoutRateLimiting())
+		if _, err := strong.Login(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		assertCarriesSweepRequestInfo(t, sink, EventPasswordRehashFailed)
+	})
+
+	t.Run("account.locked", func(t *testing.T) {
+		sink := &recordingSink{}
+		opts := append(eventOpts(sink), WithFailureLockout(2, time.Minute, time.Hour))
+		s, users, _, _ := newTestEnv(opts...)
+		u := mustRegister(t, s, "alice@example.com", "correct-battery-staple")
+		verifyUserEmail(t, users, u.ID)
+		for range 2 {
+			_, _ = s.Login(context.Background(), "alice@example.com", "wrong-battery-staple", sweepRequestInfo)
+		}
+		assertCarriesSweepRequestInfo(t, sink, EventAccountLocked)
+	})
+
+	t.Run("account.lockout_cleared", func(t *testing.T) {
+		sink := &recordingSink{}
+		opts := append(eventOpts(sink), WithFailureLockout(2, time.Minute, time.Hour))
+		s, users, _, _ := newTestEnv(opts...)
+		u := mustRegister(t, s, "alice@example.com", "correct-battery-staple")
+		verifyUserEmail(t, users, u.ID)
+		lockUserUntil(t, users, u.ID, time.Now().Add(-time.Minute))
+		if _, err := s.Login(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		assertCarriesSweepRequestInfo(t, sink, EventAccountLockoutCleared)
+	})
+}
+
+// TestUnrecognizedGateVerdictOmitsTheReasonKey pins the defensive default
+// the three refusal helpers share: gateReason returns "" for a verdict it
+// does not recognize, and the helpers then omit the reason key rather than
+// filling it with a guess. A label that might be wrong is worse than an
+// absent one, since a sink cannot tell the two apart after the fact.
+//
+// The branch is not reachable through any current flow — gateReason covers
+// every sentinel accountStatus and requireVerifiedEmail can return — so the
+// helpers are exercised directly, the same way lockoutBackoff is unit-tested
+// past what a flow can drive it to.
+func TestUnrecognizedGateVerdictOmitsTheReasonKey(t *testing.T) {
+	if got := gateReason(errors.New("something else entirely")); got != "" {
+		t.Fatalf("gateReason of an unrecognized error = %q, want \"\"", got)
+	}
+
+	sink := &recordingSink{}
+	s, _, _, _ := newTestEnv(eventOpts(sink)...)
+	ctx := context.Background()
+	session := &Session{ID: "session-1", UserID: "user-1"}
+
+	s.emitLoginFailedVia(ctx, "user-1", sweepRequestInfo, AuthMethodPassword, "")
+	s.emitSecondFactorFailed(ctx, "user-1", sweepRequestInfo, "")
+	s.emitReauthFailed(ctx, session, sweepRequestInfo, "")
+
+	for _, kind := range []EventKind{EventLoginFailed, EventSecondFactorFailed, EventReauthFailed} {
+		e, ok := sink.first(kind)
+		if !ok {
+			t.Fatalf("no %s event; got kinds %v", kind, sink.kinds())
+		}
+		if _, present := e.Metadata[MetaReason]; present {
+			t.Fatalf("%s carries a reason key for an unrecognized verdict: %v", kind, e.Metadata)
+		}
+	}
+
+	// The method label still survives on login.failed — only the reason is
+	// dropped, not the whole metadata map.
+	e, _ := sink.first(EventLoginFailed)
+	if e.Metadata[MetaMethod] != string(AuthMethodPassword) {
+		t.Fatalf("login.failed method = %q, want %q", e.Metadata[MetaMethod], AuthMethodPassword)
+	}
+}
+
+func assertCarriesSweepRequestInfo(t *testing.T, sink *recordingSink, kind EventKind) {
+	t.Helper()
+	e, ok := sink.first(kind)
+	if !ok {
+		t.Fatalf("no %s event; got kinds %v", kind, sink.kinds())
+	}
+	if e.RequestInfo != sweepRequestInfo {
+		t.Fatalf("%s RequestInfo = %+v, want %+v", kind, e.RequestInfo, sweepRequestInfo)
+	}
+}
+
 // --- The no-secrets property ------------------------------------------------
 
 // TestNoEventCarriesSecretMaterial is the security core of T509. It drives
@@ -822,6 +949,72 @@ func TestNilEventSinkIsANoOp(t *testing.T) {
 	nilSink, _ := eventFlowSweepWithSink(t, nil)
 	if nilSink != nil {
 		t.Fatal("eventFlowSweepWithSink(nil) returned a sink")
+	}
+}
+
+// TestNilSinkPathAllocatesNothing is the empirical half of the guarantee the
+// package doc, emit's GoDoc, and the README all make: with no sink
+// configured, an emission costs one nil check and nothing else.
+//
+// It exists because the obvious way to write emit — a Metadata map built at
+// the call site and passed in — quietly breaks that claim. Arguments are
+// evaluated before the call, so the map would be allocated on every
+// decision whether or not anybody was listening. emit takes variadic
+// key/value pairs and builds the map after the nil check instead; this test
+// is what stops that from being undone by a well-meaning refactor back to a
+// map argument.
+func TestNilSinkPathAllocatesNothing(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	if s.cfg.EventSink != nil {
+		t.Fatal("this test needs a Sulis with no sink configured")
+	}
+	ctx := context.Background()
+
+	allocs := testing.AllocsPerRun(100, func() {
+		s.emit(ctx, Event{Kind: EventLoginFailed, UserID: "user-123"},
+			string(MetaMethod), string(AuthMethodPassword),
+			string(MetaReason), ReasonWrongPassword)
+	})
+	if allocs != 0 {
+		t.Fatalf("emitting to a nil sink allocated %v objects per call, want 0 — metadata is being built before the nil-sink check", allocs)
+	}
+}
+
+// TestNilSinkAllocationTestIsNotVacuous is the control for the above: the
+// identical call, with a sink configured, must actually deliver the
+// metadata. Without this, TestNilSinkPathAllocatesNothing would keep passing
+// if emit stopped building the map at all.
+func TestNilSinkAllocationTestIsNotVacuous(t *testing.T) {
+	sink := &recordingSink{}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithEventSink(sink))
+
+	s.emit(context.Background(), Event{Kind: EventLoginFailed, UserID: "user-123"},
+		string(MetaMethod), string(AuthMethodPassword),
+		string(MetaReason), ReasonWrongPassword)
+
+	e, ok := sink.first(EventLoginFailed)
+	if !ok {
+		t.Fatal("no event reached the configured sink")
+	}
+	if e.Metadata[MetaMethod] != string(AuthMethodPassword) || e.Metadata[MetaReason] != ReasonWrongPassword {
+		t.Fatalf("metadata = %v, want both pairs present", e.Metadata)
+	}
+}
+
+// TestOddMetaPairIsDroppedNotPanicked pins emit's handling of a caller
+// mistake: an unpaired trailing label is a programming error in this
+// package, and dropping it is the right response — panicking a login over
+// an observability detail is not.
+func TestOddMetaPairIsDroppedNotPanicked(t *testing.T) {
+	sink := &recordingSink{}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithEventSink(sink))
+
+	s.emit(context.Background(), Event{Kind: EventLoginFailed},
+		string(MetaReason), ReasonWrongPassword, string(MetaMethod))
+
+	e, _ := sink.first(EventLoginFailed)
+	if len(e.Metadata) != 1 || e.Metadata[MetaReason] != ReasonWrongPassword {
+		t.Fatalf("metadata = %v, want only the complete pair", e.Metadata)
 	}
 }
 

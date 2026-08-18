@@ -345,8 +345,7 @@ func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session,
 		Kind:      EventSessionRefreshed,
 		UserID:    fresh.UserID,
 		SessionID: fresh.ID,
-		Metadata:  meta(string(MetaMethod), string(fresh.Method)),
-	})
+	}, string(MetaMethod), string(fresh.Method))
 
 	return fresh, token, nil
 }

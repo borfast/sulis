@@ -202,8 +202,7 @@ func (s *Sulis) emitMagicLinkRejected(ctx context.Context, userID string, ri Req
 		Kind:        EventMagicLinkRejected,
 		UserID:      userID,
 		RequestInfo: ri,
-		Metadata:    meta(string(MetaReason), reason),
-	})
+	}, string(MetaReason), reason)
 }
 
 // getOrCreatePasswordlessUser looks up a user by email, creating a

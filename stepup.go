@@ -124,7 +124,7 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		})
 	}
 	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
-		s.rehashPassword(ctx, user, password)
+		s.rehashPassword(ctx, user, password, ri)
 	}
 
 	now := time.Now()
@@ -147,15 +147,15 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 // rather than merely to one account: somebody holding a cookie who does not
 // know the password.
 func (s *Sulis) emitReauthFailed(ctx context.Context, session *Session, ri RequestInfo, reason string) {
-	var m map[MetadataKey]string
-	if reason != "" {
-		m = meta(string(MetaReason), reason)
-	}
-	s.emit(ctx, Event{
+	e := Event{
 		Kind:        EventReauthFailed,
 		UserID:      session.UserID,
 		SessionID:   session.ID,
 		RequestInfo: ri,
-		Metadata:    m,
-	})
+	}
+	if reason == "" {
+		s.emit(ctx, e)
+		return
+	}
+	s.emit(ctx, e, string(MetaReason), reason)
 }

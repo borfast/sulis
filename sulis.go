@@ -169,7 +169,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	}
 	if !ok {
 		if s.cfg.FailureLockoutThreshold > 0 {
-			s.recordFailedLogin(ctx, user.ID)
+			s.recordFailedLogin(ctx, user.ID, ri)
 		}
 		s.emitLoginFailed(ctx, user.ID, ri, ReasonWrongPassword)
 		return nil, ErrInvalidCredentials
@@ -188,7 +188,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		s.emit(ctx, Event{Kind: EventPasswordLegacyFormMatched, UserID: user.ID, RequestInfo: ri})
 	}
 	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
-		s.rehashPassword(ctx, user, password)
+		s.rehashPassword(ctx, user, password, ri)
 	}
 
 	// The password just verified, so from here on the caller has proven
@@ -208,15 +208,14 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		// would have returned ErrAccountLocked above otherwise — and the
 		// correct password just proved ownership, so clear the stale
 		// bookkeeping rather than leaving it to linger.
-		s.clearFailedLogins(ctx, user.ID)
+		s.clearFailedLogins(ctx, user.ID, ri)
 	}
 
 	s.emit(ctx, Event{
 		Kind:        EventLoginSucceeded,
 		UserID:      user.ID,
 		RequestInfo: ri,
-		Metadata:    meta(string(MetaMethod), string(AuthMethodPassword)),
-	})
+	}, string(MetaMethod), string(AuthMethodPassword))
 	return user, nil
 }
 
@@ -233,16 +232,15 @@ func (s *Sulis) emitLoginFailed(ctx context.Context, userID string, ri RequestIn
 // emitLoginFailedVia is emitLoginFailed for a flow whose first factor is not
 // a password — a redeemed magic link reaching completeFirstFactor's gates.
 func (s *Sulis) emitLoginFailedVia(ctx context.Context, userID string, ri RequestInfo, method AuthMethod, reason string) {
-	pairs := []string{string(MetaMethod), string(method)}
-	if reason != "" {
-		pairs = append(pairs, string(MetaReason), reason)
+	e := Event{Kind: EventLoginFailed, UserID: userID, RequestInfo: ri}
+	// Two spelled-out calls rather than one built-up []string: a slice
+	// assembled here would be allocated whether or not a sink is listening,
+	// which is exactly the cost emit's variadic parameter exists to avoid.
+	if reason == "" {
+		s.emit(ctx, e, string(MetaMethod), string(method))
+		return
 	}
-	s.emit(ctx, Event{
-		Kind:        EventLoginFailed,
-		UserID:      userID,
-		RequestInfo: ri,
-		Metadata:    meta(pairs...),
-	})
+	s.emit(ctx, e, string(MetaMethod), string(method), string(MetaReason), reason)
 }
 
 // rehashPassword upgrades user's stored hash to the currently configured
@@ -265,12 +263,17 @@ func (s *Sulis) emitLoginFailedVia(ctx context.Context, userID string, ri Reques
 // verification is at stake, not correctness, so a failed upgrade here must
 // never fail the login. The next successful login against a still-weak
 // hash simply tries again.
-func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string) {
+//
+// ri is carried purely so the events this emits can be attributed to the
+// request that triggered the upgrade. Both callers (VerifyPassword and
+// ReAuthenticate) have one in hand, so unlike ValidateSession's and
+// RefreshSession's events there is nothing to guess at here.
+func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string, ri RequestInfo) {
 	verifiedHash := user.PasswordHash
 
 	newHash, err := hashPassword(password, s.cfg.Argon2, s.cfg.Pepper)
 	if err != nil {
-		s.emitRehashFailed(ctx, user.ID, ReasonHashFailed)
+		s.emitRehashFailed(ctx, user.ID, ri, ReasonHashFailed)
 		return
 	}
 
@@ -300,21 +303,21 @@ func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string)
 		if errors.Is(err, errRehashPasswordChanged) {
 			reason = ReasonPasswordChanged
 		}
-		s.emitRehashFailed(ctx, user.ID, reason)
+		s.emitRehashFailed(ctx, user.ID, ri, reason)
 		return
 	}
-	s.emit(ctx, Event{Kind: EventPasswordRehashed, UserID: user.ID})
+	s.emit(ctx, Event{Kind: EventPasswordRehashed, UserID: user.ID, RequestInfo: ri})
 }
 
 // emitRehashFailed reports an upgrade that was attempted and did not land.
 // See EventPasswordRehashFailed and rehashPassword's doc comment above for
 // why a swallowed failure still gets an event.
-func (s *Sulis) emitRehashFailed(ctx context.Context, userID, reason string) {
+func (s *Sulis) emitRehashFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
 	s.emit(ctx, Event{
-		Kind:     EventPasswordRehashFailed,
-		UserID:   userID,
-		Metadata: meta(string(MetaReason), reason),
-	})
+		Kind:        EventPasswordRehashFailed,
+		UserID:      userID,
+		RequestInfo: ri,
+	}, string(MetaReason), reason)
 }
 
 // errRehashPasswordChanged aborts rehashPassword's update when a concurrent
@@ -702,8 +705,7 @@ func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID string) err
 		Kind:      EventSessionRevoked,
 		UserID:    userID,
 		SessionID: sessionID,
-		Metadata:  meta(string(MetaScope), ScopeSingleSession),
-	})
+	}, string(MetaScope), ScopeSingleSession)
 	return nil
 }
 
@@ -729,10 +731,9 @@ func (s *Sulis) revokeUserSessions(ctx context.Context, userID string) error {
 		return err
 	}
 	s.emit(ctx, Event{
-		Kind:     EventSessionRevoked,
-		UserID:   userID,
-		Metadata: meta(string(MetaScope), ScopeAllSessions),
-	})
+		Kind:   EventSessionRevoked,
+		UserID: userID,
+	}, string(MetaScope), ScopeAllSessions)
 	return nil
 }
 
@@ -749,8 +750,7 @@ func (s *Sulis) emitSessionEnded(ctx context.Context, kind EventKind, session *S
 		Kind:      kind,
 		UserID:    session.UserID,
 		SessionID: session.ID,
-		Metadata:  meta(string(MetaReason), reason),
-	})
+	}, string(MetaReason), reason)
 }
 
 // createTokenForUser generates a token for the given user, purpose, and TTL.
@@ -821,8 +821,7 @@ func (s *Sulis) allow(ctx context.Context, key string, ri RequestInfo) error {
 		s.emit(ctx, Event{
 			Kind:        EventRateLimitTripped,
 			RequestInfo: ri,
-			Metadata:    meta(string(MetaScope), scope, string(MetaDimension), dimension),
-		})
+		}, string(MetaScope), scope, string(MetaDimension), dimension)
 		return ErrRateLimited
 	}
 	return nil

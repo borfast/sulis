@@ -348,7 +348,7 @@ type EventSink interface {
 
 `Emit` returns nothing, on purpose: **a sink cannot fail a flow.** There is no error to propagate and none to ignore. Emissions happen *after* the decision they report, never before, so an event records what already happened rather than announcing what is about to. A sink that panics is contained (recovered and dropped) rather than allowed to unwind the flow — an observability hook must not be able to deny authentication to everybody — but don't build on that: `Emit` runs on the caller's goroutine and inside the caller's latency budget, so hand the event to a channel, a logger, or a buffer and return.
 
-With no sink configured the cost is one nil check per decision point. Nothing is allocated, no timestamp is read.
+With no sink configured the cost is one nil check per decision point: nothing is allocated, no timestamp is read. That is a tested claim rather than an aspiration — `Event.Metadata` is built inside the emission helper *after* the nil check, from variadic labels, precisely because a map built at the call site would be allocated whether or not anybody was listening, and `TestNilSinkPathAllocatesNothing` measures it.
 
 #### What an event contains — and what it never contains
 

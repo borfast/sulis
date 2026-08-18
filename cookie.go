@@ -174,8 +174,7 @@ func requireSameOrigin(s *Sulis, allowed []string) func(http.Handler) http.Handl
 				s.emit(r.Context(), Event{
 					Kind:        EventSameOriginRejected,
 					RequestInfo: requestInfoFromRequest(r),
-					Metadata:    meta(string(MetaReason), reason),
-				})
+				}, string(MetaReason), reason)
 				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return

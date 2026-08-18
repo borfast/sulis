@@ -110,8 +110,7 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 			Kind:        EventSecondFactorDemanded,
 			UserID:      user.ID,
 			RequestInfo: ri,
-			Metadata:    meta(string(MetaMethod), string(method)),
-		})
+		}, string(MetaMethod), string(method))
 		return &LoginResult{User: user, NeedsSecondFactor: true, PendingToken: pending}, nil
 	}
 
@@ -282,8 +281,7 @@ func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMet
 		UserID:      userID,
 		SessionID:   session.ID,
 		RequestInfo: ri,
-		Metadata:    meta(string(MetaMethod), string(method)),
-	})
+	}, string(MetaMethod), string(method))
 
 	return session, token, nil
 }

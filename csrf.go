@@ -120,8 +120,7 @@ func requireCSRFToken(s *Sulis, next http.Handler) http.Handler {
 			s.emit(r.Context(), Event{
 				Kind:        EventCSRFRejected,
 				RequestInfo: requestInfoFromRequest(r),
-				Metadata:    meta(string(MetaReason), ReasonCSRFTokenInvalid),
-			})
+			}, string(MetaReason), ReasonCSRFTokenInvalid)
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return

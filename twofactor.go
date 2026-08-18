@@ -111,14 +111,10 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 // the four branches that can refuse, so the kind and the reason key stay in
 // step across them.
 func (s *Sulis) emitSecondFactorFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
-	var m map[MetadataKey]string
-	if reason != "" {
-		m = meta(string(MetaReason), reason)
+	e := Event{Kind: EventSecondFactorFailed, UserID: userID, RequestInfo: ri}
+	if reason == "" {
+		s.emit(ctx, e)
+		return
 	}
-	s.emit(ctx, Event{
-		Kind:        EventSecondFactorFailed,
-		UserID:      userID,
-		RequestInfo: ri,
-		Metadata:    m,
-	})
+	s.emit(ctx, e, string(MetaReason), reason)
 }
