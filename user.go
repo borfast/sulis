@@ -40,15 +40,23 @@ type User struct {
 	// post-verification checks that reject ErrAccountDisabled also reject
 	// ErrAccountLocked while this is still in the future. It is cleared
 	// (along with FailedLoginAttempts) the next time a correct password
-	// verifies outside the window — there is no explicit unlock call.
+	// verifies outside the window, or the account's password is
+	// successfully changed or reset (ChangePassword, ResetPassword,
+	// SetInitialPassword) — there is no explicit unlock call for either.
 	// Unlike DisabledAt, an active lock does not invalidate sessions already
 	// issued: ValidateSession does not check it, only new authentication
-	// does (see the README's "Account disable and lockout" section for why).
+	// does (see the README's "Account disable and lockout" section for why);
+	// and unlike DisabledAt, a password reset/change DOES clear it — proving
+	// control of the account well enough to set a new password is at least
+	// as strong an identity proof as the login password itself, whereas
+	// DisabledAt records an operator's decision that no proof of the
+	// password reverses.
 	LockedUntil *time.Time
 	// FailedLoginAttempts counts consecutive wrong passwords since the last
 	// correct one. It only ever advances when WithFailureLockout is
 	// configured, and is reset to 0 whenever a correct password verifies
-	// outside an active lockout window.
+	// outside an active lockout window, or the account's password is
+	// successfully changed or reset.
 	FailedLoginAttempts int
 	// Version guards against lost updates. It is set by the store on read and
 	// must be passed back unchanged in UpdateUser, which applies the write

@@ -144,10 +144,15 @@ func WithLimiter(l Limiter) Option {
 // pushes LockedUntil out again, doubling the backoff each time, up to
 // maxBackoff. The lockout — and the failure count behind it — clears itself
 // automatically the next time a correct password verifies outside the
-// window; there is no explicit unlock call, though DisableUser/EnableUser
-// remain available for an operator-initiated block, which is a distinct,
-// unrelated mechanism (see the README's "Account disable and lockout"
-// section).
+// window, OR the account's password is successfully changed or reset
+// (ChangePassword, ResetPassword, SetInitialPassword) — proving control of
+// the account well enough to set a new password is at least as strong an
+// identity proof as the login password itself. There is no explicit unlock
+// call for either path. DisableUser/EnableUser remain available for an
+// operator-initiated block, which is a distinct, unrelated mechanism that
+// none of the above clears — a password reset lifts an automatic lockout,
+// never a manual disable; only EnableUser does that (see the README's
+// "Account disable and lockout" section).
 //
 // Default: disabled (threshold 0), so a Sulis built with no options never
 // writes FailedLoginAttempts or LockedUntil, and VerifyPassword's normal

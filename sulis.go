@@ -289,6 +289,21 @@ func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate f
 // setPassword writes a new password hash for userID. guard, if non-nil, is
 // re-checked against the freshly loaded user on every attempt, so a concurrent
 // change cannot slip past a check the caller made before calling.
+//
+// It also clears any active automatic lockout (FailedLoginAttempts,
+// LockedUntil) — proving control of the account well enough to set a new
+// password (ChangePassword's old password, ResetPassword's out-of-band
+// token, or SetInitialPassword's caller-vouched-for trusted flow) is at
+// least as strong an identity proof as the correct login password
+// VerifyPassword's own success path already treats as grounds for clearing
+// it. Without this, an attacker could lock a victim out via repeated wrong
+// guesses and the victim's own password reset would not restore access
+// until the lockout's backoff passed — worsening the exact denial-of-service
+// risk WithFailureLockout's default-off posture exists to limit, and made
+// worse still by the recommendation (see WithFailureLockout's doc comment)
+// to configure a long maxBackoff. DisabledAt/DisabledReason are deliberately
+// NOT cleared here: disabling is an operator action, reversed only by
+// EnableUser, not by proving control of the password.
 func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, guard func(*User) error) error {
 	// Hashed once, outside the retry loop: a conflict should not make the
 	// caller pay for Argon2 again.
@@ -306,6 +321,8 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 		}
 		u.PasswordHash = hash
 		u.UpdatedAt = now
+		u.FailedLoginAttempts = 0
+		u.LockedUntil = nil
 		return nil
 	})
 	if err != nil {

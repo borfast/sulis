@@ -3475,3 +3475,177 @@ func TestLockoutBackoffGrowsExponentiallyAndCaps(t *testing.T) {
 		}
 	}
 }
+
+// --- T502 fix round 1: setPassword clears lockout, not disable -----------
+//
+// A successful password change or reset is at least as strong an identity
+// proof as a correct login password, so it must clear an active automatic
+// lockout the same way VerifyPassword's own success path does — otherwise
+// an attacker can lock a victim out with nothing but repeated wrong
+// guesses, and the victim's own reset (a stronger proof, via an out-of-band
+// token) would not restore access until the backoff passed. DisabledAt is
+// a distinct, operator-owned mechanism and must NOT be cleared this way.
+
+// TestResetPasswordClearsLockoutButNotDisable covers ResetPassword, and
+// pins the DisabledAt/LockedUntil distinction directly: the same account,
+// first locked then disabled, has its lockout lifted by a reset but its
+// disable survives one.
+func TestResetPasswordClearsLockoutButNotDisable(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	u, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	until := time.Now().Add(time.Hour)
+	u.LockedUntil = &until
+	u.FailedLoginAttempts = 5
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+
+	rawToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken: %v", err)
+	}
+	if err := s.ResetPassword(ctx, rawToken, "newpassword123"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+
+	// Login with the new password must succeed immediately — no
+	// ErrAccountLocked left over from before the reset.
+	if _, err := s.Login(ctx, "alice@example.com", "newpassword123", RequestInfo{}); err != nil {
+		t.Fatalf("Login after ResetPassword: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.FailedLoginAttempts != 0 {
+		t.Errorf("FailedLoginAttempts = %d, want 0 after ResetPassword", after.FailedLoginAttempts)
+	}
+	if after.LockedUntil != nil {
+		t.Errorf("LockedUntil = %v, want nil after ResetPassword", after.LockedUntil)
+	}
+
+	// Now the distinction: DisableUser's stamp must survive a password
+	// reset, because disabling is an operator action reversed only by
+	// EnableUser — never by proving control of the password.
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	rawToken2, err := s.CreatePasswordResetToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreatePasswordResetToken (second): %v", err)
+	}
+	if err := s.ResetPassword(ctx, rawToken2, "anothernewpassword123"); err != nil {
+		t.Fatalf("ResetPassword (second): %v", err)
+	}
+	_, err = s.Login(ctx, "alice@example.com", "anothernewpassword123", RequestInfo{})
+	if !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("Login after a password reset on a disabled account error = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// TestChangePasswordClearsLockout covers ChangePassword: proving the old
+// password clears an active lockout, exactly like VerifyPassword's own
+// success path.
+func TestChangePasswordClearsLockout(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	u, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	until := time.Now().Add(time.Hour)
+	u.LockedUntil = &until
+	u.FailedLoginAttempts = 5
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+
+	if err := s.ChangePassword(ctx, user.ID, "password123", "newpassword123", RequestInfo{}); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+
+	if _, err := s.Login(ctx, "alice@example.com", "newpassword123", RequestInfo{}); err != nil {
+		t.Fatalf("Login after ChangePassword: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.FailedLoginAttempts != 0 {
+		t.Errorf("FailedLoginAttempts = %d, want 0 after ChangePassword", after.FailedLoginAttempts)
+	}
+	if after.LockedUntil != nil {
+		t.Errorf("LockedUntil = %v, want nil after ChangePassword", after.LockedUntil)
+	}
+}
+
+// TestSetInitialPasswordClearsLockoutFields covers SetInitialPassword, the
+// third setPassword caller. A passwordless account can't accumulate
+// FailedLoginAttempts through ordinary use (VerifyPassword's dummy-hash
+// branch for a passwordless user never calls recordFailedLogin), so this
+// pins the clearing as a harmless no-op on the fields' zero values rather
+// than a load-bearing recovery — set them directly to prove the write path
+// still behaves correctly if they were ever non-zero.
+func TestSetInitialPasswordClearsLockoutFields(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	user, _, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+
+	u, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	until := time.Now().Add(time.Hour)
+	u.LockedUntil = &until
+	u.FailedLoginAttempts = 5
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+
+	if err := s.SetInitialPassword(ctx, user.ID, "newpassword123"); err != nil {
+		t.Fatalf("SetInitialPassword: %v", err)
+	}
+
+	if _, err := s.Login(ctx, "bob@example.com", "newpassword123", RequestInfo{}); err != nil {
+		t.Fatalf("Login after SetInitialPassword: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.FailedLoginAttempts != 0 {
+		t.Errorf("FailedLoginAttempts = %d, want 0 after SetInitialPassword", after.FailedLoginAttempts)
+	}
+	if after.LockedUntil != nil {
+		t.Errorf("LockedUntil = %v, want nil after SetInitialPassword", after.LockedUntil)
+	}
+}
