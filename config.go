@@ -44,6 +44,39 @@ type Argon2Params struct {
 	KeyLength   uint32 // bytes (default: 32)
 }
 
+// TokenSource controls which channel(s) Authenticate accepts a session
+// token from. See WithTokenSource.
+type TokenSource int
+
+const (
+	// TokenSourceBoth accepts either an Authorization: Bearer header or the
+	// configured session cookie — today's behavior, and the default.
+	//
+	// This stays the default even though this package now ships cookie
+	// support (SessionCookie) and CSRF defenses (RequireSameOrigin,
+	// RequireCSRFToken) in the same task that introduced this type: a
+	// Bearer header is never attached to a request automatically by a
+	// browser, so accepting one alongside a cookie does not create or
+	// widen a CSRF exposure by itself — that exposure comes entirely from
+	// the cookie channel, and is exactly what RequireSameOrigin/
+	// RequireCSRFToken exist to close. Narrowing the default to
+	// TokenSourceCookieOnly would break every existing Bearer-only
+	// consumer for no CSRF benefit, since Bearer was never the risk.
+	// See the T507 Decisions row in PROGRESS.md.
+	TokenSourceBoth TokenSource = iota
+	// TokenSourceCookieOnly rejects an Authorization: Bearer header
+	// entirely — Authenticate never even reads it — and honors only the
+	// configured session cookie.
+	TokenSourceCookieOnly
+	// TokenSourceBearerOnly rejects the session cookie entirely —
+	// Authenticate never even reads it — and honors only an Authorization:
+	// Bearer header. A deployment that sets this, and never calls
+	// SessionCookie, needs neither RequireSameOrigin nor the CSRF helpers:
+	// without a cookie there is no ambient credential for a forged
+	// cross-site request to ride on.
+	TokenSourceBearerOnly
+)
+
 // Config holds the configuration for a Sulis instance.
 type Config struct {
 	SessionDuration                time.Duration // how long sessions are valid (default: 24h)
@@ -79,10 +112,32 @@ type Config struct {
 	// disables idle expiry entirely: sessions live until SessionDuration
 	// regardless of use. See WithIdleTimeout.
 	IdleTimeout time.Duration
+
+	// CookieName is the name Authenticate reads the session token from
+	// (when TokenSource permits a cookie) and SessionCookie/
+	// ClearSessionCookie set (default: "__Host-session"). See
+	// WithCookieName.
+	CookieName string
+
+	// TokenSource controls which channel(s) Authenticate accepts a session
+	// token from (default: TokenSourceBoth). See WithTokenSource.
+	TokenSource TokenSource
 }
 
 // Option is a functional option for configuring Sulis.
 type Option func(*Config)
+
+// defaultCookieName is CookieName's default. The __Host- prefix is a
+// browser-enforced guarantee that this cookie can only have been set by
+// this exact origin, over HTTPS, for the whole origin (Path=/, no Domain)
+// — SessionCookie/ClearSessionCookie always set Secure and Path=/ and
+// never set Domain, regardless of CookieName, so that guarantee holds for
+// any name carrying the prefix, including a custom one set via
+// WithCookieName. See the T507 Decisions row in PROGRESS.md for why this
+// is enforced by construction (nothing in this package's configuration
+// surface can produce a Domain attribute) rather than by validating the
+// combination at runtime.
+const defaultCookieName = "__Host-session"
 
 func defaultConfig() Config {
 	return Config{
@@ -98,6 +153,7 @@ func defaultConfig() Config {
 		MaxPasswordLength:              1024,
 		Limiter:                        NewMemoryLimiter(),
 		PasswordChecker:                passwordcheck.NewBlocklist(),
+		CookieName:                     defaultCookieName,
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -319,4 +375,27 @@ func WithPasswordChecker(c PasswordChecker) Option {
 // writing one — for instance when an upstream gateway already enforces limits.
 func WithoutRateLimiting() Option {
 	return func(c *Config) { c.Limiter = nil }
+}
+
+// WithCookieName overrides the session cookie's name (default:
+// "__Host-session"). New rejects a name that isn't a valid HTTP cookie
+// token (empty, or containing whitespace/control/separator characters).
+//
+// Choosing a name without the "__Host-" prefix is a valid, explicit
+// opt-out of that browser-enforced guarantee (see defaultCookieName) — do
+// this only if you have a concrete reason to (for instance, sharing the
+// cookie across subdomains via an explicit Domain your own reverse proxy
+// adds, which this package's cookies never set themselves). Secure, Path=/,
+// and HttpOnly are set on SessionCookie/ClearSessionCookie regardless of
+// name: nothing in this package's configuration surface can turn them off.
+func WithCookieName(name string) Option {
+	return func(c *Config) { c.CookieName = name }
+}
+
+// WithTokenSource restricts which channel(s) Authenticate accepts a
+// session token from (default: TokenSourceBoth). See TokenSource's own
+// constants for what each value means and why TokenSourceBoth remains the
+// default.
+func WithTokenSource(ts TokenSource) Option {
+	return func(c *Config) { c.TokenSource = ts }
 }

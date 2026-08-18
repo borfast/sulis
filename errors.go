@@ -88,4 +88,13 @@ var (
 	// throttles new authentication attempts, it does not invalidate a
 	// session already issued before the lockout began.
 	ErrAccountLocked = errors.New("sulis: account locked")
+
+	// ErrCSRFTokenInvalid is returned by VerifyCSRFToken (and so by the
+	// RequireCSRFToken middleware built on it) when the double-submit CSRF
+	// cookie is missing, the client echoed nothing back in the header or
+	// form field, or the two values don't match. It deliberately doesn't
+	// distinguish those cases: telling an attacker which one failed would
+	// hand back a bit of information about a cookie they can't otherwise
+	// read.
+	ErrCSRFTokenInvalid = errors.New("sulis: csrf token invalid")
 )

@@ -47,6 +47,9 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 	if cfg.MinPasswordLength > cfg.MaxPasswordLength {
 		return nil, fmt.Errorf("sulis: minimum password length %d exceeds maximum %d", cfg.MinPasswordLength, cfg.MaxPasswordLength)
 	}
+	if err := validateCookieName(cfg.CookieName); err != nil {
+		return nil, err
+	}
 
 	s := &Sulis{
 		users:    users,
