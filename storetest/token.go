@@ -24,6 +24,11 @@ import (
 // purpose scoping, without which a two-factor token would be redeemable as a
 // password reset.
 //
+// The round trip is checked field by field, Token.NonceHash included: a store
+// that persists everything else but drops that column disables magic-link
+// binding for every link it stores, because RedeemMagicLink asks for a
+// binding nonce only when the token it read back carries a NonceHash.
+//
 // factory must return a fresh, empty store on every call; see the package
 // documentation.
 func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
@@ -57,6 +62,17 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 		}
 		if got.Email != tok.Email {
 			t.Errorf("Email = %q, want %q", got.Email, tok.Email)
+		}
+		// NonceHash carries magic-link binding, and RedeemMagicLink reads
+		// the binding requirement off the token it gets back: it demands a
+		// matching nonce only when NonceHash is non-empty. A store that
+		// accepts the field and returns it empty therefore turns binding
+		// off for every magic link it persists — silently, with no error
+		// anywhere and every other subtest still green. That is why it is
+		// asserted here rather than left to the fields sulis happens to
+		// read on the reset path.
+		if got.NonceHash != tok.NonceHash {
+			t.Errorf("NonceHash = %q, want %q", got.NonceHash, tok.NonceHash)
 		}
 	})
 
@@ -212,5 +228,12 @@ func newTokenFor(userID string, purpose sulis.TokenPurpose) *sulis.Token {
 		Purpose:   purpose,
 		ExpiresAt: now.Add(time.Hour),
 		CreatedAt: now,
+		// NonceHash is populated on every fixture, whatever the purpose,
+		// for the same reason the round-trip subtest populates Email on a
+		// password-reset token: the suite is checking storage fidelity, not
+		// re-asserting which purposes sulis itself sets the field for. A
+		// store that silently drops it disables magic-link binding — see
+		// the round-trip subtest.
+		NonceHash: uniqueHash("nonce"),
 	}
 }
