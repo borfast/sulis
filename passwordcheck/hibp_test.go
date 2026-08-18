@@ -225,6 +225,15 @@ func TestHIBPFailsClosedWhenConfigured(t *testing.T) {
 			if errors.Is(err, ErrCompromised) {
 				t.Fatalf("Check = %v, but an unreachable service is not evidence that the password is compromised", err)
 			}
+			// A transport or status failure is a different condition from a
+			// malformed matching row (see
+			// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed): the two
+			// must stay distinguishable via errors.Is, or an application
+			// branching on ErrMalformedResponse for the latter would also
+			// misfire on an ordinary outage.
+			if errors.Is(err, ErrMalformedResponse) {
+				t.Fatalf("Check = %v, wrongly carries ErrMalformedResponse for a transport/status failure", err)
+			}
 		})
 	}
 }
@@ -303,11 +312,11 @@ func TestHIBPMalformedCountOnTheMatchingRowFailsOpen(t *testing.T) {
 // password without a completed check", and a row that matches our suffix but
 // whose count cannot be parsed means the check did not complete — it is not
 // a clean "not found" the way a malformed row for some *other* suffix is.
-// So lookup surfaces this as an error (see the doc comment at the parse
-// site), and fail-closed's existing error branch in Check rejects the
-// password through the same seam it uses for a transport failure. This was
-// flipped deliberately from the previously pinned fail-open-shaped behavior;
-// see the commit that changed this test.
+// So lookup surfaces this as an error wrapping [ErrMalformedResponse] (see
+// the doc comment at the parse site), and fail-closed's existing error
+// branch in Check rejects the password through the same seam it uses for a
+// transport failure. This was flipped deliberately from the previously
+// pinned fail-open-shaped behavior; see the commit that changed this test.
 func TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed(t *testing.T) {
 	_, _, suffix := hibpHash(hibpTestPassword)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -322,6 +331,9 @@ func TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed(t *testing.T) {
 	}
 	if errors.Is(err, ErrCompromised) {
 		t.Fatalf("Check = %v, but a malformed row is not evidence the password is compromised, only that the check was incomplete", err)
+	}
+	if !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("Check = %v, want an error wrapping ErrMalformedResponse so an application can distinguish this from an ordinary transport failure", err)
 	}
 }
 

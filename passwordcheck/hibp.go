@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1" // #nosec G505 -- the HIBP range API is defined over SHA-1; the algorithm is theirs, and no collision property is relied on here
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,27 @@ const defaultHIBPTimeout = 5 * time.Second
 // limit is a misbehaving or hostile endpoint, and a password checker must not
 // be a way to exhaust the memory of the process that trusted it.
 const maxHIBPResponse = 1 << 20 // 1 MiB
+
+// ErrMalformedResponse indicates a lookup could not complete because the
+// range response held data this client could not parse. Today that means
+// exactly one row shape: a suffix matching the password being checked whose
+// count is not a parseable integer. A real API has never been observed to
+// send one — this is corrupted-mirror or tampering-middlebox territory. A
+// malformed row for some other suffix is unrelated noise and never produces
+// this error; see [HIBP.lookup]'s doc comment.
+//
+// Under the fail-open default, an error wrapping this is treated the same as
+// any other unreachable verdict: [HIBP.Check] returns nil and the password
+// is accepted. Under [WithHIBPFailClosed], Check returns the wrapped error
+// instead, and it is never [ErrCompromised] either way.
+//
+// This is exported so an application that wants custom handling for exactly
+// this condition — without a new HIBPOption — can get it: wrap an *[HIBP] in
+// your own [Checker], call its Check, and branch on
+// errors.Is(err, ErrMalformedResponse) to, say, fail closed only on
+// suspected tampering while still failing open on an ordinary transport
+// error, or to alert on it distinctly.
+var ErrMalformedResponse = errors.New("passwordcheck: malformed HIBP response for the queried range")
 
 // HIBP checks passwords against the Have I Been Pwned range API using
 // k-anonymity: only the first five hexadecimal digits of the password's SHA-1
@@ -110,8 +132,8 @@ func WithHIBPHTTPClient(c *http.Client) HIBPOption {
 // password's suffix but whose count this client cannot parse: that row was
 // supposed to be the answer, so under this option it is treated as an
 // incomplete check and rejected, not silently read as "not found" (see
-// lookup's doc comment). A malformed row for some other suffix is unrelated
-// noise and is still skipped either way.
+// lookup's doc comment and [ErrMalformedResponse]). A malformed row for some
+// other suffix is unrelated noise and is still skipped either way.
 //
 // Choose this when policy genuinely requires that no password is ever set
 // without a breach check having succeeded, and make sure the surrounding
@@ -169,7 +191,9 @@ func NewHIBP(opts ...HIBPOption) *HIBP {
 // underlying error when [WithHIBPFailClosed] is set; either way that error is
 // never [ErrCompromised]. A cancelled or expired ctx is an unreachable
 // verdict like any other, so it too is subject to the fail-open/fail-closed
-// choice.
+// choice. One such error, [ErrMalformedResponse], is exported specifically so
+// callers can distinguish it from other unreachable-verdict causes with
+// errors.Is.
 func (h *HIBP) Check(ctx context.Context, password string) error {
 	if password == "" {
 		return nil
@@ -257,10 +281,13 @@ func (h *HIBP) lookup(ctx context.Context, prefix, suffix string) (bool, error) 
 		// TestHIBPMalformedCountOnTheMatchingRowFailsOpen) — while
 		// [WithHIBPFailClosed] rejects it as a check that did not complete,
 		// not as a false "not found" (see
-		// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed).
+		// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed). The
+		// returned error wraps [ErrMalformedResponse] so an application can
+		// tell this case apart from an ordinary transport or status failure
+		// via errors.Is, without a new HIBPOption.
 		n, err := strconv.ParseInt(strings.TrimSpace(count), 10, 64)
 		if err != nil {
-			return false, fmt.Errorf("passwordcheck: malformed response row for matching suffix: %w", err)
+			return false, fmt.Errorf("%w: row for matching suffix: %w", ErrMalformedResponse, err)
 		}
 		if n <= 0 {
 			continue
