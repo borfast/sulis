@@ -93,7 +93,7 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 		return &LoginResult{User: user, NeedsSecondFactor: true, PendingToken: pending}, nil
 	}
 
-	session, token, err := s.createSession(ctx, user.ID)
+	session, token, err := s.createSession(ctx, user.ID, method, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,13 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 type Authentication struct {
 	userID string
 	method AuthMethod
-	at     time.Time
+	// at is when the factor behind this proof was verified. T305 minted it
+	// but left it unread; T501 is its consumer: issueSessionForUser carries
+	// it through to the minted Session's AuthenticatedAt, so a session
+	// issued from a checked Authentication is stamped with the moment the
+	// factor was actually proven rather than the moment (a store round trip
+	// later) the session row happens to be written.
+	at time.Time
 }
 
 // newAuthentication mints an Authentication proof for userID via method,
@@ -177,23 +183,31 @@ func (s *Sulis) issueSession(ctx context.Context, auth Authentication) (*Session
 	if err != nil {
 		return nil, "", err
 	}
-	return s.issueSessionForUser(ctx, user)
+	return s.issueSessionForUser(ctx, user, auth.method, auth.at)
 }
 
 // issueSessionForUser gates and creates a session for an already-loaded user,
 // avoiding a redundant store round-trip for callers (like Login) that already
-// have the user in hand.
-func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, string, error) {
+// have the user in hand. method and authenticatedAt are stamped on the
+// minted Session; issueSession passes auth.method and auth.at through
+// unchanged, so the session's AuthenticatedAt reflects the moment the proof
+// was actually minted rather than this call's own, slightly later, clock read.
+func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method AuthMethod, authenticatedAt time.Time) (*Session, string, error) {
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, "", err
 	}
-	return s.createSession(ctx, user.ID)
+	return s.createSession(ctx, user.ID, method, authenticatedAt)
 }
 
 // createSession creates a new session and returns it alongside the raw session
 // token. The token is a return value rather than a field on Session, so the
-// struct handed to SessionStore has no way to carry it.
-func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, string, error) {
+// struct handed to SessionStore has no way to carry it. method and
+// authenticatedAt are stamped on the session as Method and AuthenticatedAt;
+// callers that authenticate and create the session in the same breath (e.g.
+// completeFirstFactor, CompleteTwoFactor) pass time.Now(), while the
+// Authentication-carrying path passes the proof's own timestamp instead — see
+// issueSessionForUser.
+func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMethod, authenticatedAt time.Time) (*Session, string, error) {
 	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
 	if err != nil {
 		return nil, "", err
@@ -201,11 +215,13 @@ func (s *Sulis) createSession(ctx context.Context, userID string) (*Session, str
 
 	now := time.Now()
 	session := &Session{
-		ID:        generateID(),
-		UserID:    userID,
-		TokenHash: hashSessionToken(token),
-		ExpiresAt: now.Add(s.cfg.SessionDuration),
-		CreatedAt: now,
+		ID:              generateID(),
+		UserID:          userID,
+		TokenHash:       hashSessionToken(token),
+		ExpiresAt:       now.Add(s.cfg.SessionDuration),
+		CreatedAt:       now,
+		AuthenticatedAt: authenticatedAt,
+		Method:          method,
 	}
 
 	if err := s.sessions.CreateSession(ctx, session); err != nil {

@@ -90,7 +90,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 		return nil, nil, "", err
 	}
 
-	session, token, err := s.createSession(ctx, user.ID)
+	session, token, err := s.createSession(ctx, user.ID, AuthMethodPassword, now)
 	if err != nil {
 		return nil, nil, "", err
 	}

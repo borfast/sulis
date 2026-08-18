@@ -178,8 +178,9 @@ func NewService(store Store, issuer string, opts ...Option) (*Service, error) {
 // supersede an existing factor.
 //
 // Enrollment changes a security-relevant setting for the account: callers
-// should gate this endpoint behind recent re-authentication (see the
-// forthcoming RequireRecentAuth, T501) rather than a bare session.
+// should gate this endpoint behind recent re-authentication —
+// sulis.Sulis.RequireRecentAuth against the caller's session, refreshed via
+// sulis.Sulis.ReAuthenticate — rather than a bare session.
 func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
 	return s.enroll(ctx, userID, accountName, false)
 }
@@ -193,8 +194,9 @@ func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secre
 // new secret and promotes it.
 //
 // Enrollment changes a security-relevant setting for the account: callers
-// should gate this endpoint behind recent re-authentication (see the
-// forthcoming RequireRecentAuth, T501) rather than a bare session.
+// should gate this endpoint behind recent re-authentication —
+// sulis.Sulis.RequireRecentAuth against the caller's session, refreshed via
+// sulis.Sulis.ReAuthenticate — rather than a bare session.
 func (s *Service) ReplaceEnrollment(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
 	return s.enroll(ctx, userID, accountName, true)
 }

@@ -1,6 +1,9 @@
 package sulis
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // CreateTwoFactorToken generates a short-lived, single-use pending-login
 // token for a user who has passed the first authentication factor. Returns
@@ -61,8 +64,10 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	// and IssueSession would just reload it by ID, paying a store round trip
 	// this call site doesn't need to pay. Everything this function just
 	// checked (token ownership, current email-verification state) is exactly
-	// what an Authentication would otherwise vouch for.
-	session, sessionToken, err := s.createSession(ctx, user.ID)
+	// what an Authentication would otherwise vouch for. The session records
+	// AuthMethodTwoFactor, not whichever method passed the first factor:
+	// the second factor is what actually authorized this session.
+	session, sessionToken, err := s.createSession(ctx, user.ID, AuthMethodTwoFactor, time.Now())
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ The root package owns the auth logic and data types:
 - `User`, `Session`, and `Token`
 - `Register`, `Login`, `VerifyPassword`, `IssueSession`, `IssueSessionUnchecked`, `ChangePassword`, `SetInitialPassword`
 - `ValidateSession`, `RevokeSession`, `RevokeAllSessions`
+- `RequireRecentAuth`, `ReAuthenticate`
 - `CreatePasswordResetToken`, `CreatePasswordResetTokenStrict`, `ResetPassword`
 - `CreateMagicLinkToken`, `RedeemMagicLink`
 - `CreateTwoFactorToken`, `CompleteTwoFactor`
@@ -79,6 +80,34 @@ Both equalize response timing for unknown-user and passwordless-user cases by ru
 **`Session` has no `Token` field.** The raw token exists only as a return value at issue time — `LoginResult.SessionToken`, or the third result of `Register`, `IssueSession`, and `IssueSessionUnchecked` — so the struct handed to `SessionStore` has no way to carry it and no store can persist a live bearer token by accident. Stores see `TokenHash` and nothing else.
 
 **`RevokeSession(ctx, userID, sessionID)` is scoped to the caller's own userID.** It deletes `sessionID` only if it belongs to `userID`, returning `ErrSessionNotFound` (and leaving the session untouched) otherwise — so a session-management UI wired straight to this method can't let one user revoke another's session by guessing or leaking its ID. Pass the userID of the account the caller is authenticated as, not a value taken from the request body. `RevokeAllSessions(ctx, userID)` deletes every session for a user and has no such ambiguity to begin with.
+
+### Step-up authentication
+
+Every session carries `AuthenticatedAt` (when its owning credential was last proven) and `Method` (which credential proved it), both stamped at issuance by `Register`, `Login`/`RedeemMagicLink` (via `completeFirstFactor`), `CompleteTwoFactor` (`AuthMethodTwoFactor`, regardless of which method passed the first factor), and `IssueSession`/`IssueSessionUnchecked`.
+
+`RequireRecentAuth(ctx, session, maxAge)` returns `ErrReauthRequired` if `session.AuthenticatedAt` is older than `maxAge`, and `nil` otherwise. It's a pure check against a `*Session` you already have (typically whatever `ValidateSession` just returned) — no store round trip. **A session issued before this field existed reads back with a zero `AuthenticatedAt`, which is always older than any `maxAge`: such a session fails closed, never treated as fresh.**
+
+**Gate these operations behind `RequireRecentAuth`, not a bare session** — each changes something an attacker who merely stole a cookie should not be able to change:
+
+- Enrolling or replacing a TOTP factor (`totp.Service.Enroll`, `ReplaceEnrollment`)
+- Disabling two-factor authentication
+- Adding or removing a passkey
+- Changing email (`ChangeEmail`)
+- Regenerating recovery codes
+
+```go
+session, user, err := auth.ValidateSession(ctx, token)
+if err != nil {
+    return err
+}
+if err := auth.RequireRecentAuth(ctx, session, 15*time.Minute); err != nil {
+    // Prompt for the password again, then call ReAuthenticate, before
+    // letting the request through to totp.Enroll / passkey removal / etc.
+    return err
+}
+```
+
+`ReAuthenticate(ctx, session, password, requestInfo)` is the write side: it verifies `password` for `session`'s owning user and, on success, stamps `session.AuthenticatedAt` with the current time — both on the stored session and on the `*Session` you passed in, so you don't need to reload it. **It mints no new session and does not rotate the token**: `session.ID` and its token hash are unchanged, so the user's existing session (and its raw token, if they still hold it) keeps working exactly as before, just freshly re-authenticated. Like `VerifyPassword`, it's rate-limited on both the account (`"password:"+email`, the same budget `Login`/`VerifyPassword`/`ChangePassword` share) and IP dimensions, and equalizes timing for a passwordless account via the same dummy-hash path. Returns `ErrInvalidCredentials` for a passwordless account or a wrong password, and in neither case is `AuthenticatedAt` touched.
 
 ### Password Reset
 
@@ -173,7 +202,7 @@ It supports enrollment (`Enroll`, pending until `ConfirmEnrollment`), explicit r
 
 `totp.WithLimiter` configures a rate limiter (structurally identical to the root `Limiter` interface, declared separately so this package has no dependency on the root module) consulted by both `Validate` and `ConfirmEnrollment`, keyed by `"totp:"+userID`. A denied check returns `ErrTOTPRateLimited`. This is not optional in production: a 6-digit code is a 10^6 space, brute-forceable without a limiter.
 
-Enrollment changes a security-relevant setting for the account: gate `Enroll`/`ReplaceEnrollment` behind recent re-authentication in your application (a forthcoming `RequireRecentAuth` helper is planned) rather than a bare session.
+Enrollment changes a security-relevant setting for the account: gate `Enroll`/`ReplaceEnrollment` behind `RequireRecentAuth` — see [Step-up authentication](#step-up-authentication) — rather than a bare session.
 
 The package depends on a consumer-owned `totp.Store` for saving and loading TOTP credentials — see [Store Contracts](#store-contracts) below for the active/pending separation and its atomicity requirements.
 
@@ -227,7 +256,13 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
   ```
 
   Zero rows affected means another writer won. Without this check, two flows that each read-modify-write the whole row can clobber each other, and the dangerous direction restores a password hash the user just rotated away from — silently undoing a reset. The library reloads and retries on `ErrConcurrentUpdate`, so a correct store makes the race invisible to callers.
-- `SessionStore`: create sessions, load them by token-hash lookup, revoke one session, revoke all sessions for a user, and `CleanExpired`. `CleanExpired` is never called by the library itself — see [Operational requirements](#operational-requirements). `DeleteSession(ctx, userID, id)` **must** scope its delete to both columns (`DELETE FROM sessions WHERE id = ? AND user_id = ?`) and return `ErrSessionNotFound` on zero rows affected — whether `id` doesn't exist at all, or exists but belongs to a different user. This is what makes `RevokeSession` safe to expose directly to a session-management UI: it always passes the caller's own `userID`, so a guessed or leaked session ID belonging to someone else is indistinguishable from a nonexistent one.
+- `SessionStore`: create sessions, load them by token-hash lookup, revoke one session, revoke all sessions for a user, and `CleanExpired`. `CleanExpired` is never called by the library itself — see [Operational requirements](#operational-requirements). `DeleteSession(ctx, userID, id)` **must** scope its delete to both columns (`DELETE FROM sessions WHERE id = ? AND user_id = ?`) and return `ErrSessionNotFound` on zero rows affected — whether `id` doesn't exist at all, or exists but belongs to a different user. This is what makes `RevokeSession` safe to expose directly to a session-management UI: it always passes the caller's own `userID`, so a guessed or leaked session ID belonging to someone else is indistinguishable from a nonexistent one. `UpdateAuthenticatedAt(ctx, id, at)` stamps a single session's `AuthenticatedAt`, leaving every other column untouched:
+
+  ```sql
+  UPDATE sessions SET authenticated_at = $2 WHERE id = $1
+  ```
+
+  Zero rows affected (`id` unknown) **must** return `ErrSessionNotFound`. This is `ReAuthenticate`'s write path — see [Step-up authentication](#step-up-authentication) — and it is deliberately its own method rather than an extra parameter on a future last-seen/idle-expiry "touch": a step-up re-authentication and a liveness heartbeat are different events from different callers, and one method serving both would let a caller that means to refresh only one silently refresh the other too.
 - `TokenStore`:
   - `CreateToken` persists a new token.
   - `ConsumeToken(ctx, hash, purpose)` must atomically find the unused token matching hash **and** purpose and mark it used in one operation (e.g. `UPDATE ... WHERE hash=? AND purpose=? AND used=false`), returning `ErrTokenNotFound` if nothing matches and `ErrTokenAlreadyUsed` if it was already consumed. Lookup and mark-used are not allowed to be separate steps — that would open a race where two concurrent redemptions both succeed.

@@ -1,0 +1,86 @@
+package sulis
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// RequireRecentAuth returns ErrReauthRequired if session's AuthenticatedAt is
+// older than maxAge, and nil otherwise. It does not touch any store: it is a
+// pure check against the *Session the caller already holds (typically the
+// one ValidateSession just returned), so gating an endpoint with it costs no
+// extra round trip.
+//
+// A session issued before this field existed, or otherwise never stamped,
+// reads back with the zero time for AuthenticatedAt. time.Since of the zero
+// time is on the order of two thousand years, which is older than any
+// realistic maxAge, so such a session always fails this check — fail closed,
+// not "treat an absent stamp as fresh."
+//
+// Gate security-relevant account changes behind this rather than a bare
+// session: enrolling or replacing a TOTP factor (totp.Service.Enroll,
+// ReplaceEnrollment), adding or removing a passkey, disabling two-factor
+// authentication, changing email (ChangeEmail), and regenerating recovery
+// codes should all require proving the credential again, not merely holding
+// a cookie from hours ago. See the README's "Step-up authentication"
+// section for the full list and example wiring.
+func (s *Sulis) RequireRecentAuth(ctx context.Context, session *Session, maxAge time.Duration) error {
+	if time.Since(session.AuthenticatedAt) > maxAge {
+		return ErrReauthRequired
+	}
+	return nil
+}
+
+// ReAuthenticate verifies password for the user who owns session and, on
+// success, stamps session's AuthenticatedAt with the current time — both on
+// the stored session and on the *Session the caller passed in, so neither a
+// reload nor a fresh ValidateSession call is needed to observe the refresh.
+// It mints no new session and does not rotate the session's token: the
+// session's ID and TokenHash are exactly what they were before the call.
+// This is the write side of the step-up gate RequireRecentAuth checks.
+//
+// Like VerifyPassword, it is rate-limited on both the account dimension
+// (key "password:"+email, the same budget Login/VerifyPassword/
+// ChangePassword share, since a stolen session token attempting to
+// brute-force the password here is exactly the risk those guard) and the IP
+// dimension, and it equalizes response timing for a passwordless account by
+// running the same Argon2 work against an internal dummy hash rather than
+// returning early. Returns ErrInvalidCredentials for a passwordless account
+// or a wrong password — in neither case is AuthenticatedAt touched.
+func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password string, ri RequestInfo) error {
+	user, err := s.users.GetUserByID(ctx, session.UserID)
+	if err != nil {
+		return err
+	}
+
+	if err := s.allow(ctx, "password:"+user.Email); err != nil {
+		return err
+	}
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
+		return err
+	}
+
+	if user.PasswordHash == "" {
+		// Passwordless user: verify against the dummy hash for the same
+		// reason VerifyPassword does — so response timing doesn't reveal
+		// that this account has no password to check.
+		_, _ = verifyPassword(password, s.dummyHash)
+		return ErrInvalidCredentials
+	}
+
+	ok, err := verifyPassword(password, user.PasswordHash)
+	if err != nil {
+		return fmt.Errorf("sulis: verifying password: %w", err)
+	}
+	if !ok {
+		return ErrInvalidCredentials
+	}
+
+	now := time.Now()
+	if err := s.sessions.UpdateAuthenticatedAt(ctx, session.ID, now); err != nil {
+		return err
+	}
+	session.AuthenticatedAt = now
+	return nil
+}

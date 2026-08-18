@@ -198,6 +198,17 @@ func (s *memSessionStore) count() int {
 	return len(s.sessions)
 }
 
+func (s *memSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	sess.AuthenticatedAt = at
+	return nil
+}
+
 func (s *memSessionStore) CleanExpired(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -783,6 +794,18 @@ func (s *observingSessionStore) CleanExpired(_ context.Context) error {
 	return nil
 }
 
+func (s *observingSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessionByHash {
+		if sess.ID == id {
+			sess.AuthenticatedAt = at
+			return nil
+		}
+	}
+	return ErrSessionNotFound
+}
+
 type sharedSessionStore struct {
 	session *Session
 }
@@ -804,6 +827,14 @@ func (s *sharedSessionStore) DeleteSession(_ context.Context, _, _ string) error
 func (s *sharedSessionStore) DeleteUserSessions(_ context.Context, _ string) error { return nil }
 
 func (s *sharedSessionStore) CleanExpired(_ context.Context) error { return nil }
+
+func (s *sharedSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+	if s.session == nil || s.session.ID != id {
+		return ErrSessionNotFound
+	}
+	s.session.AuthenticatedAt = at
+	return nil
+}
 
 type errTokenStore struct {
 	err error
@@ -2748,5 +2779,240 @@ func TestEmailVerificationPropagatesUserLookupFailures(t *testing.T) {
 	}
 	if _, err := s.VerifyEmail(ctx, rawToken); !errors.Is(err, lookupErr) {
 		t.Fatalf("VerifyEmail error = %v, want errors.Is(err, lookupErr)", err)
+	}
+}
+
+// --- T501: step-up authentication ---
+
+// TestRequireRecentAuthOldStampReturnsErrReauthRequired asserts that a
+// session whose AuthenticatedAt is older than maxAge is rejected.
+func TestRequireRecentAuthOldStampReturnsErrReauthRequired(t *testing.T) {
+	s := newTestSulis()
+	session := &Session{AuthenticatedAt: time.Now().Add(-2 * time.Hour)}
+
+	if err := s.RequireRecentAuth(context.Background(), session, time.Hour); !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("RequireRecentAuth error = %v, want ErrReauthRequired", err)
+	}
+}
+
+// TestRequireRecentAuthFreshStampReturnsNil asserts that a session
+// authenticated within maxAge passes.
+func TestRequireRecentAuthFreshStampReturnsNil(t *testing.T) {
+	s := newTestSulis()
+	session := &Session{AuthenticatedAt: time.Now().Add(-time.Minute)}
+
+	if err := s.RequireRecentAuth(context.Background(), session, time.Hour); err != nil {
+		t.Fatalf("RequireRecentAuth: %v", err)
+	}
+}
+
+// TestRequireRecentAuthZeroAuthenticatedAtFailsClosed asserts that a session
+// predating this feature (zero AuthenticatedAt) is always treated as stale,
+// never as fresh.
+func TestRequireRecentAuthZeroAuthenticatedAtFailsClosed(t *testing.T) {
+	s := newTestSulis()
+	session := &Session{} // AuthenticatedAt zero value
+
+	if err := s.RequireRecentAuth(context.Background(), session, 24*time.Hour); !errors.Is(err, ErrReauthRequired) {
+		t.Fatalf("RequireRecentAuth error = %v, want ErrReauthRequired", err)
+	}
+}
+
+// TestReAuthenticateCorrectPasswordRefreshesAuthenticatedAt asserts that a
+// correct password stamps the session's AuthenticatedAt without minting a
+// new session or rotating its token: the same session ID and token hash
+// still validate afterward.
+func TestReAuthenticateCorrectPasswordRefreshesAuthenticatedAt(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, sessionTok, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Backdate the stamp directly in the store, as if this session had been
+	// live for a while.
+	old := time.Now().Add(-2 * time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].AuthenticatedAt = old
+	sessions.mu.Unlock()
+
+	if err := s.ReAuthenticate(ctx, session, "password123", RequestInfo{}); err != nil {
+		t.Fatalf("ReAuthenticate: %v", err)
+	}
+
+	// Same session, same token: ValidateSession still succeeds against the
+	// original raw token.
+	validated, _, err := s.ValidateSession(ctx, sessionTok)
+	if err != nil {
+		t.Fatalf("ValidateSession after ReAuthenticate: %v", err)
+	}
+	if validated.ID != session.ID {
+		t.Fatalf("expected the same session ID %q, got %q — ReAuthenticate must not mint a new session", session.ID, validated.ID)
+	}
+	if !validated.AuthenticatedAt.After(old) {
+		t.Fatalf("expected AuthenticatedAt refreshed after %v, got %v", old, validated.AuthenticatedAt)
+	}
+	// The passed-in *Session is also updated in place, so a caller need not
+	// reload to see the refreshed stamp.
+	if !session.AuthenticatedAt.After(old) {
+		t.Fatalf("expected ReAuthenticate to update the caller's *Session in place, got %v", session.AuthenticatedAt)
+	}
+}
+
+// TestReAuthenticateWrongPasswordDoesNotRefreshStamp asserts that a wrong
+// password returns ErrInvalidCredentials and leaves AuthenticatedAt
+// untouched.
+func TestReAuthenticateWrongPasswordDoesNotRefreshStamp(t *testing.T) {
+	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	sessions.mu.Lock()
+	sessions.sessions[session.ID].AuthenticatedAt = old
+	sessions.mu.Unlock()
+
+	if err := s.ReAuthenticate(ctx, session, "wrong-password", RequestInfo{}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("ReAuthenticate error = %v, want ErrInvalidCredentials", err)
+	}
+
+	sessions.mu.Lock()
+	got := sessions.sessions[session.ID].AuthenticatedAt
+	sessions.mu.Unlock()
+	if !got.Equal(old) {
+		t.Fatalf("AuthenticatedAt changed on a failed ReAuthenticate: got %v, want unchanged %v", got, old)
+	}
+}
+
+// TestReAuthenticatePasswordlessUserReturnsInvalidCredentials asserts that
+// ReAuthenticate against a passwordless (magic-link-only) account fails the
+// same way VerifyPassword does, via the dummy-hash timing-equalization path
+// rather than an early return.
+func TestReAuthenticatePasswordlessUserReturnsInvalidCredentials(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	rawToken, err := s.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	_, session, _, err := redeemMagicLink(t, s, ctx, rawToken)
+	if err != nil {
+		t.Fatalf("RedeemMagicLink: %v", err)
+	}
+
+	if err := s.ReAuthenticate(ctx, session, "any-password", RequestInfo{}); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("ReAuthenticate error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+// TestReAuthenticateConsultsLimiter asserts that ReAuthenticate is
+// rate-limited like VerifyPassword/ChangePassword: a denying limiter blocks
+// it with ErrRateLimited, consulted with the "password:"+email key, before
+// the password is ever verified.
+func TestReAuthenticateConsultsLimiter(t *testing.T) {
+	limiter := &fakeLimiter{}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
+	ctx := context.Background()
+
+	_, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	limiter.mu.Lock()
+	limiter.keys = nil
+	limiter.denied = true
+	limiter.mu.Unlock()
+
+	err = s.ReAuthenticate(ctx, session, "definitely-wrong-password", RequestInfo{})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if len(limiter.keys) != 1 || limiter.keys[0] != "password:alice@example.com" {
+		t.Fatalf("expected limiter consulted with key %q, got %v", "password:alice@example.com", limiter.keys)
+	}
+}
+
+// TestCreateSessionRecordsAuthenticatedAtAndMethod asserts that every path
+// that mints a session stamps AuthenticatedAt (recorded at issuance) and
+// Method (which credential authenticated it).
+func TestCreateSessionRecordsAuthenticatedAtAndMethod(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	before := time.Now()
+	user, session, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if session.Method != AuthMethodPassword {
+		t.Errorf("Register session Method = %q, want %q", session.Method, AuthMethodPassword)
+	}
+	if session.AuthenticatedAt.Before(before) {
+		t.Errorf("Register session AuthenticatedAt = %v, want at or after %v", session.AuthenticatedAt, before)
+	}
+
+	verifyUserEmail(t, users, user.ID)
+	loginRes, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if loginRes.Session.Method != AuthMethodPassword {
+		t.Errorf("Login session Method = %q, want %q", loginRes.Session.Method, AuthMethodPassword)
+	}
+	if loginRes.Session.AuthenticatedAt.IsZero() {
+		t.Error("Login session AuthenticatedAt is zero")
+	}
+
+	unchecked, _, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPasskey)
+	if err != nil {
+		t.Fatalf("IssueSessionUnchecked: %v", err)
+	}
+	if unchecked.Method != AuthMethodPasskey {
+		t.Errorf("IssueSessionUnchecked session Method = %q, want %q", unchecked.Method, AuthMethodPasskey)
+	}
+	if unchecked.AuthenticatedAt.IsZero() {
+		t.Error("IssueSessionUnchecked session AuthenticatedAt is zero")
+	}
+}
+
+// TestCompleteTwoFactorRecordsTwoFactorMethod asserts that a session minted
+// via CompleteTwoFactor records AuthMethodTwoFactor, not the first factor's
+// method.
+func TestCompleteTwoFactorRecordsTwoFactorMethod(t *testing.T) {
+	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+	factors.enroll(user.ID)
+
+	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if !res.NeedsSecondFactor {
+		t.Fatal("expected NeedsSecondFactor")
+	}
+
+	res2, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken, RequestInfo{})
+	if err != nil {
+		t.Fatalf("CompleteTwoFactor: %v", err)
+	}
+	if res2.Session.Method != AuthMethodTwoFactor {
+		t.Errorf("CompleteTwoFactor session Method = %q, want %q", res2.Session.Method, AuthMethodTwoFactor)
 	}
 }

@@ -19,7 +19,23 @@ type Session struct {
 	TokenHash string
 	ExpiresAt time.Time
 	CreatedAt time.Time
-	Metadata  map[string]any
+	// AuthenticatedAt is when the credential behind this session was last
+	// proven — at issuance, and again on every successful ReAuthenticate.
+	// RequireRecentAuth compares it against a caller-supplied maxAge to gate
+	// security-sensitive operations (enrolling or replacing a second
+	// factor, removing a passkey, disabling 2FA, changing email,
+	// regenerating recovery codes — see the README) behind more than a
+	// bare, possibly hours-old session. A session issued before this field
+	// existed reads back as the zero time, which is always older than any
+	// maxAge, so RequireRecentAuth fails closed on it rather than treating
+	// an absent stamp as fresh.
+	AuthenticatedAt time.Time
+	// Method records which credential last authenticated this session —
+	// set at issuance from the AuthMethod the caller vouches for (or, for
+	// IssueSession, the one recorded on the Authentication proof) and left
+	// untouched by ReAuthenticate, which refreshes AuthenticatedAt only.
+	Method   AuthMethod
+	Metadata map[string]any
 }
 
 // SessionStore defines the persistence operations for sessions.
@@ -52,6 +68,25 @@ type SessionStore interface {
 
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpired(ctx context.Context) error
+
+	// UpdateAuthenticatedAt stamps the session identified by id with at,
+	// leaving every other field (including ExpiresAt and Method) untouched:
+	//
+	//	UPDATE sessions SET authenticated_at = ? WHERE id = ?
+	//
+	// Zero rows affected — id does not exist — MUST return
+	// ErrSessionNotFound. This is the write path behind ReAuthenticate: it
+	// refreshes how recently a session's owner last proved their
+	// credential, without minting a new session or rotating its token, so
+	// a subsequent RequireRecentAuth call passes immediately afterward.
+	//
+	// It is deliberately its own method rather than an extra parameter on
+	// the session-liveness "last seen" touch a future task adds: a step-up
+	// re-authentication and a liveness heartbeat are different events with
+	// different callers and different frequencies, and folding them into
+	// one call would make a caller that means to refresh only one of the
+	// two silently refresh both.
+	UpdateAuthenticatedAt(ctx context.Context, id string, at time.Time) error
 }
 
 // generateSessionToken creates a cryptographically random session token.

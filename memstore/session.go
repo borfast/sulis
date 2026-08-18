@@ -79,6 +79,21 @@ func (s *SessionStore) DeleteUserSessions(_ context.Context, userID string) erro
 	return nil
 }
 
+// UpdateAuthenticatedAt stamps the session identified by id with at, leaving
+// every other field untouched, and returns sulis.ErrSessionNotFound if id
+// does not exist. This is the write path behind sulis.Sulis.ReAuthenticate.
+func (s *SessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[id]
+	if !ok {
+		return sulis.ErrSessionNotFound
+	}
+	sess.AuthenticatedAt = at
+	return nil
+}
+
 // CleanExpired removes every session whose ExpiresAt is in the past.
 func (s *SessionStore) CleanExpired(_ context.Context) error {
 	s.mu.Lock()

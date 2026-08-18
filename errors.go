@@ -26,6 +26,13 @@ var (
 	ErrSessionNotFound = errors.New("sulis: session not found")
 	ErrSessionExpired  = errors.New("sulis: session expired")
 
+	// ErrReauthRequired is returned by RequireRecentAuth when a session's
+	// AuthenticatedAt is older than the caller's maxAge. It means the
+	// session is otherwise valid — ValidateSession would still accept it —
+	// but too stale to authorize a step-up-gated operation without proving
+	// the credential again via ReAuthenticate.
+	ErrReauthRequired = errors.New("sulis: recent authentication required")
+
 	// Token errors.
 	ErrTokenInvalid     = errors.New("sulis: invalid token")
 	ErrTokenNotFound    = errors.New("sulis: token not found")

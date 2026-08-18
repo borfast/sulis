@@ -59,6 +59,12 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		if got.ExpiresAt.IsZero() {
 			t.Error("ExpiresAt is the zero time — a session with no expiry never expires")
 		}
+		if got.Method != sess.Method {
+			t.Errorf("Method = %q, want %q", got.Method, sess.Method)
+		}
+		if got.AuthenticatedAt.IsZero() {
+			t.Error("AuthenticatedAt is the zero time — RequireRecentAuth would fail closed on a session that was actually just issued")
+		}
 	})
 
 	t.Run("GetSessionByTokenHashUnknownReturnsErrSessionNotFound", func(t *testing.T) {
@@ -163,6 +169,43 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		}
 	})
 
+	t.Run("UpdateAuthenticatedAtStampsTheStoredSession", func(t *testing.T) {
+		store := factory()
+		sess := newSession(uniqueID("user"))
+		old := time.Now().Add(-2 * time.Hour)
+		sess.AuthenticatedAt = old
+		if err := store.CreateSession(ctx, sess); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+
+		fresh := time.Now()
+		if err := store.UpdateAuthenticatedAt(ctx, sess.ID, fresh); err != nil {
+			t.Fatalf("UpdateAuthenticatedAt: %v", err)
+		}
+
+		got, err := store.GetSessionByTokenHash(ctx, sess.TokenHash)
+		if err != nil {
+			t.Fatalf("GetSessionByTokenHash: %v", err)
+		}
+		if !got.AuthenticatedAt.After(old) {
+			t.Fatalf("AuthenticatedAt = %v, want a time after %v", got.AuthenticatedAt, old)
+		}
+		// Nothing else about the session should move.
+		if got.ID != sess.ID || got.UserID != sess.UserID || got.TokenHash != sess.TokenHash {
+			t.Fatalf("UpdateAuthenticatedAt changed identity fields: got %+v", got)
+		}
+		if !got.ExpiresAt.Equal(sess.ExpiresAt) {
+			t.Fatalf("UpdateAuthenticatedAt changed ExpiresAt: got %v, want %v", got.ExpiresAt, sess.ExpiresAt)
+		}
+	})
+
+	t.Run("UpdateAuthenticatedAtUnknownIDReturnsErrSessionNotFound", func(t *testing.T) {
+		store := factory()
+		if err := store.UpdateAuthenticatedAt(ctx, uniqueID("session"), time.Now()); !errors.Is(err, sulis.ErrSessionNotFound) {
+			t.Fatalf("UpdateAuthenticatedAt for an unknown session error = %v, want ErrSessionNotFound", err)
+		}
+	})
+
 	t.Run("ReturnedSessionsAreIndependentOfStoredState", func(t *testing.T) {
 		store := factory()
 		sess := newSession(uniqueID("user"))
@@ -231,10 +274,12 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 func newSession(userID string) *sulis.Session {
 	now := time.Now()
 	return &sulis.Session{
-		ID:        uniqueID("session"),
-		UserID:    userID,
-		TokenHash: uniqueHash("session"),
-		ExpiresAt: now.Add(time.Hour),
-		CreatedAt: now,
+		ID:              uniqueID("session"),
+		UserID:          userID,
+		TokenHash:       uniqueHash("session"),
+		ExpiresAt:       now.Add(time.Hour),
+		CreatedAt:       now,
+		AuthenticatedAt: now,
+		Method:          sulis.AuthMethodPassword,
 	}
 }
