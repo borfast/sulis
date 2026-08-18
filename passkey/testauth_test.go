@@ -88,18 +88,28 @@ func newTestAuthenticator(t *testing.T) *testAuthenticator {
 // coseKey returns the authenticator's public key in the COSE_Key CBOR
 // encoding that go-webauthn's webauthncose.ParsePublicKey expects: an integer
 // keyed map of kty (1) = EC2, alg (3) = ES256, crv (-1) = P-256, and the x
-// (-2) and y (-3) coordinates as fixed 32-byte strings. The coordinates must
-// be exactly the curve's byte length or validateEC2PublicKey rejects the key,
-// which is why FillBytes is used rather than Bytes.
+// (-2) and y (-3) coordinates as fixed 32-byte strings. The coordinates come
+// from PublicKey.Bytes' uncompressed-point encoding (0x04 ‖ X ‖ Y, each
+// already padded to the curve's 32-byte length, which validateEC2PublicKey
+// requires) rather than the ecdsa.PublicKey.X/Y fields, deprecated since
+// Go 1.26.
 func (a *testAuthenticator) coseKey() []byte {
 	a.t.Helper()
 
+	point, err := a.key.PublicKey.Bytes()
+	if err != nil {
+		a.t.Fatalf("encoding public key point: %v", err)
+	}
+	if len(point) != 65 || point[0] != 0x04 {
+		a.t.Fatalf("unexpected uncompressed point encoding: %d bytes, prefix %#x", len(point), point[0])
+	}
+
 	key := map[int]any{
-		1:  2,  // kty: EC2.
-		3:  -7, // alg: ES256.
-		-1: 1,  // crv: P-256.
-		-2: a.key.PublicKey.X.FillBytes(make([]byte, 32)),
-		-3: a.key.PublicKey.Y.FillBytes(make([]byte, 32)),
+		1:  2,            // kty: EC2.
+		3:  -7,           // alg: ES256.
+		-1: 1,            // crv: P-256.
+		-2: point[1:33],  // x coordinate.
+		-3: point[33:65], // y coordinate.
 	}
 
 	encoded, err := webauthncbor.Marshal(key)
