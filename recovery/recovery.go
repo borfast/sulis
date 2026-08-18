@@ -22,7 +22,8 @@
 //     it, the same reasoning behind sulis's own session revocation on a
 //     password change.
 //  2. Record the event somewhere auditable — subscribe a WithEventSink
-//     (EventCodeConsumed / EventCodeRejected / EventCodesExhausted) or emit
+//     (EventCodeConsumed / EventCodeRejected / EventCodesExhausted /
+//     EventCodeRateLimited) or emit
 //     your own signal from the call site.
 //  3. Push the user toward re-enrolling a real second factor, especially
 //     once the returned remaining count reaches 0 (also reported as
@@ -156,15 +157,17 @@ func (s *Service) Generate(ctx context.Context, userID string) ([]string, error)
 //
 // If a Limiter is configured (WithLimiter), it is consulted first — before
 // the submitted code is even hashed or looked up. A denied attempt returns
-// ErrCodeRateLimited and never touches the store. An unmatched code
-// returns ErrCodeInvalid. remaining is always 0 when err is non-nil.
+// ErrCodeRateLimited and never touches the store, and emits
+// EventCodeRateLimited. An unmatched code returns ErrCodeInvalid.
+// remaining is always 0 when err is non-nil.
 //
 // Consume does not, by itself, revoke the user's other sessions, notify
 // anyone, or push the user toward re-enrolling a stronger factor — see this
 // package's doc comment for the full sequence a real integration needs,
 // which is the calling application's responsibility.
 func (s *Service) Consume(ctx context.Context, userID, code string) (remaining int, err error) {
-	if err := s.allow(ctx, "recovery:"+userID); err != nil {
+	if err = s.allow(ctx, "recovery:"+userID); err != nil {
+		s.emit(ctx, Event{Kind: EventCodeRateLimited, UserID: userID})
 		return 0, err
 	}
 

@@ -179,6 +179,35 @@ func TestEventSinkPanicDoesNotFailConsume(t *testing.T) {
 	}
 }
 
+// TestConsumeEmitsCodeRateLimitedOnDeniedAttempt mirrors
+// TestConsumeEmitsCodeRejectedOnInvalidCode: a Limiter denial is a distinct
+// security decision from an unmatched code, so it gets its own EventKind
+// (EventCodeRateLimited) rather than silently producing no event at all —
+// see EventCodeRateLimited's doc comment for why an operator watching only
+// EventCodeRejected would otherwise never see rate-limited guessing.
+func TestConsumeEmitsCodeRateLimitedOnDeniedAttempt(t *testing.T) {
+	store := newMemStore()
+	sink := &recordingSink{}
+	limiter := &fakeLimiter{denied: true}
+	svc := NewService(store, WithLimiter(limiter), WithEventSink(sink))
+	ctx := context.Background()
+
+	if _, err := svc.Generate(ctx, "user1"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := svc.Consume(ctx, "user1", "irrelevant-code"); !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("Consume error = %v, want ErrCodeRateLimited", err)
+	}
+
+	events := sink.all()
+	if len(events) != 1 || events[0].Kind != EventCodeRateLimited {
+		t.Fatalf("events = %+v, want exactly one EventCodeRateLimited", events)
+	}
+	if events[0].UserID != "user1" {
+		t.Fatalf("event UserID = %q, want %q", events[0].UserID, "user1")
+	}
+}
+
 // --- Taxonomy completeness --------------------------------------------------
 
 // TestEveryDeclaredRecoveryEventKindIsEmitted mirrors the root package's
@@ -194,13 +223,21 @@ func TestEveryDeclaredRecoveryEventKindIsEmitted(t *testing.T) {
 
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithCount(1), WithEventSink(sink))
+	limiter := &fakeLimiter{}
+	svc := NewService(store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
+
+	limiter.denied = true
+	if _, err := svc.Consume(ctx, "user1", "wrong-code"); !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("Consume(rate limited): %v", err)
+	}
+	limiter.denied = false
+
 	if _, err := svc.Consume(ctx, "user1", "wrong-code"); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(wrong code): %v", err)
 	}
@@ -240,14 +277,15 @@ func declaredRecoveryEventKinds(t *testing.T) []EventKind {
 
 // --- The no-secrets property -------------------------------------------
 
-// TestNoRecoveryEventCarriesTheCode drives Consume through a rejection and
-// a success, then scans every emitted event for the plaintext codes and
-// their hashes. Mirrors the root package's TestNoEventCarriesSecretMaterial
-// (events_test.go).
+// TestNoRecoveryEventCarriesTheCode drives Consume through a rate-limited
+// denial, a rejection, and a success, then scans every emitted event for
+// the plaintext codes and their hashes. Mirrors the root package's
+// TestNoEventCarriesSecretMaterial (events_test.go).
 func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithCount(1), WithEventSink(sink))
+	limiter := &fakeLimiter{}
+	svc := NewService(store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -258,7 +296,17 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	secretHash := hashCode(secret)
 	const wrongCode = "wrong-code-entirely"
 
-	// A rejection first, so the wrong code (and its hash) is also in the
+	// A rate-limited attempt first, handing Consume the real secret so a
+	// leak in EventCodeRateLimited's payload would be caught exactly like
+	// the other two kinds below. The Limiter denies before the store is
+	// ever touched, so the code is still unconsumed afterward.
+	limiter.denied = true
+	if _, err := svc.Consume(ctx, "user1", secret); !errors.Is(err, ErrCodeRateLimited) {
+		t.Fatalf("Consume(rate limited): %v", err)
+	}
+	limiter.denied = false
+
+	// A rejection next, so the wrong code (and its hash) is also in the
 	// secret set the scan checks against — Consume must not echo back what
 	// it was handed even when refusing it.
 	if _, err := svc.Consume(ctx, "user1", wrongCode); !errors.Is(err, ErrCodeInvalid) {
