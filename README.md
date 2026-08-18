@@ -641,6 +641,11 @@ It is not for production: nothing survives a restart, nothing is shared between 
 
 ## Security Notes
 
+See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability and the
+supported-version policy, and [`docs/threat-model.md`](docs/threat-model.md)
+for the full threat model — in-scope threats and their shipped mitigations,
+what's explicitly out of scope, and known residual risks.
+
 - `Token.TokenHash` stores a SHA-256 hash of a reset, magic-link, two-factor, or email-verification token. Raw tokens are returned once for delivery and should never be persisted. `Token.Email` is set for magic-link tokens issued before the user account exists, and for email-verification tokens (bound to the address they prove, so a later email change invalidates them); it is empty for password-reset and two-factor tokens.
 - Session tokens are opaque bearer tokens. `SessionStore` implementations persist only `TokenHash` (the root package always clears `Session.Token` before calling `CreateSession`) and perform `GetSessionByTokenHash` lookups against the hash of the presented session token rather than the raw token. `ValidateSession` likewise never returns the raw token to the caller.
 - TOTP secrets (`totp.Credential.Secret`) and passkey public keys are handed to your stores as-is, **unless** you configure `totp.WithEncryptor` — see [Encrypting stored secrets](#encrypting-stored-secrets) — in which case your `totp.Store` only ever sees the configured `Encryptor`'s ciphertext. Recovery codes and all `sulis` tokens/sessions are hashed before your store ever sees them. See [Operational requirements](#operational-requirements) for what an unconfigured `Encryptor` implies for TOTP secrets specifically.
