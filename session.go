@@ -287,6 +287,21 @@ func (s *Sulis) ListUserSessions(ctx context.Context, userID string) ([]Session,
 // session on its way to ErrAccountDisabled, consistent with the fail-closed
 // direction above.
 //
+// The reloaded user is then held to RequireVerifiedEmail (default true) as
+// well, returning ErrEmailNotVerified — a refresh mints a session, and every
+// other minting path applies that gate. Register's signup session is the one
+// deliberate exemption, so that a new user can hold a session long enough to
+// click the verification link; without this check that exemption never
+// expired, because the signup session could be rotated indefinitely and an
+// account that never verified would keep a live session forever. The same
+// delete-first ordering applies here too: a refresh refused for an
+// unverified account still costs the caller their old session, exactly as
+// the disabled-account case does. That is the intended trade — the caller
+// verifies their address and signs in again, and the alternative (mint
+// first, gate after) is the failure mode this whole ordering exists to
+// prevent. Pass WithRequireVerifiedEmail(false) to restore unconditional
+// rotation.
+//
 // RefreshSession takes no RequestInfo — Appendix A gives it none — so IP
 // and UserAgent are carried forward from the caller's (possibly stale)
 // in-memory session rather than re-derived from the current request. A
@@ -303,6 +318,9 @@ func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session,
 		return nil, "", err
 	}
 	if err := s.accountStatus(user); err != nil {
+		return nil, "", err
+	}
+	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, "", err
 	}
 

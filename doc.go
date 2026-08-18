@@ -31,7 +31,8 @@
 // an in-process rate limiter guards password, reset, and magic-link attempts
 // before any other option is set; new passwords are screened against a
 // breach corpus; a new session is refused for an account whose email isn't
-// verified yet; a WebAuthn passkey requires user verification (a PIN or a
+// verified yet, including the rotation RefreshSession would otherwise mint
+// from a signup session; a WebAuthn passkey requires user verification (a PIN or a
 // biometric), not bare possession of an unlocked device; cookie sessions
 // carry HttpOnly, Secure, SameSite=Lax, and a __Host- name; and changing a
 // password revokes every other session on the account. Every one of these

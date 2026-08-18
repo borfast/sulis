@@ -187,13 +187,18 @@ entry rather than many small ones — see `CONTRIBUTING.md`.
   `time.Time`.
 - `RevokeSessionsOnPasswordChange` (default `true`): `ChangePassword` and
   `ResetPassword` now revoke every other session on the account and purge
-  outstanding reset tokens as part of applying a new password.
+  outstanding reset tokens as part of applying a new password. Every
+  password-setting path also purges the account's pending two-factor and
+  outstanding magic-link tokens, whatever this setting says — a magic link
+  is a mailbox-derived credential a password rotation is often being
+  performed to escape.
 - `RequireVerifiedEmail` (default `true`): new sessions are refused for an
   account whose email isn't verified yet, except through `Register`'s own
   signup session and `RedeemMagicLink` (which verifies the email itself).
-  This is a behavior change for existing consumers with no verification
-  flow wired up — pass `WithRequireVerifiedEmail(false)` explicitly if
-  that's you.
+  `RefreshSession` applies the gate too, so `Register`'s exemption covers
+  that one session rather than a renewable one. This is a behavior change
+  for existing consumers with no verification flow wired up — pass
+  `WithRequireVerifiedEmail(false)` explicitly if that's you.
 - README and `doc.go` were updated by the task that changed each behavior
   described in this entry, not in a later sweep — so the README reflects
   current behavior throughout, not just at the points called out here.

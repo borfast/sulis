@@ -293,11 +293,14 @@ func TestEachDecisionPointEmitsItsEventKind(t *testing.T) {
 			name: "a session is refreshed",
 			want: EventSessionRefreshed,
 			run: func(t *testing.T, sink *recordingSink) {
-				s, _, _, _ := newTestEnv(eventOpts(sink)...)
+				s, users, _, _ := newTestEnv(eventOpts(sink)...)
 				_, session, _, err := s.Register(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo)
 				if err != nil {
 					t.Fatalf("Register: %v", err)
 				}
+				// RefreshSession applies RequireVerifiedEmail like every
+				// other minting path; verification is incidental here.
+				verifyUserEmail(t, users, session.UserID)
 				if _, _, err := s.RefreshSession(context.Background(), session); err != nil {
 					t.Fatalf("RefreshSession: %v", err)
 				}

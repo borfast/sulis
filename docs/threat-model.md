@@ -152,6 +152,10 @@ named here; this document only asserts what each one is *for*.
   succeeds, and re-checks account status before minting — so a caller
   holding a stale `*Session` from before a revocation (explicit, or via a
   disabled/locked account) cannot use `RefreshSession` to un-evict itself.
+  It applies `RequireVerifiedEmail` too, so `Register`'s deliberate
+  exemption for the signup session covers that one session rather than
+  becoming an indefinitely renewable one for an account that never
+  verifies.
 
 ### 2FA bypass
 

@@ -4453,7 +4453,7 @@ func TestValidateSessionThrottlesTheLastSeenTouch(t *testing.T) {
 // fresh authentication proof, and must not reset the step-up clock
 // RequireRecentAuth reads.
 func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
-	s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
 	ri := RequestInfo{IP: "203.0.113.9", UserAgent: "refresh-test-agent/1.0"}
 
@@ -4461,6 +4461,10 @@ func TestRefreshSessionRotatesTokenAndPreservesAuthenticatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	// Verification is incidental to this test — the rotation mechanics are
+	// what it pins; the gate itself is covered by
+	// TestRefreshSessionRejectsUnverifiedEmail.
+	verifyUserEmail(t, users, session.UserID)
 
 	// Backdate AuthenticatedAt directly, so "preserved" is distinguishable
 	// from "coincidentally close to time.Now()".
@@ -4600,6 +4604,81 @@ func TestRefreshSessionRejectsDisabledAccountWhoseSessionSurvived(t *testing.T) 
 	if _, _, err := s.ValidateSession(ctx, oldToken); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("ValidateSession(oldToken) after a disabled-account refresh attempt: error = %v, want ErrSessionNotFound", err)
 	}
+}
+
+// TestRefreshSessionRejectsUnverifiedEmail closes the last minting path that
+// skipped the verified-email gate.
+//
+// Register's signup session is deliberately exempt from RequireVerifiedEmail
+// — a user must be able to hold a session long enough to click the link —
+// but the exemption was meant to expire with that session. RefreshSession
+// checked accountStatus and nothing else, so an unverified account could
+// rotate its signup session forever and never verify anything, which is
+// exactly what README's "New sessions are blocked for unverified accounts by
+// default" and doc.go's own summary of the default promise cannot happen.
+//
+// The refusal is fail-closed in the same direction as the disabled-account
+// case: the old row is deleted first, so a refused refresh costs the caller
+// their existing session too.
+func TestRefreshSessionRejectsUnverifiedEmail(t *testing.T) {
+	t.Run("UnverifiedIsRefusedAndBurnsTheOldSession", func(t *testing.T) {
+		s, _, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		ctx := context.Background()
+
+		_, session, oldToken, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		before := sessions.count()
+		if _, _, err := s.RefreshSession(ctx, session); !errors.Is(err, ErrEmailNotVerified) {
+			t.Fatalf("RefreshSession for an unverified account: error = %v, want ErrEmailNotVerified", err)
+		}
+		if got := sessions.count(); got != before-1 {
+			t.Fatalf("RefreshSession left %d sessions, want %d — the old row is deleted before the gate runs", got, before-1)
+		}
+		if _, _, err := s.ValidateSession(ctx, oldToken); !errors.Is(err, ErrSessionNotFound) {
+			t.Fatalf("ValidateSession(oldToken) after a refused refresh: error = %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("VerifiedStillRotates", func(t *testing.T) {
+		s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		ctx := context.Background()
+
+		_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		verifyUserEmail(t, users, session.UserID)
+
+		fresh, newToken, err := s.RefreshSession(ctx, session)
+		if err != nil {
+			t.Fatalf("RefreshSession for a verified account: %v", err)
+		}
+		if fresh == nil || newToken == "" {
+			t.Fatal("RefreshSession returned no session or no token for a verified account")
+		}
+		if _, _, err := s.ValidateSession(ctx, newToken); err != nil {
+			t.Fatalf("ValidateSession(newToken): %v", err)
+		}
+	})
+
+	t.Run("OptedOutStillRotates", func(t *testing.T) {
+		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithRequireVerifiedEmail(false))
+		ctx := context.Background()
+
+		_, session, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		if _, newToken, err := s.RefreshSession(ctx, session); err != nil {
+			t.Fatalf("RefreshSession with WithRequireVerifiedEmail(false): %v", err)
+		} else if _, _, err := s.ValidateSession(ctx, newToken); err != nil {
+			t.Fatalf("ValidateSession(newToken): %v", err)
+		}
+	})
 }
 
 // TestReAuthenticateRejectsDisabledAccount closes the gap the T501 Decisions
