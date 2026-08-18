@@ -32,7 +32,15 @@ func (s *Sulis) DisableUser(ctx context.Context, userID, reason string) error {
 	if err != nil {
 		return err
 	}
-	return s.sessions.DeleteUserSessions(ctx, user.ID)
+	// Emitted on the stamp, before the revocation below: the stamp IS the
+	// disable (see this method's doc comment), and the revocation is the
+	// follow-through that a failure would not undo.
+	//
+	// reason is deliberately not carried. It is an operator-supplied string
+	// sulis never inspects, and copying caller input into an event is the
+	// one habit the no-secrets rule (events.go) exists to prevent.
+	s.emit(ctx, Event{Kind: EventAccountDisabled, UserID: user.ID})
+	return s.revokeUserSessions(ctx, user.ID)
 }
 
 // EnableUser reverses a previous DisableUser call: DisabledAt and
@@ -53,7 +61,11 @@ func (s *Sulis) EnableUser(ctx context.Context, userID string) error {
 		u.UpdatedAt = time.Now()
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventAccountEnabled, UserID: userID})
+	return nil
 }
 
 // accountStatus reports whether user may authenticate right now: nil if the
@@ -99,16 +111,30 @@ func (s *Sulis) accountStatus(user *User) error {
 // receive ErrInvalidCredentials regardless.
 func (s *Sulis) recordFailedLogin(ctx context.Context, userID string) {
 	now := time.Now()
-	_, _ = s.updateUserWithRetry(ctx, userID, func(u *User) error {
+	// Set inside the closure and reset on every attempt, so a retry that
+	// re-reads a row someone else has meanwhile unlocked reports what the
+	// write that actually landed did, not what an abandoned earlier attempt
+	// would have done.
+	var locked bool
+	_, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
+		locked = false
 		u.FailedLoginAttempts++
 		if u.FailedLoginAttempts >= s.cfg.FailureLockoutThreshold {
 			excess := u.FailedLoginAttempts - s.cfg.FailureLockoutThreshold
 			until := now.Add(lockoutBackoff(s.cfg.FailureLockoutBaseBackoff, s.cfg.FailureLockoutMaxBackoff, excess))
 			u.LockedUntil = &until
+			locked = true
 		}
 		u.UpdatedAt = now
 		return nil
 	})
+	// Only a write that actually landed and actually set a deadline is an
+	// account.locked. A failure below the threshold is already reported as
+	// the EventLoginFailed its caller emits; saying "locked" for it would
+	// make the event mean nothing.
+	if err == nil && locked {
+		s.emit(ctx, Event{Kind: EventAccountLocked, UserID: userID})
+	}
 }
 
 // clearFailedLogins resets the automatic-lockout bookkeeping after a
@@ -119,12 +145,15 @@ func (s *Sulis) recordFailedLogin(ctx context.Context, userID string) {
 // receive a successful result, and a bookkeeping failure here must not turn
 // that into an error instead.
 func (s *Sulis) clearFailedLogins(ctx context.Context, userID string) {
-	_, _ = s.updateUserWithRetry(ctx, userID, func(u *User) error {
+	_, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
 		u.FailedLoginAttempts = 0
 		u.LockedUntil = nil
 		u.UpdatedAt = time.Now()
 		return nil
 	})
+	if err == nil {
+		s.emit(ctx, Event{Kind: EventAccountLockoutCleared, UserID: userID})
+	}
 }
 
 // lockoutBackoff computes the automatic-lockout duration for excess

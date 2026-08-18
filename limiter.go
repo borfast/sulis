@@ -179,5 +179,5 @@ func (s *Sulis) allowIP(ctx context.Context, prefix string, ri RequestInfo) erro
 	if ri.IP == "" {
 		return nil
 	}
-	return s.allow(ctx, prefix+"ip:"+ri.IP)
+	return s.allow(ctx, prefix+"ip:"+ri.IP, ri)
 }

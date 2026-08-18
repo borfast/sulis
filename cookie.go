@@ -115,7 +115,28 @@ func isSafeMethod(method string) bool {
 // that also omits Origin on some cross-site state-changing request — is
 // the reason RequireCSRFToken exists as defense in depth: it does not
 // depend on either header at all.
+// It emits no security event: a package-level function has no Sulis and so
+// no configured EventSink to emit to. Use the identically-behaved
+// (*Sulis).RequireSameOrigin method instead if you want rejections to reach
+// your sink as EventSameOriginRejected.
 func RequireSameOrigin(allowed []string) func(http.Handler) http.Handler {
+	return requireSameOrigin(nil, allowed)
+}
+
+// RequireSameOrigin is the package-level RequireSameOrigin bound to this
+// Sulis, so a rejection reaches the configured EventSink as
+// EventSameOriginRejected — carrying ReasonCrossSite or
+// ReasonOriginNotAllowed, which of the two checks refused. The policy is
+// identical in every other respect; see the package-level function's doc
+// comment for it, and the T509 Decisions row in PROGRESS.md for why this is
+// a same-named method rather than a rename.
+func (s *Sulis) RequireSameOrigin(allowed []string) func(http.Handler) http.Handler {
+	return requireSameOrigin(s, allowed)
+}
+
+// requireSameOrigin is the shared implementation. A nil *Sulis means "no
+// events" — emit is nil-receiver safe for exactly this.
+func requireSameOrigin(s *Sulis, allowed []string) func(http.Handler) http.Handler {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, origin := range allowed {
 		allowedSet[origin] = struct{}{}
@@ -132,6 +153,7 @@ func RequireSameOrigin(allowed []string) func(http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 
 			allow := false
+			reason := ReasonCrossSite
 			switch {
 			case secFetchSite == "" && origin == "":
 				// Neither header present: not a browser request context
@@ -141,10 +163,19 @@ func RequireSameOrigin(allowed []string) func(http.Handler) http.Handler {
 				// same-origin, same-site, or none.
 				allow = true
 			case origin != "":
+				// Reached either because Sec-Fetch-Site said cross-site or
+				// because it was absent; either way the verdict now rests
+				// on the allowlist, so that is what a rejection reports.
 				_, allow = allowedSet[origin]
+				reason = ReasonOriginNotAllowed
 			}
 
 			if !allow {
+				s.emit(r.Context(), Event{
+					Kind:        EventSameOriginRejected,
+					RequestInfo: requestInfoFromRequest(r),
+					Metadata:    meta(string(MetaReason), reason),
+				})
 				w.Header().Set("Cache-Control", "no-store")
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return

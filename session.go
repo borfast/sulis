@@ -333,6 +333,21 @@ func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session,
 		return nil, "", err
 	}
 
+	// SessionID is the NEW row's ID. A refresh is a rotation, not a fresh
+	// authentication, so this is deliberately not EventSessionIssued: a sink
+	// counting sign-ins must not count rotations among them.
+	//
+	// RequestInfo is left zero for the same reason ValidateSession's expiry
+	// events leave it zero (see emitSessionEnded): RefreshSession takes
+	// none, and the IP/UserAgent carried forward on the session describe the
+	// request that issued it, possibly long ago and somewhere else.
+	s.emit(ctx, Event{
+		Kind:      EventSessionRefreshed,
+		UserID:    fresh.UserID,
+		SessionID: fresh.ID,
+		Metadata:  meta(string(MetaMethod), string(fresh.Method)),
+	})
+
 	return fresh, token, nil
 }
 

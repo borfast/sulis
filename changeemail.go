@@ -50,7 +50,16 @@ func (s *Sulis) ChangeEmail(ctx context.Context, userID, newEmail string) (strin
 	// outstanding token. That's harmless: nothing reads PendingEmail as live,
 	// no verification state changes, and the next ChangeEmail call simply
 	// overwrites it with a fresh token.
-	return s.createTokenForUserWithEmail(ctx, userID, newEmail, TokenPurposeEmailChange, s.cfg.EmailVerificationTokenDuration)
+	raw, err := s.createTokenForUserWithEmail(ctx, userID, newEmail, TokenPurposeEmailChange, s.cfg.EmailVerificationTokenDuration)
+	if err != nil {
+		return "", err
+	}
+	// Neither the old nor the new address is carried: an email-change event
+	// naming both addresses would be the most useful line in any log and the
+	// most damaging one to leak. That an account staged a change is the
+	// security-relevant fact; which address it staged is in the user row.
+	s.emit(ctx, Event{Kind: EventEmailChangeStaged, UserID: userID})
+	return raw, nil
 }
 
 // ConfirmEmailChange consumes a token issued by ChangeEmail. If the token
@@ -117,7 +126,7 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 	// the same shape as setPassword's post-write cleanup in sulis.go. The
 	// swap itself has already committed by this point, so a failure here is
 	// a bug report for whichever call errored, not a new class of risk.
-	if err := s.sessions.DeleteUserSessions(ctx, updated.ID); err != nil {
+	if err := s.revokeUserSessions(ctx, updated.ID); err != nil {
 		return nil, err
 	}
 	if err := s.tokens.DeleteUserTokens(ctx, updated.ID, TokenPurposePasswordReset); err != nil {
@@ -127,5 +136,6 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 		return nil, err
 	}
 
+	s.emit(ctx, Event{Kind: EventEmailChangeConfirmed, UserID: updated.ID})
 	return updated, nil
 }

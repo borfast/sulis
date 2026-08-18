@@ -82,16 +82,22 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 	// disabled or locked account should not surface a more specific
 	// "unverified email" error.
 	if err := s.accountStatus(user); err != nil {
+		s.emitLoginFailedVia(ctx, user.ID, ri, method, gateReason(err))
 		return nil, err
 	}
 	if err := s.requireVerifiedEmail(user); err != nil {
+		s.emitLoginFailedVia(ctx, user.ID, ri, method, gateReason(err))
 		return nil, err
 	}
 
 	hasSecond, err := s.factors.HasSecondFactor(ctx, user.ID)
 	if err != nil {
 		// Fail closed. An unavailable checker must never quietly downgrade an
-		// account to a single factor.
+		// account to a single factor. Emitted rather than left to the
+		// returned error alone: failing closed is the correct behaviour but
+		// an invisible one, and a checker outage that silently turns every
+		// login into an error is exactly what an operator needs told.
+		s.emitLoginFailedVia(ctx, user.ID, ri, method, ReasonFactorCheckFailed)
 		return nil, fmt.Errorf("sulis: checking second factor: %w", err)
 	}
 
@@ -100,6 +106,12 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 		if err != nil {
 			return nil, err
 		}
+		s.emit(ctx, Event{
+			Kind:        EventSecondFactorDemanded,
+			UserID:      user.ID,
+			RequestInfo: ri,
+			Metadata:    meta(string(MetaMethod), string(method)),
+		})
 		return &LoginResult{User: user, NeedsSecondFactor: true, PendingToken: pending}, nil
 	}
 
@@ -260,6 +272,18 @@ func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMet
 	if err := s.sessions.CreateSession(ctx, session); err != nil {
 		return nil, "", err
 	}
+
+	// Every path that mints a session comes through here — Register, Login,
+	// a redeemed magic link, CompleteTwoFactor, IssueSession,
+	// IssueSessionUnchecked — so this one emission is the whole "somebody is
+	// now signed in" signal and no caller has to remember to make it.
+	s.emit(ctx, Event{
+		Kind:        EventSessionIssued,
+		UserID:      userID,
+		SessionID:   session.ID,
+		RequestInfo: ri,
+		Metadata:    meta(string(MetaMethod), string(method)),
+	})
 
 	return session, token, nil
 }

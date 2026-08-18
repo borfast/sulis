@@ -86,13 +86,42 @@ func IssueCSRFToken() (token string, cookie *http.Cookie, err error) {
 // Apply this to routes reachable via a cookie-authenticated session; a
 // route reachable only via an Authorization: Bearer header (see
 // WithTokenSource(TokenSourceBearerOnly)) gains nothing from it.
+// It emits no security event: a package-level function has no Sulis and so
+// no configured EventSink to emit to. Use the identically-behaved
+// (*Sulis).RequireCSRFToken method instead if you want rejections to reach
+// your sink as EventCSRFRejected.
 func RequireCSRFToken(next http.Handler) http.Handler {
+	return requireCSRFToken(nil, next)
+}
+
+// RequireCSRFToken is the package-level RequireCSRFToken bound to this Sulis,
+// so a rejection reaches the configured EventSink as EventCSRFRejected. The
+// check itself is identical — same VerifyCSRFToken, same 403, same
+// Cache-Control — and either form may be used; this one is simply the one
+// that can report.
+//
+// A method and a package-level function of the same name is deliberate
+// rather than a rename: RequireCSRFToken is already-shipped public API, and
+// emitting requires state (the sink) that a free function has no way to
+// reach. See the T509 Decisions row in PROGRESS.md.
+func (s *Sulis) RequireCSRFToken(next http.Handler) http.Handler {
+	return requireCSRFToken(s, next)
+}
+
+// requireCSRFToken is the shared implementation. A nil *Sulis means "no
+// events" — emit is nil-receiver safe for exactly this.
+func requireCSRFToken(s *Sulis, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isSafeMethod(r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		if err := VerifyCSRFToken(r); err != nil {
+			s.emit(r.Context(), Event{
+				Kind:        EventCSRFRejected,
+				RequestInfo: requestInfoFromRequest(r),
+				Metadata:    meta(string(MetaReason), ReasonCSRFTokenInvalid),
+			})
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return

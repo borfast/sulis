@@ -92,6 +92,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 	if err := s.users.CreateUser(ctx, user); err != nil {
 		return nil, nil, "", err
 	}
+	s.emit(ctx, Event{Kind: EventAccountRegistered, UserID: user.ID, RequestInfo: ri})
 
 	session, token, err := s.createSession(ctx, user.ID, AuthMethodPassword, now, ri)
 	if err != nil {
@@ -132,7 +133,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, err
 	}
 
-	if err := s.allow(ctx, "password:"+email); err != nil {
+	if err := s.allow(ctx, "password:"+email, ri); err != nil {
 		return nil, err
 	}
 	if err := s.allowIP(ctx, "password:", ri); err != nil {
@@ -145,6 +146,11 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 			// Run the same Argon2 work a real verification would, so the
 			// response time doesn't reveal whether the account exists.
 			_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
+			// The event carries no UserID (there is no account) and, by
+			// the no-secrets rule, not the submitted address either — a
+			// spray is still visible through RequestInfo and the
+			// EventRateLimitTripped events beside it.
+			s.emitLoginFailed(ctx, "", ri, ReasonUserNotFound)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
@@ -153,6 +159,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	if user.PasswordHash == "" {
 		// Passwordless user: verify against the dummy hash for the same reason.
 		_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
+		s.emitLoginFailed(ctx, user.ID, ri, ReasonNoPassword)
 		return nil, ErrInvalidCredentials
 	}
 
@@ -164,6 +171,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		if s.cfg.FailureLockoutThreshold > 0 {
 			s.recordFailedLogin(ctx, user.ID)
 		}
+		s.emitLoginFailed(ctx, user.ID, ri, ReasonWrongPassword)
 		return nil, ErrInvalidCredentials
 	}
 
@@ -176,6 +184,9 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	// hand. Only a successful verification reaches this point, so a failed
 	// or unknown-user/passwordless login never rehashes anything, and this
 	// runs after the ok check above rather than changing its timing.
+	if legacyForm {
+		s.emit(ctx, Event{Kind: EventPasswordLegacyFormMatched, UserID: user.ID, RequestInfo: ri})
+	}
 	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
 		s.rehashPassword(ctx, user, password)
 	}
@@ -188,6 +199,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	// or locked purely from the shape of the error, without ever guessing
 	// the password. See accountStatus's doc comment.
 	if err := s.accountStatus(user); err != nil {
+		s.emitLoginFailed(ctx, user.ID, ri, gateReason(err))
 		return nil, err
 	}
 
@@ -199,7 +211,38 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		s.clearFailedLogins(ctx, user.ID)
 	}
 
+	s.emit(ctx, Event{
+		Kind:        EventLoginSucceeded,
+		UserID:      user.ID,
+		RequestInfo: ri,
+		Metadata:    meta(string(MetaMethod), string(AuthMethodPassword)),
+	})
 	return user, nil
+}
+
+// emitLoginFailed reports a refused authentication attempt. It exists
+// because the refusal is decided in six different places — three in
+// VerifyPassword, three in completeFirstFactor — and one helper keeps the
+// kind, the method label, and the reason key from drifting apart between
+// them. reason may be "" for a verdict gateReason does not recognise; the
+// key is then omitted rather than filled with a guess.
+func (s *Sulis) emitLoginFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
+	s.emitLoginFailedVia(ctx, userID, ri, AuthMethodPassword, reason)
+}
+
+// emitLoginFailedVia is emitLoginFailed for a flow whose first factor is not
+// a password — a redeemed magic link reaching completeFirstFactor's gates.
+func (s *Sulis) emitLoginFailedVia(ctx context.Context, userID string, ri RequestInfo, method AuthMethod, reason string) {
+	pairs := []string{string(MetaMethod), string(method)}
+	if reason != "" {
+		pairs = append(pairs, string(MetaReason), reason)
+	}
+	s.emit(ctx, Event{
+		Kind:        EventLoginFailed,
+		UserID:      userID,
+		RequestInfo: ri,
+		Metadata:    meta(pairs...),
+	})
 }
 
 // rehashPassword upgrades user's stored hash to the currently configured
@@ -227,7 +270,7 @@ func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string)
 
 	newHash, err := hashPassword(password, s.cfg.Argon2, s.cfg.Pepper)
 	if err != nil {
-		// TODO(T509): emit rehash event
+		s.emitRehashFailed(ctx, user.ID, ReasonHashFailed)
 		return
 	}
 
@@ -244,10 +287,34 @@ func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string)
 		// Best-effort: see the doc comment above. errRehashPasswordChanged,
 		// ErrConcurrentUpdate exhausting its retries, and any store error
 		// all land here and are all equally fine to drop.
-		// TODO(T509): emit rehash event
+		//
+		// Dropping the error is exactly why this emits. Everywhere else in
+		// this package an infrastructure failure reaches the caller as an
+		// error and needs no event to be noticed; here the caller is
+		// deliberately told nothing, so the event is the only trace an
+		// upgrade was attempted and lost. Losing the guard's race is
+		// reported apart from a store failure — one means the account's
+		// password changed underneath, which is correct behaviour, and the
+		// other means the store is unwell.
+		reason := ReasonStoreFailed
+		if errors.Is(err, errRehashPasswordChanged) {
+			reason = ReasonPasswordChanged
+		}
+		s.emitRehashFailed(ctx, user.ID, reason)
 		return
 	}
-	// TODO(T509): emit rehash event
+	s.emit(ctx, Event{Kind: EventPasswordRehashed, UserID: user.ID})
+}
+
+// emitRehashFailed reports an upgrade that was attempted and did not land.
+// See EventPasswordRehashFailed and rehashPassword's doc comment above for
+// why a swallowed failure still gets an event.
+func (s *Sulis) emitRehashFailed(ctx context.Context, userID, reason string) {
+	s.emit(ctx, Event{
+		Kind:     EventPasswordRehashFailed,
+		UserID:   userID,
+		Metadata: meta(string(MetaReason), reason),
+	})
 }
 
 // errRehashPasswordChanged aborts rehashPassword's update when a concurrent
@@ -272,7 +339,7 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		return err
 	}
 
-	if err := s.allow(ctx, "password:"+user.Email); err != nil {
+	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
 		return err
 	}
 	if err := s.allowIP(ctx, "password:", ri); err != nil {
@@ -299,7 +366,11 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 		return nil
 	}
 
-	return s.setPassword(ctx, user.ID, newPassword, verifyOld)
+	if err := s.setPassword(ctx, user.ID, newPassword, verifyOld); err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventPasswordChanged, UserID: user.ID, RequestInfo: ri})
+	return nil
 }
 
 // SetInitialPassword sets the first password for a passwordless user.
@@ -310,12 +381,16 @@ func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword stri
 
 	// The passwordless check runs inside the update so two concurrent
 	// bootstrap attempts cannot both succeed.
-	return s.setPassword(ctx, userID, newPassword, func(u *User) error {
+	if err := s.setPassword(ctx, userID, newPassword, func(u *User) error {
 		if u.PasswordHash != "" {
 			return ErrInvalidCredentials
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventPasswordSet, UserID: userID})
+	return nil
 }
 
 // checkPasswordPolicy enforces everything sulis has to say about a password
@@ -436,7 +511,7 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 	}
 
 	if s.cfg.RevokeSessionsOnPasswordChange {
-		if err := s.sessions.DeleteUserSessions(ctx, user.ID); err != nil {
+		if err := s.revokeUserSessions(ctx, user.ID); err != nil {
 			return err
 		}
 	}
@@ -499,7 +574,7 @@ func (s *Sulis) createPasswordResetToken(ctx context.Context, email string, ri R
 		return "", err
 	}
 
-	if err := s.allow(ctx, "reset:"+email); err != nil {
+	if err := s.allow(ctx, "reset:"+email, ri); err != nil {
 		return "", err
 	}
 	if err := s.allowIP(ctx, "reset:", ri); err != nil {
@@ -524,7 +599,12 @@ func (s *Sulis) createPasswordResetToken(ctx context.Context, email string, ri R
 		return "", err
 	}
 
-	return s.createTokenForUser(ctx, user.ID, TokenPurposePasswordReset, s.cfg.TokenDuration)
+	raw, err := s.createTokenForUser(ctx, user.ID, TokenPurposePasswordReset, s.cfg.TokenDuration)
+	if err != nil {
+		return "", err
+	}
+	s.emit(ctx, Event{Kind: EventPasswordResetRequested, UserID: user.ID, RequestInfo: ri})
+	return raw, nil
 }
 
 // ResetPassword resets a user's password using a raw reset token. The
@@ -540,7 +620,11 @@ func (s *Sulis) ResetPassword(ctx context.Context, rawToken, newPassword string)
 		return err
 	}
 
-	return s.setPassword(ctx, token.UserID, newPassword, nil)
+	if err := s.setPassword(ctx, token.UserID, newPassword, nil); err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventPasswordReset, UserID: token.UserID})
+	return nil
 }
 
 // ValidateSession validates a session token and returns the session and user.
@@ -570,10 +654,12 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	now := time.Now()
 	if validated.IdleExpiresAt != nil && now.After(*validated.IdleExpiresAt) {
 		_ = s.sessions.DeleteSession(ctx, validated.UserID, validated.ID)
+		s.emitSessionEnded(ctx, EventSessionIdleExpired, &validated, ReasonIdleTimeout)
 		return nil, nil, ErrSessionExpired
 	}
 	if now.After(validated.ExpiresAt) {
 		_ = s.sessions.DeleteSession(ctx, validated.UserID, validated.ID)
+		s.emitSessionEnded(ctx, EventSessionExpired, &validated, ReasonAbsoluteExpiry)
 		return nil, nil, ErrSessionExpired
 	}
 
@@ -609,12 +695,62 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 // user, so a caller can only ever revoke their own sessions — guessing or
 // leaking another user's session ID cannot be used to end their session.
 func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID string) error {
-	return s.sessions.DeleteSession(ctx, userID, sessionID)
+	if err := s.sessions.DeleteSession(ctx, userID, sessionID); err != nil {
+		return err
+	}
+	s.emit(ctx, Event{
+		Kind:      EventSessionRevoked,
+		UserID:    userID,
+		SessionID: sessionID,
+		Metadata:  meta(string(MetaScope), ScopeSingleSession),
+	})
+	return nil
 }
 
 // RevokeAllSessions deletes all sessions for a user.
 func (s *Sulis) RevokeAllSessions(ctx context.Context, userID string) error {
-	return s.sessions.DeleteUserSessions(ctx, userID)
+	return s.revokeUserSessions(ctx, userID)
+}
+
+// revokeUserSessions deletes every session belonging to userID and reports
+// it. It is the single write path behind both the explicit
+// RevokeAllSessions and the implicit revocations other flows perform as a
+// consequence of something else — a password set (setPassword), an address
+// confirmed (ConfirmEmailChange), an account disabled (DisableUser), a first
+// verification on an account that already had a password
+// (stampEmailVerified).
+//
+// Routing them all through here is what makes "every session for this
+// account was ended" one event with one meaning, rather than something a
+// sink has to infer by knowing which of this package's flows happen to
+// cascade into a revocation.
+func (s *Sulis) revokeUserSessions(ctx context.Context, userID string) error {
+	if err := s.sessions.DeleteUserSessions(ctx, userID); err != nil {
+		return err
+	}
+	s.emit(ctx, Event{
+		Kind:     EventSessionRevoked,
+		UserID:   userID,
+		Metadata: meta(string(MetaScope), ScopeAllSessions),
+	})
+	return nil
+}
+
+// emitSessionEnded reports a session ValidateSession rejected and deleted.
+// Both expiry branches funnel through it so the two kinds cannot drift apart
+// in what they carry.
+//
+// RequestInfo is deliberately left zero. ValidateSession takes none, and
+// filling it from Session.IP/UserAgent would report the request that ISSUED
+// the session as though it were the request that just failed — a plausible
+// but wrong answer to "who was this?", which is worse than no answer.
+func (s *Sulis) emitSessionEnded(ctx context.Context, kind EventKind, session *Session, reason string) {
+	s.emit(ctx, Event{
+		Kind:      kind,
+		UserID:    session.UserID,
+		SessionID: session.ID,
+		Metadata:  meta(string(MetaReason), reason),
+	})
 }
 
 // createTokenForUser generates a token for the given user, purpose, and TTL.
@@ -671,11 +807,22 @@ func (s *Sulis) consumeToken(ctx context.Context, rawToken string, purpose Token
 // allow consults the configured rate limiter for key, if one is set. A nil
 // limiter is a no-op. Any error from the limiter is normalized to
 // ErrRateLimited so callers never leak limiter implementation details.
-func (s *Sulis) allow(ctx context.Context, key string) error {
+//
+// ri is not used to make the decision — the key already carries whichever
+// dimension is being throttled — only to attribute the
+// EventRateLimitTripped a denial emits. A trip nobody can attribute to a
+// caller is a counter, not a signal.
+func (s *Sulis) allow(ctx context.Context, key string, ri RequestInfo) error {
 	if s.cfg.Limiter == nil {
 		return nil
 	}
 	if err := s.cfg.Limiter.Allow(ctx, key); err != nil {
+		scope, dimension := limiterKeyParts(key)
+		s.emit(ctx, Event{
+			Kind:        EventRateLimitTripped,
+			RequestInfo: ri,
+			Metadata:    meta(string(MetaScope), scope, string(MetaDimension), dimension),
+		})
 		return ErrRateLimited
 	}
 	return nil

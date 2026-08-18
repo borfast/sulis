@@ -86,8 +86,14 @@ func (s *Sulis) stampEmailVerified(ctx context.Context, user *User) error {
 	// the verification and carries the current version.
 	*user = *updated
 
+	// Emitted here rather than in VerifyEmail, so the same event covers the
+	// magic-link path (RedeemMagicLink also stamps verification through this
+	// function). The already-verified early return above emits nothing: it
+	// decided nothing.
+	s.emit(ctx, Event{Kind: EventEmailVerified, UserID: user.ID})
+
 	if hadPassword {
-		if err := s.sessions.DeleteUserSessions(ctx, user.ID); err != nil {
+		if err := s.revokeUserSessions(ctx, user.ID); err != nil {
 			return err
 		}
 	}

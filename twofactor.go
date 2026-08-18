@@ -23,7 +23,16 @@ func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return "", err
 	}
-	return s.createTokenForUser(ctx, userID, TokenPurposeTwoFactor, s.cfg.TwoFactorTokenDuration)
+	raw, err := s.createTokenForUser(ctx, userID, TokenPurposeTwoFactor, s.cfg.TwoFactorTokenDuration)
+	if err != nil {
+		return "", err
+	}
+	// The same decision completeFirstFactor emits when it mints one of these
+	// itself: a verified first factor earned a pending token, not a session.
+	// Which credential passed the first factor is the caller's own business
+	// on this path — sulis did not verify it — so no method is claimed.
+	s.emit(ctx, Event{Kind: EventSecondFactorDemanded, UserID: userID})
+	return raw, nil
 }
 
 // CompleteTwoFactor consumes a two-factor pending-login token issued by
@@ -45,9 +54,17 @@ func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string
 func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, ri RequestInfo) (*LoginResult, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeTwoFactor)
 	if err != nil {
+		// No UserID: the token did not resolve to one, and userID is the
+		// caller's claim rather than anything sulis has verified.
+		s.emitSecondFactorFailed(ctx, "", ri, tokenReason(err))
 		return nil, err
 	}
 	if token.UserID != userID {
+		// Attributed to the token's OWNER, not to the claimed userID: the
+		// owner is the account whose pending login was just consumed by
+		// somebody naming a different one, and theirs is the account at
+		// risk.
+		s.emitSecondFactorFailed(ctx, token.UserID, ri, ReasonUserMismatch)
 		return nil, ErrTokenInvalid
 	}
 	user, err := s.users.GetUserByID(ctx, token.UserID)
@@ -60,9 +77,11 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	// factor and this completion step must not be able to finish logging
 	// in on the strength of a pending token minted before the disable.
 	if err := s.accountStatus(user); err != nil {
+		s.emitSecondFactorFailed(ctx, user.ID, ri, gateReason(err))
 		return nil, err
 	}
 	if err := s.requireVerifiedEmail(user); err != nil {
+		s.emitSecondFactorFailed(ctx, user.ID, ri, gateReason(err))
 		return nil, err
 	}
 	// Both factors are done, so this issues a session directly rather than
@@ -75,9 +94,31 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	// what an Authentication would otherwise vouch for. The session records
 	// AuthMethodTwoFactor, not whichever method passed the first factor:
 	// the second factor is what actually authorized this session.
+	// Emitted before createSession, not after: this is the moment the second
+	// factor is accepted, and the session that follows is its consequence.
+	// Emitting afterwards would put session.issued ahead of the decision
+	// that authorized it in every sink's ordering.
+	s.emit(ctx, Event{Kind: EventSecondFactorCompleted, UserID: user.ID, RequestInfo: ri})
+
 	session, sessionToken, err := s.createSession(ctx, user.ID, AuthMethodTwoFactor, time.Now(), ri)
 	if err != nil {
 		return nil, err
 	}
 	return &LoginResult{User: user, Session: session, SessionToken: sessionToken}, nil
+}
+
+// emitSecondFactorFailed reports a refused CompleteTwoFactor. One helper for
+// the four branches that can refuse, so the kind and the reason key stay in
+// step across them.
+func (s *Sulis) emitSecondFactorFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
+	var m map[MetadataKey]string
+	if reason != "" {
+		m = meta(string(MetaReason), reason)
+	}
+	s.emit(ctx, Event{
+		Kind:        EventSecondFactorFailed,
+		UserID:      userID,
+		RequestInfo: ri,
+		Metadata:    m,
+	})
 }

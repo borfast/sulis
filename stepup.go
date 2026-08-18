@@ -76,7 +76,7 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		return err
 	}
 
-	if err := s.allow(ctx, "password:"+user.Email); err != nil {
+	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
 		return err
 	}
 	if err := s.allowIP(ctx, "password:", ri); err != nil {
@@ -84,6 +84,7 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 	}
 
 	if err := s.accountStatus(user); err != nil {
+		s.emitReauthFailed(ctx, session, ri, gateReason(err))
 		return err
 	}
 
@@ -92,6 +93,7 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		// reason VerifyPassword does — so response timing doesn't reveal
 		// that this account has no password to check.
 		_, _, _ = verifyPassword(password, s.dummyHash, s.cfg.Pepper)
+		s.emitReauthFailed(ctx, session, ri, ReasonNoPassword)
 		return ErrInvalidCredentials
 	}
 
@@ -100,6 +102,7 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		return fmt.Errorf("sulis: verifying password: %w", err)
 	}
 	if !ok {
+		s.emitReauthFailed(ctx, session, ri, ReasonWrongPassword)
 		return ErrInvalidCredentials
 	}
 
@@ -112,6 +115,14 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 	// the second reason to replace a hash: it matched only through
 	// verifyPassword's pre-normalization fallback, so re-deriving it now is
 	// what migrates the account onto the NFKC form (T505).
+	if legacyForm {
+		s.emit(ctx, Event{
+			Kind:        EventPasswordLegacyFormMatched,
+			UserID:      user.ID,
+			SessionID:   session.ID,
+			RequestInfo: ri,
+		})
+	}
 	if legacyForm || needsRehash(user.PasswordHash, s.cfg.Argon2) {
 		s.rehashPassword(ctx, user, password)
 	}
@@ -121,5 +132,30 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		return err
 	}
 	session.AuthenticatedAt = now
+	s.emit(ctx, Event{
+		Kind:        EventReauthSucceeded,
+		UserID:      user.ID,
+		SessionID:   session.ID,
+		RequestInfo: ri,
+	})
 	return nil
+}
+
+// emitReauthFailed reports a refused ReAuthenticate. The session ID is
+// always known here — the caller had to hold a valid *Session to call at
+// all — which is what makes a burst of these attributable to one session
+// rather than merely to one account: somebody holding a cookie who does not
+// know the password.
+func (s *Sulis) emitReauthFailed(ctx context.Context, session *Session, ri RequestInfo, reason string) {
+	var m map[MetadataKey]string
+	if reason != "" {
+		m = meta(string(MetaReason), reason)
+	}
+	s.emit(ctx, Event{
+		Kind:        EventReauthFailed,
+		UserID:      session.UserID,
+		SessionID:   session.ID,
+		RequestInfo: ri,
+		Metadata:    m,
+	})
 }

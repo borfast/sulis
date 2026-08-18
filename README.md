@@ -33,6 +33,7 @@ The root package owns the auth logic and data types:
 - `Authenticate`, `UserFromContext`, `SessionFromContext`
 - `SessionCookie`, `ClearSessionCookie`, `RequireSameOrigin`
 - `IssueCSRFToken`, `RequireCSRFToken`, `VerifyCSRFToken`
+- `WithEventSink`, `NewSlogSink`, `EventSink`, `Event`, `EventKind`
 
 Password hashes use Argon2id over the NFKC-normalized password, optionally peppered first — see [Peppering](#peppering). New passwords are screened for length and against a corpus of known-compromised values — see [Password quality](#password-quality). Reset, magic-link, two-factor, and email-verification tokens are random, single-use, purpose-scoped, and time-limited.
 
@@ -326,6 +327,113 @@ return finish(user, session, err)
 
 The *first* time an account with a password gets verified (via either `VerifyEmail` or a redeemed magic link), all of that user's sessions are revoked unconditionally — regardless of `RevokeSessionsOnPasswordChange`. This closes a residual account-takeover window: an attacker who registered the victim's email with their own password before the victim ever proved mailbox control could otherwise keep a live session through the victim's later verification. Applications should additionally prompt for a password reset on this path, since the attacker's chosen password itself remains valid until changed.
 
+### Security events
+
+Every security-relevant decision the root package makes can be reported to an `EventSink` — failed logins, limiter trips, second-factor demands, session issuance and expiry, password rehashes, magic-link rejections, account disables. Nothing is emitted by default.
+
+Wiring it up is one line if you already have a `*slog.Logger`:
+
+```go
+auth, err := sulis.New(users, sessions, tokens, factors,
+    sulis.WithEventSink(sulis.NewSlogSink(logger)))
+```
+
+Or implement the interface yourself:
+
+```go
+type EventSink interface {
+    Emit(ctx context.Context, e sulis.Event)
+}
+```
+
+`Emit` returns nothing, on purpose: **a sink cannot fail a flow.** There is no error to propagate and none to ignore. Emissions happen *after* the decision they report, never before, so an event records what already happened rather than announcing what is about to. A sink that panics is contained (recovered and dropped) rather than allowed to unwind the flow — an observability hook must not be able to deny authentication to everybody — but don't build on that: `Emit` runs on the caller's goroutine and inside the caller's latency budget, so hand the event to a channel, a logger, or a buffer and return.
+
+With no sink configured the cost is one nil check per decision point. Nothing is allocated, no timestamp is read.
+
+#### What an event contains — and what it never contains
+
+```go
+type Event struct {
+    Kind        EventKind
+    UserID      string                 // when known
+    SessionID   string                 // when relevant
+    RequestInfo RequestInfo            // what you passed to the flow
+    At          time.Time
+    Metadata    map[MetadataKey]string // reason / method / scope / dimension
+}
+```
+
+**No event ever carries credential material.** There is deliberately no field that could hold one — no token, no password, no hash, no nonce. Beyond that, the package never copies *any* caller-supplied string into an event except the `RequestInfo` you explicitly passed. In particular an event never carries:
+
+- a raw password, session token, reset/magic-link/two-factor/email token, or magic-link binding nonce;
+- a stored password hash or session token hash;
+- **the submitted email address** — people type passwords into the email field, and an event taxonomy that copies caller input is one bad day away from being a credential log;
+- the operator-supplied `reason` you passed to `DisableUser`, for the same reason.
+
+Accounts are identified by `UserID` and sessions by `SessionID`: opaque identifiers sulis generated, neither of which authenticates anything on its own. The rule is enforced by test, not only by convention — `TestNoEventCarriesSecretMaterial` drives every emitting flow and scans every field of every emitted event against every secret those flows were fed, and a companion test proves the scanner catches a planted one.
+
+`Metadata` has a closed key set — `MetaReason`, `MetaMethod`, `MetaScope`, `MetaDimension` — whose values are short fixed labels chosen by sulis (the `Reason*`, `Scope*`, and `Dimension*` constants), never error text and never caller input.
+
+#### The taxonomy
+
+| Kind | Emitted when | Metadata |
+|---|---|---|
+| `account.registered` | `Register` created an account | — |
+| `login.succeeded` | a password verified (**not** "a session exists" — a second factor may follow) | `method` |
+| `login.failed` | an authentication attempt was refused | `reason`, `method` |
+| `password.changed` | `ChangePassword` succeeded | — |
+| `password.set` | `SetInitialPassword` succeeded | — |
+| `password.reset_requested` | a reset token was issued (unknown addresses emit nothing) | — |
+| `password.reset` | `ResetPassword` succeeded | — |
+| `password.rehashed` | a stored hash was upgraded on successful verification | — |
+| `password.rehash_failed` | that upgrade was attempted and lost | `reason` |
+| `password.legacy_form_matched` | a password matched only via the pre-NFKC fallback | — |
+| `twofactor.demanded` | a verified first factor earned a pending token, not a session | `method` |
+| `twofactor.completed` | `CompleteTwoFactor` accepted the second factor | — |
+| `twofactor.failed` | `CompleteTwoFactor` refused | `reason` |
+| `session.issued` | a session row was created, by any path | `method` |
+| `session.revoked` | one or all of an account's sessions were deleted | `scope` |
+| `session.refreshed` | `RefreshSession` rotated a token | `method` |
+| `session.expired` | `ValidateSession` rejected a session past `ExpiresAt` | `reason` |
+| `session.idle_expired` | `ValidateSession` rejected a session past `IdleExpiresAt` | `reason` |
+| `email.change_staged` | `ChangeEmail` staged an address and issued a token | — |
+| `email.change_confirmed` | `ConfirmEmailChange` made a staged address live | — |
+| `email.verified` | an address was verified for the first time | — |
+| `magiclink.created` | `CreateMagicLinkToken` issued a link | — |
+| `magiclink.redeemed` | a link's token and binding nonce both checked out | — |
+| `magiclink.rejected` | `RedeemMagicLink` refused | `reason` |
+| `ratelimit.tripped` | the configured `Limiter` denied a key | `scope`, `dimension` |
+| `account.disabled` | `DisableUser` stamped the account | — |
+| `account.enabled` | `EnableUser` cleared it | — |
+| `account.locked` | automatic lockout set or extended a deadline | — |
+| `account.lockout_cleared` | a correct password cleared stale lockout bookkeeping | — |
+| `reauth.succeeded` | `ReAuthenticate` refreshed the step-up clock | — |
+| `reauth.failed` | `ReAuthenticate` refused | `reason` |
+| `csrf.rejected` | `(*Sulis).RequireCSRFToken` refused a request | `reason` |
+| `sameorigin.rejected` | `(*Sulis).RequireSameOrigin` refused a request | `reason` |
+
+A few of these repay watching directly:
+
+- **`password.legacy_form_matched`** is what makes retiring the pre-NFKC verification fallback answerable. When it stops appearing for your deployment, every account has migrated and the fallback can go — without it, the fallback would have to stay forever on the grounds that nobody can prove it's unused.
+- **`password.rehash_failed`** is the *only* trace a lost hash upgrade leaves. The failure is deliberately swallowed so it can't fail an otherwise-correct login (see [Rehash on login](#login-and-verifypassword)), which means without this event a store quietly refusing every upgrade would be invisible.
+- **`magiclink.rejected` with `reason=binding_mismatch`** means a genuine token was presented by a browser other than the one that asked for the link: forwarded, prefetched, or stolen.
+- **`ratelimit.tripped`** distinguishes `dimension=account` from `dimension=ip`. One account being guessed and one host spraying many accounts are different incidents, which is why the two keys exist.
+- **`login.failed` with `reason=factor_check_failed`** means your `SecondFactorChecker` errored and sulis failed closed. Correct behaviour, invisible without this.
+
+#### Middleware and events
+
+`RequireCSRFToken` and `RequireSameOrigin` exist both as package-level functions and as methods on `*Sulis`. The behaviour is identical; only the methods can emit, because a free function has no configured sink to emit to. Use the methods if you want rejections observable:
+
+```go
+mux.Handle("/api/", auth.RequireSameOrigin(origins)(auth.RequireCSRFToken(handler)))
+```
+
+These are the one place sulis derives a `RequestInfo` itself, from `r.RemoteAddr` and `User-Agent`. **That address is the transport peer**: behind a reverse proxy it is the proxy, not the client. sulis does not read `X-Forwarded-For` or any other hop header, because which of them to trust is a deployment fact no library can know and guessing wrong means trusting an attacker-supplied address.
+
+#### Scope
+
+The taxonomy covers the root package. The `totp`, `passkey`, and `recovery` subpackages have their own services and stores and do not emit events; `Authenticate`'s 401 is not its own kind either — the decisions behind it (`session.expired`, `session.idle_expired`) already emit, and a kind for "a request arrived with no valid token" would make this a request log rather than a security-decision log.
+
 ## Subpackages
 
 ### `totp`
@@ -518,6 +626,7 @@ It is not for production: nothing survives a restart, nothing is shared between 
 - `Token.TokenHash` stores a SHA-256 hash of a reset, magic-link, two-factor, or email-verification token. Raw tokens are returned once for delivery and should never be persisted. `Token.Email` is set for magic-link tokens issued before the user account exists, and for email-verification tokens (bound to the address they prove, so a later email change invalidates them); it is empty for password-reset and two-factor tokens.
 - Session tokens are opaque bearer tokens. `SessionStore` implementations persist only `TokenHash` (the root package always clears `Session.Token` before calling `CreateSession`) and perform `GetSessionByTokenHash` lookups against the hash of the presented session token rather than the raw token. `ValidateSession` likewise never returns the raw token to the caller.
 - TOTP secrets (`totp.Credential.Secret`) and passkey public keys are handed to your stores as-is, **unless** you configure `totp.WithEncryptor` — see [Encrypting stored secrets](#encrypting-stored-secrets) — in which case your `totp.Store` only ever sees the configured `Encryptor`'s ciphertext. Recovery codes and all `sulis` tokens/sessions are hashed before your store ever sees them. See [Operational requirements](#operational-requirements) for what an unconfigured `Encryptor` implies for TOTP secrets specifically.
+- Security events (`WithEventSink`) never carry credential material, stored hashes, submitted email addresses, or any other caller-supplied string beyond the `RequestInfo` you passed in — see [Security events](#security-events). Emission is best effort and cannot fail or slow a flow into failure; a sink that panics is contained.
 
 ## Operational requirements
 

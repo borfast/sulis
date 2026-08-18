@@ -38,7 +38,7 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri Reque
 		return "", "", err
 	}
 
-	if err := s.allow(ctx, "magic:"+email); err != nil {
+	if err := s.allow(ctx, "magic:"+email, ri); err != nil {
 		return "", "", err
 	}
 	if err := s.allowIP(ctx, "magic:", ri); err != nil {
@@ -95,6 +95,14 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (
 		return "", "", err
 	}
 
+	// UserID is empty when the address has no account yet — the token is
+	// issued anyway and the user is created at redemption (see
+	// getOrCreatePasswordlessUser). The address itself is not carried; a
+	// magic link for an unregistered address is still visible as a
+	// created-without-a-user event, and as an EventRateLimitTripped on the
+	// "magic" scope if somebody is doing it in bulk.
+	s.emit(ctx, Event{Kind: EventMagicLinkCreated, UserID: userID})
+
 	return raw, bindingNonce, nil
 }
 
@@ -138,12 +146,18 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (
 func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce string, ri RequestInfo) (*LoginResult, error) {
 	tok, err := s.consumeToken(ctx, rawToken, TokenPurposeMagicLink)
 	if err != nil {
+		s.emitMagicLinkRejected(ctx, "", ri, tokenReason(err))
 		return nil, err
 	}
 
 	if tok.NonceHash != "" {
 		if bindingNonce == "" ||
 			subtle.ConstantTimeCompare([]byte(hashToken(bindingNonce)), []byte(tok.NonceHash)) != 1 {
+			// The most interesting event in this file: the token was
+			// genuine and the browser presenting it was not the one that
+			// asked for the link. A forwarded, prefetched, or stolen link
+			// looks exactly like this.
+			s.emitMagicLinkRejected(ctx, tok.UserID, ri, ReasonBindingMismatch)
 			return nil, ErrTokenInvalid
 		}
 	}
@@ -158,6 +172,17 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce stri
 		return nil, err
 	}
 
+	// The mailbox is proven at this point: the token was valid, single-use,
+	// and (when binding was on) presented by the browser that asked for it.
+	// This is the magic-link counterpart of EventLoginSucceeded, and like it
+	// it does not mean a session followed — completeFirstFactor below may
+	// still demand a second factor or refuse the account outright.
+	s.emit(ctx, Event{
+		Kind:        EventMagicLinkRedeemed,
+		UserID:      user.ID,
+		RequestInfo: ri,
+	})
+
 	// Redeeming a magic link proves control of the mailbox, so treat it as
 	// email verification too. This must happen BEFORE the second-factor
 	// branch: completeFirstFactor enforces RequireVerifiedEmail, so a
@@ -167,6 +192,18 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce stri
 	}
 
 	return s.completeFirstFactor(ctx, user, AuthMethodMagicLink, ri)
+}
+
+// emitMagicLinkRejected reports a refused RedeemMagicLink. userID is empty
+// when the token did not resolve to one — an unknown, expired, or
+// already-used token names nobody.
+func (s *Sulis) emitMagicLinkRejected(ctx context.Context, userID string, ri RequestInfo, reason string) {
+	s.emit(ctx, Event{
+		Kind:        EventMagicLinkRejected,
+		UserID:      userID,
+		RequestInfo: ri,
+		Metadata:    meta(string(MetaReason), reason),
+	})
 }
 
 // getOrCreatePasswordlessUser looks up a user by email, creating a

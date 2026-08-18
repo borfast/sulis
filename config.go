@@ -129,6 +129,11 @@ type Config struct {
 	// TokenSource controls which channel(s) Authenticate accepts a session
 	// token from (default: TokenSourceBoth). See WithTokenSource.
 	TokenSource TokenSource
+
+	// EventSink receives security events — every security-relevant
+	// decision this package makes. Default: nil, meaning nothing is
+	// emitted. See WithEventSink and events.go.
+	EventSink EventSink
 }
 
 // Option is a functional option for configuring Sulis.
