@@ -30,7 +30,24 @@ type User struct {
 
 // UserStore defines the persistence operations for users.
 // Consumers implement this interface for their own database.
+//
+// Email uniqueness MUST be enforced at the storage layer — e.g. a SQL UNIQUE
+// index on the normalized email column — and CreateUser and UpdateUser MUST
+// return ErrUserAlreadyExists when a write would violate it. This is not
+// optional. Version (below) only guards a lost update on a single row; it
+// says nothing about two different rows racing to claim the same address
+// (e.g. two accounts both confirming a staged change to the same address).
+// Nothing above this interface can make those two writes atomic with respect
+// to each other, since by the time either call reaches UserStore they are
+// independent reads and writes on different rows. A caller may re-check
+// uniqueness with GetUserByEmail before writing (ConfirmEmailChange does),
+// but that is only a best-effort early rejection, not the guarantee: two
+// callers can both pass that check for the same address before either write
+// lands. The store's write path enforcing the constraint is what actually
+// closes the race.
 type UserStore interface {
+	// CreateUser persists a new user. Returns ErrUserAlreadyExists if user.Email
+	// is already the live address of another user.
 	CreateUser(ctx context.Context, user *User) error
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
@@ -45,6 +62,12 @@ type UserStore interface {
 	//	 WHERE id = $1 AND version = $2
 	//
 	// Zero rows affected means another writer won: return ErrConcurrentUpdate.
+	//
+	// UpdateUser MUST also return ErrUserAlreadyExists if user.Email would
+	// collide with a different user's live email — e.g. two accounts racing
+	// to confirm a change to the same staged address. This is the real
+	// guarantee behind that race, not the in-library pre-check described
+	// above.
 	UpdateUser(ctx context.Context, user *User) error
 	DeleteUser(ctx context.Context, id string) error
 }

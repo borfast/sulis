@@ -86,6 +86,16 @@ func (s *memUserStore) UpdateUser(_ context.Context, u *User) error {
 	if existing.Version != u.Version {
 		return ErrConcurrentUpdate
 	}
+	// Email uniqueness, as UserStore.UpdateUser requires: a real store
+	// enforces this with a UNIQUE index, so this test double must too, or
+	// tests exercising the contract (e.g. two accounts racing to confirm a
+	// change to the same address) would pass against a store weaker than
+	// any real implementation is allowed to be.
+	for id, other := range s.users {
+		if id != u.ID && other.Email == u.Email {
+			return ErrUserAlreadyExists
+		}
+	}
 	cp := *u
 	cp.Version = existing.Version + 1
 	s.users[u.ID] = &cp

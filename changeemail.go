@@ -46,6 +46,10 @@ func (s *Sulis) ChangeEmail(ctx context.Context, userID, newEmail string) (strin
 		return "", err
 	}
 
+	// If token issuance below fails, PendingEmail is left staged with no
+	// outstanding token. That's harmless: nothing reads PendingEmail as live,
+	// no verification state changes, and the next ChangeEmail call simply
+	// overwrites it with a fresh token.
 	return s.createTokenForUserWithEmail(ctx, userID, newEmail, TokenPurposeEmailChange, s.cfg.EmailVerificationTokenDuration)
 }
 
@@ -83,7 +87,16 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 			return ErrTokenInvalid
 		}
 		// Re-checked here, not just in ChangeEmail: another account may have
-		// claimed this address in the time since it was staged.
+		// claimed this address in the time since it was staged. This is only
+		// a best-effort early rejection, though, not the guarantee: two
+		// accounts confirming the same staged address can both pass this
+		// GetUserByEmail check before either write below lands — Version
+		// guards a single row, not two different rows racing for the same
+		// email. The actual guarantee is UserStore.UpdateUser returning
+		// ErrUserAlreadyExists on the losing write (see user.go); that error
+		// is not ErrConcurrentUpdate, so updateUserWithRetry (below) returns
+		// it unchanged rather than retrying, and it propagates out of this
+		// function exactly like the check right here does.
 		if _, err := s.users.GetUserByEmail(ctx, u.PendingEmail); err == nil {
 			return ErrUserAlreadyExists
 		} else if !errors.Is(err, ErrUserNotFound) {
@@ -99,6 +112,11 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 		return nil, err
 	}
 
+	// These three cleanup calls are sequential and can partially fail (e.g.
+	// sessions revoked but the reset-token purge errors before running) —
+	// the same shape as setPassword's post-write cleanup in sulis.go. The
+	// swap itself has already committed by this point, so a failure here is
+	// a bug report for whichever call errored, not a new class of risk.
 	if err := s.sessions.DeleteUserSessions(ctx, updated.ID); err != nil {
 		return nil, err
 	}

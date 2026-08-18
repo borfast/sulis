@@ -337,6 +337,74 @@ func TestConfirmEmailChangeRejectsAddressTakenSinceStaging(t *testing.T) {
 	}
 }
 
+// TestConfirmEmailChangeAbortsIfAnotherAccountWinsTheRace asserts the real
+// guarantee behind ConfirmEmailChange's cross-account race: when two
+// accounts stage the same address and race to confirm it, the loser's write
+// is rejected and its live address is left untouched. Unlike
+// TestConfirmEmailChangeRejectsAddressTakenSinceStaging (which proves the
+// sequential case, resolved by the in-library GetUserByEmail pre-check),
+// this interleaves the two confirmations so both pre-checks observe the
+// address as free before either write lands — only UserStore.UpdateUser's
+// own uniqueness enforcement (see user.go) can catch that, since Version
+// only guards a single row and these are two different rows.
+func TestConfirmEmailChangeAbortsIfAnotherAccountWinsTheRace(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	alice, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register(alice): %v", err)
+	}
+	verifyUserEmail(t, users, alice.ID)
+	bob, _, _, err := s.Register(ctx, "bob@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register(bob): %v", err)
+	}
+	verifyUserEmail(t, users, bob.ID)
+
+	aliceToken, err := s.ChangeEmail(ctx, alice.ID, "shared@example.com")
+	if err != nil {
+		t.Fatalf("ChangeEmail(alice): %v", err)
+	}
+	bobToken, err := s.ChangeEmail(ctx, bob.ID, "shared@example.com")
+	if err != nil {
+		t.Fatalf("ChangeEmail(bob): %v", err)
+	}
+
+	// Right before alice's confirmation writes, let bob's confirmation run to
+	// completion and claim the address first. Both accounts' GetUserByEmail
+	// pre-checks see the address as unclaimed at read time; the race is only
+	// closed by whichever write reaches the store second.
+	users.beforeUpdate = func(u *User) {
+		if u.ID != alice.ID {
+			return
+		}
+		if _, err := s.ConfirmEmailChange(ctx, bobToken); err != nil {
+			t.Fatalf("ConfirmEmailChange(bob): %v", err)
+		}
+	}
+
+	if _, err := s.ConfirmEmailChange(ctx, aliceToken); err != ErrUserAlreadyExists {
+		t.Fatalf("expected ErrUserAlreadyExists for the losing confirmation, got %v", err)
+	}
+
+	stored, err := users.GetUserByID(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID(alice): %v", err)
+	}
+	if stored.Email != "alice@example.com" {
+		t.Fatalf("expected alice's live address untouched by the losing confirmation, got %q", stored.Email)
+	}
+
+	winner, err := users.GetUserByEmail(ctx, "shared@example.com")
+	if err != nil {
+		t.Fatalf("GetUserByEmail(shared): %v", err)
+	}
+	if winner.ID != bob.ID {
+		t.Fatalf("expected bob to hold the contested address, got user %q", winner.ID)
+	}
+}
+
 // TestEmailChangeTokensArePurposeScoped asserts an email-change token cannot be
 // spent on another flow, and that another flow's token cannot confirm a change.
 func TestEmailChangeTokensArePurposeScoped(t *testing.T) {

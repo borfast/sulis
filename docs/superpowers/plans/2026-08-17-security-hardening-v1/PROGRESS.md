@@ -189,6 +189,7 @@ Append as work proceeds. Each entry: task, decision, one-line reason. Mark anyth
 | T105 | **Scope split from PLAN.md T105:** the test asserts UV is *requested and recorded in session data*, not end-to-end rejection of a UV-absent assertion | go-webauthn's enforcement is driven entirely by `session.UserVerification == VerificationRequired`, so that is the library behaviour we control. End-to-end rejection needs a forging test authenticator, which **T206 must build** — do not close T206 without it |
 | T107 | `ChangeEmail`'s uniqueness check runs once before staging; `ConfirmEmailChange`'s re-runs inside the `updateUserWithRetry` closure, against the freshly loaded row, on every attempt | Staging doesn't make an address live, so a race there is harmless. Confirmation is where the address actually becomes live, so that check must hold against current state, not the state read before the retry loop started — matching `updateUserWithRetry`'s existing re-establish-invariants contract |
 | T107 | `stampEmailVerified` (idempotent, no-op if already verified) is not reused by `ConfirmEmailChange` | Confirmation must re-stamp unconditionally with a fresh timestamp even though `EmailVerifiedAt` was already non-nil for the old address — idempotent semantics would make it a no-op and leave the old address's stamp in place for the new one |
+| T107 (fix round 1) | `UserStore` GoDoc now states email uniqueness MUST be enforced at the storage layer, with `CreateUser`/`UpdateUser` returning `ErrUserAlreadyExists` on violation | `Version` only guards a lost update on a single row; two different rows racing to claim the same address (e.g. two accounts both confirming a change to the same staged address) can't be prevented above the store interface. `ConfirmEmailChange`'s own `GetUserByEmail` re-check is a best-effort early rejection, not the guarantee — found in code review |
 
 ---
 
@@ -198,7 +199,7 @@ Anything consciously not done, so T704 can account for it. Empty is good.
 
 | Item | Task | Reason | Revisit? |
 |---|---|---|---|
-| — | — | — | — |
+| `UserStore.UpdateUser` email-uniqueness enforcement isn't tested against real store implementations | T401 | The in-memory test double now enforces it (T107 fix round 1: `memUserStore.UpdateUser` in `sulis_test.go`), so `sulis`'s own tests hold, but the store conformance suite is what will hold real SQL/etc. implementations to the same contract | Yes — T401 must add a dedicated test asserting `UpdateUser` rejects a write whose email collides with a different user's live row |
 
 ---
 
@@ -218,6 +219,7 @@ Newest last. One line per commit: date, task, what landed.
 | 2026-08-18 | T105 | `passkey.NewService` takes options; `WithUserVerification` defaults to `required` and is set on the RP config and both login ceremonies. Mutation-tested: without it the session records UV `""` |
 | 2026-08-18 | T106 | `MemoryLimiter` token bucket is now the default; `WithoutRateLimiting()` to opt out; per-account and per-IP budgets wired into password, reset and magic-link choke points; key tracking bounded |
 | 2026-08-18 | T107 | `changeemail.go`: `ChangeEmail`/`ConfirmEmailChange`, `User.PendingEmail`, `TokenPurposeEmailChange`. Confirmation swaps the address, clears `PendingEmail`, re-stamps `EmailVerifiedAt` with a fresh timestamp, and revokes all sessions plus purges password-reset and two-factor tokens. Mutation-tested: reverting the session/token purge or the `token.Email == PendingEmail` check each fail the corresponding regression test. Phase 1 complete |
+| 2026-08-18 | T107 (fix round 1) | Closed a cross-account race review found: two accounts confirming the same staged address could both pass `ConfirmEmailChange`'s `GetUserByEmail` pre-check before either write landed, since `Version` only guards one row. `UserStore` GoDoc now mandates storage-layer email-uniqueness enforcement (`ErrUserAlreadyExists` from `CreateUser`/`UpdateUser`); `memUserStore.UpdateUser` (test double) now enforces it; new test `TestConfirmEmailChangeAbortsIfAnotherAccountWinsTheRace` interleaves two confirmations via the existing `beforeUpdate` hook. Mutation-tested: reverting the test-store enforcement fails only that test |
 
 ---
 
