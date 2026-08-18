@@ -1741,6 +1741,73 @@ func TestResetPasswordRevokesTwoFactorTokens(t *testing.T) {
 	}
 }
 
+// TestSetPasswordPurgesMagicLinkTokens asserts that both password-setting
+// recovery paths — ResetPassword and ChangePassword, which share setPassword
+// — burn any outstanding magic link for the account.
+//
+// Same reasoning as the email-change purge (see
+// TestConfirmEmailChangePurgesMagicLinkTokens): a magic link issued in its
+// existing-user shape is redeemed by user ID with no address check, so it
+// outlives a recovery unless it is deleted. A password reset is the other
+// half of the mailbox-compromise recovery story — a victim who suspects the
+// mailbox was read rotates the password — and it would be a strange
+// guarantee that burned the pending 2FA token minted against the old
+// password while leaving a live passwordless login to the same account in
+// the attacker's hands.
+func TestSetPasswordPurgesMagicLinkTokens(t *testing.T) {
+	t.Run("ResetPassword", func(t *testing.T) {
+		s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		ctx := context.Background()
+
+		user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		verifyUserEmail(t, users, user.ID)
+
+		magicToken, nonce, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+		if err != nil {
+			t.Fatalf("CreateMagicLinkToken: %v", err)
+		}
+
+		resetToken, err := s.CreatePasswordResetToken(ctx, "alice@example.com", RequestInfo{})
+		if err != nil {
+			t.Fatalf("CreatePasswordResetToken: %v", err)
+		}
+		if err := s.ResetPassword(ctx, resetToken, "brand-new-password"); err != nil {
+			t.Fatalf("ResetPassword: %v", err)
+		}
+
+		if _, err := s.RedeemMagicLink(ctx, magicToken, nonce, RequestInfo{}); err != ErrTokenInvalid {
+			t.Fatalf("expected the outstanding magic link to be purged by the reset, got %v", err)
+		}
+	})
+
+	t.Run("ChangePassword", func(t *testing.T) {
+		s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+		ctx := context.Background()
+
+		user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		verifyUserEmail(t, users, user.ID)
+
+		magicToken, nonce, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+		if err != nil {
+			t.Fatalf("CreateMagicLinkToken: %v", err)
+		}
+
+		if err := s.ChangePassword(ctx, user.ID, "correct-battery-staple", "brand-new-password", RequestInfo{}); err != nil {
+			t.Fatalf("ChangePassword: %v", err)
+		}
+
+		if _, err := s.RedeemMagicLink(ctx, magicToken, nonce, RequestInfo{}); err != ErrTokenInvalid {
+			t.Fatalf("expected the outstanding magic link to be purged by the change, got %v", err)
+		}
+	})
+}
+
 func TestWithRevokeSessionsOnPasswordChangeFalseKeepsSessions(t *testing.T) {
 	s, _, sessions, tokens := newTestEnv(WithRevokeSessionsOnPasswordChange(false))
 	ctx := context.Background()

@@ -196,6 +196,52 @@ func TestConfirmEmailChangePurgesTwoFactorTokens(t *testing.T) {
 	}
 }
 
+// TestConfirmEmailChangePurgesMagicLinkTokens asserts that an outstanding
+// magic link does not survive an email-change recovery.
+//
+// This is the mailbox-compromise case the email-change flow exists to let a
+// victim recover from, and the magic link is the one credential that walks
+// straight through the recovery unless it is burned. An attacker reading the
+// victim's mailbox asks for a magic link: the token is stored in its
+// existing-user shape — UserID set, Email empty — and RedeemMagicLink
+// resolves it by ID alone, never re-checking which address the link was
+// delivered to. So moving the account to an address the attacker does not
+// control does not invalidate it by itself. Without the purge, the recovery
+// revokes every session and burns every reset and 2FA token, and the
+// attacker's link still mints a fully-authenticated session on the recovered
+// account moments later.
+func TestConfirmEmailChangePurgesMagicLinkTokens(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	// The attacker, reading alice's mailbox, requests a magic link and keeps
+	// both halves of it.
+	magicToken, nonce, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	// Alice recovers the account by moving it to an address the attacker
+	// cannot read.
+	changeToken, err := s.ChangeEmail(ctx, user.ID, "new@example.com")
+	if err != nil {
+		t.Fatalf("ChangeEmail: %v", err)
+	}
+	if _, err := s.ConfirmEmailChange(ctx, changeToken); err != nil {
+		t.Fatalf("ConfirmEmailChange: %v", err)
+	}
+
+	if _, err := s.RedeemMagicLink(ctx, magicToken, nonce, RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("expected the outstanding magic link to be purged by the recovery, got %v", err)
+	}
+}
+
 // TestConfirmEmailChangeRejectsTokenForSupersededAddress asserts that staging a
 // second address invalidates the first one's token. Without this, a token
 // delivered to an address the user has since abandoned could still take over

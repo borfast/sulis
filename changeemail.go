@@ -68,8 +68,12 @@ func (s *Sulis) ChangeEmail(ctx context.Context, userID, newEmail string) (strin
 // cleared, and EmailVerifiedAt is re-stamped with a fresh timestamp — the
 // old stamp proved control of the old address, not this one. The swap also
 // revokes every session on the account and purges its outstanding
-// password-reset and two-factor tokens, since both were minted against (or
-// reachable through) the identity that just changed.
+// password-reset, two-factor, and magic-link tokens, since all three were
+// minted against (or reachable through) the identity that just changed. The
+// magic-link purge in particular is what makes this a recovery rather than a
+// half-measure: a magic link requested while the attacker still had the
+// mailbox is redeemed by user ID, with no check on the address it was sent
+// to, so the swap alone would not stop it.
 //
 // Returns ErrTokenInvalid if the token is unknown, expired, already used, of
 // the wrong purpose, or bound to an address that is no longer the account's
@@ -133,6 +137,25 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 		return nil, err
 	}
 	if err := s.tokens.DeleteUserTokens(ctx, updated.ID, TokenPurposeTwoFactor); err != nil {
+		return nil, err
+	}
+	// The magic-link purge is the one that closes an account takeover rather
+	// than merely tidying up after one. This flow's whole purpose is
+	// recovering an account whose mailbox an attacker can read, and a magic
+	// link is a mailbox-derived credential that the address swap does not
+	// invalidate by itself: a link requested while the attacker had the
+	// mailbox is stored in its existing-user shape (UserID set, Email
+	// empty), and RedeemMagicLink resolves it by that ID alone — it never
+	// re-checks the address the link was delivered to. Without this call the
+	// recovery revokes every session and burns every reset and 2FA token,
+	// and the attacker's outstanding link still mints a fully-authenticated
+	// session on the recovered account. A mailbox-compromise recovery must
+	// burn every outstanding mailbox-derived credential, not most of them.
+	//
+	// Pre-registration magic links (UserID empty, Email set) are left alone,
+	// correctly: DeleteUserTokens is scoped by user, and a token naming no
+	// user belongs to no account that could be recovered.
+	if err := s.tokens.DeleteUserTokens(ctx, updated.ID, TokenPurposeMagicLink); err != nil {
 		return nil, err
 	}
 

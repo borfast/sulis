@@ -484,6 +484,12 @@ func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate f
 // re-checked against the freshly loaded user on every attempt, so a concurrent
 // change cannot slip past a check the caller made before calling.
 //
+// After the write it revokes the account's sessions (unless
+// RevokeSessionsOnPasswordChange is off) and purges its outstanding
+// password-reset, two-factor, and magic-link tokens. The magic-link purge
+// covers the mailbox-compromise case: see the comment at that call, and
+// ConfirmEmailChange for the other half of the same recovery.
+//
 // It also clears any active automatic lockout (FailedLoginAttempts,
 // LockedUntil) — proving control of the account well enough to set a new
 // password (ChangePassword's old password, ResetPassword's out-of-band
@@ -534,7 +540,24 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 	// A pending 2FA login token was minted against the old password's first
 	// factor; once the password changes, that pending login must not be
 	// completable, so purge it too.
-	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeTwoFactor)
+	if err := s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeTwoFactor); err != nil {
+		return err
+	}
+	// And any outstanding magic link, for the same reason at one remove.
+	// Setting a password is half of the recovery from a compromised mailbox
+	// (ConfirmEmailChange is the other half — see its own purge), and a
+	// mailbox-derived credential must not outlive the recovery it was the
+	// reason for. A magic link issued in its existing-user shape carries
+	// only a UserID; RedeemMagicLink resolves it by that ID and never
+	// re-checks which address the link went to, so nothing else here
+	// invalidates it. Leaving it live would burn the pending 2FA token
+	// minted against the old password while handing the same attacker a
+	// passwordless login to the very account just rotated away from them.
+	//
+	// Pre-registration magic links (UserID empty, Email set) are untouched,
+	// correctly: they name no user, so there is no account whose recovery
+	// they could survive.
+	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeMagicLink)
 }
 
 // resetTokenGenerator produces the raw/hashed token pair burned on the
