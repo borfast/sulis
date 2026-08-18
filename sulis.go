@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -560,13 +561,57 @@ func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, gua
 	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeMagicLink)
 }
 
+// resetTokenGeneratorFunc is the shape of the token-generation seam below.
+// Naming it keeps every Store/Load on resetTokenGeneratorSeam working with
+// the same concrete type, which atomic.Value requires — two func literals
+// with an identical signature are still distinct dynamic types to it
+// without a shared named type wrapping them.
+type resetTokenGeneratorFunc func(nBytes int) (raw, hash string, err error)
+
+// resetTokenGeneratorSeam holds the current token-generation function used
+// by CreatePasswordResetToken's unknown-user path (via resetTokenGenerator
+// below). The seam exists purely so a test can prove that generation work
+// actually happens on that path — via a counting wrapper installed with
+// testSwapResetTokenGenerator — without needing a real user or a
+// token-store write to observe it.
+//
+// It is an atomic.Value rather than a plain package variable holding
+// generateRawToken directly: PROGRESS.md's T304 row recorded the
+// plain-variable version as a latent data race on the swap/restore a test
+// does around it — safe only as long as no root test calls t.Parallel(),
+// which was true when recorded but not guaranteed to stay true. Backing it
+// with atomic.Value makes the swap race-safe unconditionally, at the cost
+// of one atomic load per call to resetTokenGenerator — negligible next to
+// the Argon2/HMAC work already on every path that reaches it. Production
+// code only ever reads this seam, through resetTokenGenerator; only tests,
+// through testSwapResetTokenGenerator, ever call Store on it.
+var resetTokenGeneratorSeam atomic.Value // holds a resetTokenGeneratorFunc
+
+func init() {
+	resetTokenGeneratorSeam.Store(resetTokenGeneratorFunc(generateRawToken))
+}
+
 // resetTokenGenerator produces the raw/hashed token pair burned on the
-// unknown-user path of CreatePasswordResetToken. It is a package variable —
-// rather than a direct call to generateRawToken — purely so tests can prove
-// that generation work actually happens on that path (via a counting
-// wrapper), without needing a real user or a token-store write to observe
-// it. Production code never reassigns it.
-var resetTokenGenerator = generateRawToken
+// unknown-user path of CreatePasswordResetToken. See resetTokenGeneratorSeam
+// for why this reads through an atomic.Value instead of being a plain
+// package-level function variable.
+func resetTokenGenerator(nBytes int) (raw, hash string, err error) {
+	return resetTokenGeneratorSeam.Load().(resetTokenGeneratorFunc)(nBytes)
+}
+
+// testSwapResetTokenGenerator installs fn as the token generator and
+// returns a restore function. Call it as
+// t.Cleanup(testSwapResetTokenGenerator(fn)) so the swap is undone when the
+// test finishes however it exits, rather than depending on an explicit
+// defer at the right place. The Store/Load pair on resetTokenGeneratorSeam
+// make an individual swap and an individual read race-safe with each other;
+// it remains each test's job not to run two tests that both swap this seam
+// in parallel with each other, since whichever restores last wins.
+func testSwapResetTokenGenerator(fn func(nBytes int) (raw, hash string, err error)) (restore func()) {
+	prev := resetTokenGeneratorSeam.Load()
+	resetTokenGeneratorSeam.Store(resetTokenGeneratorFunc(fn))
+	return func() { resetTokenGeneratorSeam.Store(prev) }
+}
 
 // CreatePasswordResetToken generates a password reset token for the given
 // email and returns the raw token so the consumer can deliver it (e.g. via

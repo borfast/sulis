@@ -70,6 +70,16 @@ func (s *Sulis) RequireRecentAuth(ctx context.Context, session *Session, maxAge 
 // nothing extra in exchange for not refreshing AuthenticatedAt on a
 // disabled or locked account's already-held session. This closes the gap
 // the T501 Decisions row deferred: see PROGRESS.md.
+//
+// Concurrency caveat: on success, ReAuthenticate writes session.AuthenticatedAt
+// directly on the *Session pointer the caller passed in, with no locking of
+// its own around that write. That is exactly what lets the caller observe
+// the refresh without a reload (see above), but it also means an
+// application that shares one *Session across goroutines — caching it per
+// user, say, rather than fetching a fresh one from ValidateSession per
+// request — is responsible for synchronizing its own reads and writes of
+// that pointer. ReAuthenticate does not, and cannot, do that synchronization
+// on the application's behalf.
 func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password string, ri RequestInfo) error {
 	user, err := s.users.GetUserByID(ctx, session.UserID)
 	if err != nil {
