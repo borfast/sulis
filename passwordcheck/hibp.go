@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1" // #nosec G505 -- the HIBP range API is defined over SHA-1; the algorithm is theirs, and no collision property is relied on here
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,27 @@ const defaultHIBPTimeout = 5 * time.Second
 // limit is a misbehaving or hostile endpoint, and a password checker must not
 // be a way to exhaust the memory of the process that trusted it.
 const maxHIBPResponse = 1 << 20 // 1 MiB
+
+// ErrMalformedResponse indicates a lookup could not complete because the
+// range response held data this client could not parse. Today that means
+// exactly one row shape: a suffix matching the password being checked whose
+// count is not a parseable integer. A real API has never been observed to
+// send one — this is corrupted-mirror or tampering-middlebox territory. A
+// malformed row for some other suffix is unrelated noise and never produces
+// this error; see [HIBP.lookup]'s doc comment.
+//
+// Under the fail-open default, an error wrapping this is treated the same as
+// any other unreachable verdict: [HIBP.Check] returns nil and the password
+// is accepted. Under [WithHIBPFailClosed], Check returns the wrapped error
+// instead, and it is never [ErrCompromised] either way.
+//
+// This is exported so an application that wants custom handling for exactly
+// this condition — without a new HIBPOption — can get it: wrap an *[HIBP] in
+// your own [Checker], call its Check, and branch on
+// errors.Is(err, ErrMalformedResponse) to, say, fail closed only on
+// suspected tampering while still failing open on an ordinary transport
+// error, or to alert on it distinctly.
+var ErrMalformedResponse = errors.New("passwordcheck: malformed HIBP response for the queried range")
 
 // HIBP checks passwords against the Have I Been Pwned range API using
 // k-anonymity: only the first five hexadecimal digits of the password's SHA-1
@@ -106,6 +128,13 @@ func WithHIBPHTTPClient(c *http.Client) HIBPOption {
 // user their password is breached when nobody actually looked is a lie that
 // costs you their trust in the message.
 //
+// "Could not reach a verdict" also covers a response row that matches this
+// password's suffix but whose count this client cannot parse: that row was
+// supposed to be the answer, so under this option it is treated as an
+// incomplete check and rejected, not silently read as "not found" (see
+// lookup's doc comment and [ErrMalformedResponse]). A malformed row for some
+// other suffix is unrelated noise and is still skipped either way.
+//
 // Choose this when policy genuinely requires that no password is ever set
 // without a breach check having succeeded, and make sure the surrounding
 // application turns the resulting error into "try again in a moment" rather
@@ -162,7 +191,9 @@ func NewHIBP(opts ...HIBPOption) *HIBP {
 // underlying error when [WithHIBPFailClosed] is set; either way that error is
 // never [ErrCompromised]. A cancelled or expired ctx is an unreachable
 // verdict like any other, so it too is subject to the fail-open/fail-closed
-// choice.
+// choice. One such error, [ErrMalformedResponse], is exported specifically so
+// callers can distinguish it from other unreachable-verdict causes with
+// errors.Is.
 func (h *HIBP) Check(ctx context.Context, password string) error {
 	if password == "" {
 		return nil
@@ -231,23 +262,34 @@ func (h *HIBP) lookup(ctx context.Context, prefix, suffix string) (bool, error) 
 		// Zero means a padding row: a fabricated suffix the API added because
 		// of the Add-Padding header above.
 		//
-		// A count this client cannot parse at all — even on this row, the one
-		// that matches our suffix — falls into the same continue and is
-		// therefore also "no verdict", not "compromised": a real API has
-		// never sent one, so there is no expectation this branch fires in
-		// practice, but the alternative of treating unparsable data as proof
-		// of a breach would let a misbehaving or compromised mirror lock
-		// users out of their own accounts on demand, just by corrupting a
-		// count. The row is skipped and scanning continues; a well-formed
-		// hit later in the same response is still honored (see
-		// TestHIBPToleratesMalformedRows), and if no such row exists the
-		// password is allowed through — the same outcome, deliberately, as
-		// an unreachable service under the fail-open default (see
-		// [WithHIBPFailClosed]'s doc comment). Fail-closed does not change
-		// this: it only governs errors lookup itself returns, and a
-		// malformed count on a matching row never becomes one.
+		// A count this client cannot parse at all is a different situation
+		// once it lands on the one row that matches our suffix. A malformed
+		// row for some *other* suffix is irrelevant noise — skipped by the
+		// !strings.EqualFold continue above, scanning keeps going, and a
+		// well-formed hit later in the response is still honored (see
+		// TestHIBPToleratesMalformedRows). But this row was supposed to be
+		// the answer, and a real API has never sent one unparsable, so there
+		// is no expectation this branch fires in practice — the case it
+		// guards is a misbehaving or compromised mirror corrupting exactly
+		// the row that would have told us the truth. That is not "no
+		// verdict" the way an unrelated bad row is; it is a check that could
+		// not complete, and it is surfaced as an error from lookup instead
+		// of silently skipped, so [HIBP.Check]'s existing fail-open/
+		// fail-closed branching handles it exactly like a transport or
+		// status failure: fail-open still accepts the password — the same
+		// outcome as if the row had simply been absent (see
+		// TestHIBPMalformedCountOnTheMatchingRowFailsOpen) — while
+		// [WithHIBPFailClosed] rejects it as a check that did not complete,
+		// not as a false "not found" (see
+		// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed). The
+		// returned error wraps [ErrMalformedResponse] so an application can
+		// tell this case apart from an ordinary transport or status failure
+		// via errors.Is, without a new HIBPOption.
 		n, err := strconv.ParseInt(strings.TrimSpace(count), 10, 64)
-		if err != nil || n <= 0 {
+		if err != nil {
+			return false, fmt.Errorf("%w: row for matching suffix: %w", ErrMalformedResponse, err)
+		}
+		if n <= 0 {
 			continue
 		}
 		return true, nil

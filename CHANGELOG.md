@@ -251,6 +251,18 @@ closes (see `docs/threat-model.md` for the complete mapping):
   of the first non-seed run.
 - The default minimum password length (8) was below current guidance;
   raised to 12.
+- `passwordcheck.WithHIBPFailClosed()` did not reject a password when the
+  HIBP range response row matching that password's suffix had a count this
+  client could not parse — it silently fell through to "not found" and
+  accepted the password, the one case where fail-closed's "no password
+  without a completed check" promise did not actually hold. `HIBP.lookup`
+  now surfaces that row as an error like any other failed lookup, so
+  fail-closed rejects it via an error wrapping the newly-exported
+  `passwordcheck.ErrMalformedResponse`, letting applications distinguish
+  corrupted-response data from transport failures with `errors.Is` and
+  build custom policy in their own `PasswordChecker` wrapper; the
+  fail-open default is unchanged; a malformed row for an unrelated
+  suffix is still ignored.
 
 ## Migration guide
 

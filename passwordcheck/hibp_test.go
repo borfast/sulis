@@ -225,6 +225,15 @@ func TestHIBPFailsClosedWhenConfigured(t *testing.T) {
 			if errors.Is(err, ErrCompromised) {
 				t.Fatalf("Check = %v, but an unreachable service is not evidence that the password is compromised", err)
 			}
+			// A transport or status failure is a different condition from a
+			// malformed matching row (see
+			// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed): the two
+			// must stay distinguishable via errors.Is, or an application
+			// branching on ErrMalformedResponse for the latter would also
+			// misfire on an ordinary outage.
+			if errors.Is(err, ErrMalformedResponse) {
+				t.Fatalf("Check = %v, wrongly carries ErrMalformedResponse for a transport/status failure", err)
+			}
 		})
 	}
 }
@@ -275,12 +284,16 @@ func TestHIBPToleratesMalformedRows(t *testing.T) {
 // TestHIBPMalformedCountOnTheMatchingRowFailsOpen pins the case that
 // TestHIBPToleratesMalformedRows does not cover: the garbage is on the row
 // that actually matches our suffix, not on an unrelated one. lookup cannot
-// parse "notanumber" as a count, treats the row as "no verdict" the same way
-// it treats any other line it cannot parse, and keeps scanning; with no
-// other row for this suffix, the password is accepted under the default
-// fail-open policy — a real breach hit is silently missed here, which is why
-// this needs a comment at the parse site (see lookup) and a test that would
-// fail if a mutation ever turned "unparsable" into "compromised".
+// parse "notanumber" as a count and surfaces that as an error (see the doc
+// comment at the parse site in lookup) rather than silently continuing past
+// it — but under the default fail-open policy, Check reads any lookup error
+// as "no verdict" and accepts the password anyway, the same user-visible
+// outcome as if this row had never matched at all. A real breach hit is
+// silently missed here, which is why this needs a comment at the parse site
+// (see lookup) and a test that would fail if a mutation ever turned
+// "unparsable" into "compromised". Contrast with
+// TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed, where the very same
+// response is rejected instead.
 func TestHIBPMalformedCountOnTheMatchingRowFailsOpen(t *testing.T) {
 	_, _, suffix := hibpHash(hibpTestPassword)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -295,14 +308,15 @@ func TestHIBPMalformedCountOnTheMatchingRowFailsOpen(t *testing.T) {
 }
 
 // TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed pins the same
-// response as above with WithHIBPFailClosed set. Fail-closed only changes
-// what happens when lookup itself returns an error (connection failure, bad
-// status, a truncated body) — it does not change how a row is parsed. A
-// malformed count on the matching row makes lookup return (false, nil), the
-// same as a clean "not found" response, so Check returns nil here too: as
-// implemented today, fail-closed does not surface a parse failure on the
-// matching row as an error. That is pinned here as the documented current
-// behavior, not asserted to be the ideal one.
+// response as above with WithHIBPFailClosed set. Fail-closed promises "no
+// password without a completed check", and a row that matches our suffix but
+// whose count cannot be parsed means the check did not complete — it is not
+// a clean "not found" the way a malformed row for some *other* suffix is.
+// So lookup surfaces this as an error wrapping [ErrMalformedResponse] (see
+// the doc comment at the parse site), and fail-closed's existing error
+// branch in Check rejects the password through the same seam it uses for a
+// transport failure. This was flipped deliberately from the previously
+// pinned fail-open-shaped behavior; see the commit that changed this test.
 func TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed(t *testing.T) {
 	_, _, suffix := hibpHash(hibpTestPassword)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -311,8 +325,15 @@ func TestHIBPMalformedCountOnTheMatchingRowUnderFailClosed(t *testing.T) {
 	defer srv.Close()
 
 	h := NewHIBP(WithHIBPBaseURL(srv.URL+"/range/"), WithHIBPFailClosed())
-	if err := h.Check(context.Background(), hibpTestPassword); err != nil {
-		t.Fatalf("Check = %v, want nil — fail-closed governs errors lookup returns, and a malformed count on the matching row does not produce one", err)
+	err := h.Check(context.Background(), hibpTestPassword)
+	if err == nil {
+		t.Fatal("Check = nil, want an error — fail-closed must reject a password whose check did not complete, and a matching row with an unparsable count is exactly that")
+	}
+	if errors.Is(err, ErrCompromised) {
+		t.Fatalf("Check = %v, but a malformed row is not evidence the password is compromised, only that the check was incomplete", err)
+	}
+	if !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("Check = %v, want an error wrapping ErrMalformedResponse so an application can distinguish this from an ordinary transport failure", err)
 	}
 }
 
