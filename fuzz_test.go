@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+// fuzzArgon2Params are the weakest Argon2Params decodeHash's bounds check
+// (password.go) and hashPassword accept as valid: Memory at the
+// 8*Parallelism floor, Iterations and Parallelism at their 1 minimum, and
+// salt/key at the shortest lengths decodeHash will still decode (8 and 16
+// bytes). FuzzDecodeHash's round-trip property only needs a hash that
+// decodeHash accepts, not one shaped like a production hash, so hashing at
+// these floors instead of testArgon2Params (chosen to still resemble a real
+// deployment) turns the one Argon2 hash paid per exec from the dominant cost
+// into a negligible one, without weakening the property under test.
+var fuzzArgon2Params = Argon2Params{
+	Memory:      8,
+	Iterations:  1,
+	Parallelism: 1,
+	SaltLength:  8,
+	KeyLength:   16,
+}
+
 // FuzzDecodeHash exercises decodeHash, the hand-rolled PHC-format parser
 // behind password verification. It must never panic on arbitrary input, and
 // every hash hashPassword produces must decode back out successfully — a
@@ -46,7 +63,7 @@ func FuzzDecodeHash(f *testing.F) {
 		if len(password) > 256 {
 			password = password[:256]
 		}
-		hash, err := hashPassword(password, testArgon2Params, nil)
+		hash, err := hashPassword(password, fuzzArgon2Params, nil)
 		if err != nil {
 			return // crypto/rand failure path; nothing to check here
 		}
@@ -54,14 +71,14 @@ func FuzzDecodeHash(f *testing.F) {
 		if err != nil {
 			t.Fatalf("decodeHash(hashPassword(%q)) failed: %v", password, err)
 		}
-		if params != testArgon2Params {
-			t.Fatalf("decodeHash(hashPassword(%q)) params = %+v, want %+v", password, params, testArgon2Params)
+		if params != fuzzArgon2Params {
+			t.Fatalf("decodeHash(hashPassword(%q)) params = %+v, want %+v", password, params, fuzzArgon2Params)
 		}
-		if len(salt) != int(testArgon2Params.SaltLength) {
-			t.Fatalf("decodeHash(hashPassword(%q)) salt length = %d, want %d", password, len(salt), testArgon2Params.SaltLength)
+		if len(salt) != int(fuzzArgon2Params.SaltLength) {
+			t.Fatalf("decodeHash(hashPassword(%q)) salt length = %d, want %d", password, len(salt), fuzzArgon2Params.SaltLength)
 		}
-		if len(key) != int(testArgon2Params.KeyLength) {
-			t.Fatalf("decodeHash(hashPassword(%q)) key length = %d, want %d", password, len(key), testArgon2Params.KeyLength)
+		if len(key) != int(fuzzArgon2Params.KeyLength) {
+			t.Fatalf("decodeHash(hashPassword(%q)) key length = %d, want %d", password, len(key), fuzzArgon2Params.KeyLength)
 		}
 	})
 }
