@@ -28,6 +28,10 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
+      # gofmt walks the directory tree rather than the module graph, so this
+      # already covers the nested store/sql module below. The other gates do
+      # not: `./...` stops at a nested go.mod, which is why every one of them
+      # is repeated with store/sql as the working directory.
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
@@ -40,6 +44,23 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
+
+      # store/sql is a separate module on purpose (ratified decision #3): a SQL
+      # driver must never enter the dependency graph of an application that
+      # brings its own store. Its acceptance criterion is the storetest
+      # conformance suite passing unmodified against the SQLite stores, and
+      # -race is what makes that suite's concurrency subtests worth running:
+      # they exist to catch a check-and-mutate that is really a read then a
+      # write.
+      - name: build store/sql
+        working-directory: store/sql
+        run: go build ./...
+      - name: vet store/sql
+        working-directory: store/sql
+        run: go vet ./...
+      - name: test store/sql
+        working-directory: store/sql
+        run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
 
   analyze:
     name: static analysis
@@ -59,6 +80,19 @@ jobs:
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
 
       - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      # Same three tools, same pins, against the nested store/sql module.
+      - name: staticcheck (store/sql)
+        working-directory: store/sql
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+
+      - name: gosec (store/sql)
+        working-directory: store/sql
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
+
+      - name: govulncheck (store/sql)
+        working-directory: store/sql
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
   fuzz:
