@@ -59,13 +59,10 @@ import (
 // EventSink.Emit returns nothing, so a sink cannot fail a flow: there is no
 // error for a caller to propagate and none to ignore. Emissions happen AFTER
 // the decision they report, never before, so an event is a record of what
-// already happened rather than an announcement of what is about to. A sink
-// that panics is contained (the panic is recovered and dropped) for the same
-// reason: an observability hook must not be able to deny authentication to
-// everybody. Do not rely on that containment — a sink should hand the event
-// to a channel, a logger, or a buffer and return, doing anything slow or
-// failure-prone somewhere else. Emit runs on the caller's goroutine and
-// inside the caller's latency budget.
+// already happened rather than an announcement of what is about to. Emit
+// runs on the caller's goroutine and inside the caller's latency budget; see
+// EventSink's doc comment (the copy that actually renders on pkg.go.dev) for
+// what happens when a sink panics.
 //
 // # Scope
 //
