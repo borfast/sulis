@@ -12,6 +12,15 @@ import (
 )
 
 // In-memory store implementations for testing.
+//
+// These mirror the reference implementations in the memstore package, which
+// are the ones adopters should read and which the storetest conformance suite
+// is run against. They are duplicated rather than imported because these tests
+// are in package sulis: memstore imports sulis, so importing memstore from
+// here is an import cycle Go rejects outright ("import cycle not allowed in
+// test"). Keep any behavioral change in step with memstore — a divergence here
+// means these tests are passing against a store weaker than any real
+// implementation is allowed to be.
 
 type memUserStore struct {
 	mu    sync.Mutex

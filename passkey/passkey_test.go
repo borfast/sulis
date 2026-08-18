@@ -422,6 +422,13 @@ func keysOf(m map[string][]byte) []string {
 	return keys
 }
 
+// fakeStore is an instrumented Store: a full in-memory implementation plus
+// call counters and injectable failures, so the ceremonies' store-error
+// branches can be covered without a differently-broken Store per case. The
+// uninstrumented reference implementation lives in the memstore package and is
+// what adopters should read; it cannot be imported here, because these tests
+// are in package passkey and memstore imports passkey — an import cycle Go
+// rejects outright. Keep the honest parts in step with memstore.PasskeyStore.
 type fakeStore struct {
 	mu sync.Mutex
 
@@ -632,6 +639,10 @@ func (f *fakeStore) RenameCredential(_ context.Context, id, name string) error {
 	return ErrPasskeyNotFound
 }
 
+// fakeChallengeStore is an instrumented ChallengeStore: the same behavior as
+// memstore.ChallengeStore, plus an injectable SaveChallenge failure and a
+// peekChallenge accessor these tests need. See fakeStore above for why
+// memstore cannot be imported here.
 type fakeChallengeStore struct {
 	mu    sync.Mutex
 	saved map[string][]byte

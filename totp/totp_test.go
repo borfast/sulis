@@ -28,6 +28,12 @@ var errTOTPCounterRegressed = errors.New("totp: counter would regress for existi
 // credential from a pending (unverified) enrollment: see EnrollPending and
 // ConfirmEnrollment for where the atomicity that separation depends on is
 // documented and enforced.
+// memTOTPStore mirrors memstore.TOTPStore, the reference implementation the
+// storetest conformance suite is run against and the one adopters should read.
+// It is duplicated rather than imported because these tests are in package
+// totp and memstore imports totp — an import cycle Go rejects outright. Keep
+// the two in step: a divergence here means these tests are passing against a
+// store weaker than any real implementation is allowed to be.
 type memTOTPStore struct {
 	mu      sync.Mutex
 	active  map[string]*Credential

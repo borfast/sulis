@@ -10,6 +10,11 @@ import (
 )
 
 // In-memory recovery code store for testing.
+//
+// It mirrors memstore.RecoveryStore, the reference implementation the
+// storetest conformance suite is run against. It is duplicated rather than
+// imported because these tests are in package recovery and memstore imports
+// recovery — an import cycle Go rejects outright. Keep the two in step.
 type memStore struct {
 	mu    sync.Mutex
 	codes map[string]map[string]struct{}
