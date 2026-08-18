@@ -158,7 +158,29 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, fmt.Errorf("sulis: verifying password: %w", err)
 	}
 	if !ok {
+		if s.cfg.FailureLockoutThreshold > 0 {
+			s.recordFailedLogin(ctx, user.ID)
+		}
 		return nil, ErrInvalidCredentials
+	}
+
+	// The password just verified, so from here on the caller has proven
+	// they know it — only now is it safe to reveal disabled/locked status.
+	// Checking this any earlier (e.g. before the password comparison, or on
+	// the unknown-user/passwordless branches above) would let an
+	// unauthenticated caller learn that an account exists and is disabled
+	// or locked purely from the shape of the error, without ever guessing
+	// the password. See accountStatus's doc comment.
+	if err := s.accountStatus(user); err != nil {
+		return nil, err
+	}
+
+	if s.cfg.FailureLockoutThreshold > 0 && (user.FailedLoginAttempts != 0 || user.LockedUntil != nil) {
+		// The lockout window (if any) has already passed — accountStatus
+		// would have returned ErrAccountLocked above otherwise — and the
+		// correct password just proved ownership, so clear the stale
+		// bookkeeping rather than leaving it to linger.
+		s.clearFailedLogins(ctx, user.ID)
 	}
 
 	return user, nil
@@ -416,6 +438,17 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 	user, err := s.users.GetUserByID(ctx, validated.UserID)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Checked here, not just at issuance: this is what makes DisableUser
+	// take effect on every session already outstanding, not merely on the
+	// next login. Without it, disabling would leave live sessions working
+	// for the rest of their natural lifetime. Deliberately only DisabledAt,
+	// not LockedUntil — an automatic lockout (see WithFailureLockout)
+	// throttles new authentication attempts; it does not invalidate a
+	// session already issued before the lockout began.
+	if user.DisabledAt != nil {
+		return nil, nil, ErrAccountDisabled
 	}
 
 	return &validated, user, nil

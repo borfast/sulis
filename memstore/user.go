@@ -121,10 +121,10 @@ func (s *UserStore) DeleteUser(_ context.Context, id string) error {
 
 // cloneUser copies a user deeply enough that nothing mutable is shared across
 // the store boundary in either direction. A plain struct copy is not enough:
-// Metadata is a map and EmailVerifiedAt is a pointer, so a shallow copy leaves
-// the caller holding a live handle on the store's own state — able to rewrite
-// a persisted row without going through UpdateUser, which is exactly what
-// Version exists to make impossible.
+// Metadata is a map and EmailVerifiedAt, DisabledAt, and LockedUntil are each
+// a pointer, so a shallow copy leaves the caller holding a live handle on the
+// store's own state — able to rewrite a persisted row without going through
+// UpdateUser, which is exactly what Version exists to make impossible.
 //
 // The map is cloned one level deep. Values inside it are copied as-is, so a
 // caller that puts a map or a slice in Metadata still shares that inner value
@@ -138,6 +138,14 @@ func cloneUser(u *sulis.User) *sulis.User {
 	if u.EmailVerifiedAt != nil {
 		when := *u.EmailVerifiedAt
 		cp.EmailVerifiedAt = &when
+	}
+	if u.DisabledAt != nil {
+		when := *u.DisabledAt
+		cp.DisabledAt = &when
+	}
+	if u.LockedUntil != nil {
+		when := *u.LockedUntil
+		cp.LockedUntil = &when
 	}
 	return &cp
 }

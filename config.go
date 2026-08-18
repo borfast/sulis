@@ -36,6 +36,15 @@ type Config struct {
 	MaxPasswordLength              int           // maximum accepted password length in bytes (default: 1024)
 	Argon2                         Argon2Params
 	Limiter                        Limiter // rate limiter consulted at guessable choke points (default: an in-process MemoryLimiter)
+
+	// FailureLockoutThreshold, FailureLockoutBaseBackoff, and
+	// FailureLockoutMaxBackoff configure the optional automatic-lockout
+	// mechanism (see WithFailureLockout). FailureLockoutThreshold of 0
+	// (the default) disables it entirely: VerifyPassword never writes
+	// FailedLoginAttempts or LockedUntil.
+	FailureLockoutThreshold   int
+	FailureLockoutBaseBackoff time.Duration
+	FailureLockoutMaxBackoff  time.Duration
 }
 
 // Option is a functional option for configuring Sulis.
@@ -126,6 +135,41 @@ func WithRequireVerifiedEmail(require bool) Option {
 // says so in code.
 func WithLimiter(l Limiter) Option {
 	return func(c *Config) { c.Limiter = l }
+}
+
+// WithFailureLockout enables automatic, temporary lockout after threshold
+// consecutive wrong passwords for one account. Once threshold is reached,
+// VerifyPassword sets User.LockedUntil to baseBackoff after the moment of
+// the triggering failure; every further wrong password while still locked
+// pushes LockedUntil out again, doubling the backoff each time, up to
+// maxBackoff. The lockout — and the failure count behind it — clears itself
+// automatically the next time a correct password verifies outside the
+// window; there is no explicit unlock call, though DisableUser/EnableUser
+// remain available for an operator-initiated block, which is a distinct,
+// unrelated mechanism (see the README's "Account disable and lockout"
+// section).
+//
+// Default: disabled (threshold 0), so a Sulis built with no options never
+// writes FailedLoginAttempts or LockedUntil, and VerifyPassword's normal
+// path pays no extra store round trip.
+//
+// Off by default deliberately: this locks out the legitimate account owner
+// exactly as effectively as it locks out an attacker, so an attacker who
+// merely knows (or guesses) an email address can weaponize it as a
+// denial-of-service against that account — a failure mode the rate limiter
+// (on by default; see WithLimiter/MemoryLimiter) does not share, since it
+// throttles the guesser without touching the account's own ability to log
+// in once its window passes. Enable this only if your threat model needs an
+// escalating response beyond rate limiting, and prefer a long baseBackoff/
+// maxBackoff pair over a short one: the whole point is to make continued
+// guessing expensive without approaching a permanent lock a legitimate
+// owner could not eventually recover from on their own.
+func WithFailureLockout(threshold int, baseBackoff, maxBackoff time.Duration) Option {
+	return func(c *Config) {
+		c.FailureLockoutThreshold = threshold
+		c.FailureLockoutBaseBackoff = baseBackoff
+		c.FailureLockoutMaxBackoff = maxBackoff
+	}
 }
 
 // WithoutRateLimiting disables rate limiting entirely.

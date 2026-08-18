@@ -74,6 +74,15 @@ type LoginResult struct {
 // magic link — must go through here. Calling createSession directly bypasses
 // two-factor authentication.
 func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method AuthMethod) (*LoginResult, error) {
+	// This is the choke point Login (via VerifyPassword) and RedeemMagicLink
+	// both pass through. VerifyPassword already checked account status, but
+	// the magic-link path never calls VerifyPassword at all, so this is the
+	// only check protecting it. Checked ahead of email verification: a
+	// disabled or locked account should not surface a more specific
+	// "unverified email" error.
+	if err := s.accountStatus(user); err != nil {
+		return nil, err
+	}
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, err
 	}
@@ -193,6 +202,12 @@ func (s *Sulis) issueSession(ctx context.Context, auth Authentication) (*Session
 // unchanged, so the session's AuthenticatedAt reflects the moment the proof
 // was actually minted rather than this call's own, slightly later, clock read.
 func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method AuthMethod, authenticatedAt time.Time) (*Session, string, error) {
+	// Gates IssueSession and IssueSessionUnchecked too: a caller vouching
+	// for a factor sulis doesn't verify itself (e.g. a finished passkey
+	// ceremony) must not be able to sidestep account status that way.
+	if err := s.accountStatus(user); err != nil {
+		return nil, "", err
+	}
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, "", err
 	}

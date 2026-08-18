@@ -21,6 +21,35 @@ type User struct {
 	// ChangeEmail. The live Email field never changes except through a
 	// successful ConfirmEmailChange, which also clears this back to empty.
 	PendingEmail string
+	// DisabledAt records when DisableUser took the account out of service.
+	// Nil means the account is active. VerifyPassword's post-verification
+	// check, completeFirstFactor, issueSessionForUser, and CompleteTwoFactor
+	// all reject with ErrAccountDisabled while it is set, and ValidateSession
+	// rejects an already-issued session the same way — so disabling an
+	// account invalidates every session already issued, not merely future
+	// logins. Cleared only by EnableUser.
+	DisabledAt *time.Time
+	// DisabledReason is caller-supplied context recorded by DisableUser
+	// (e.g. "reported for abuse", "closed by support"). sulis never inspects
+	// it. EnableUser clears it back to empty alongside DisabledAt.
+	DisabledReason string
+	// LockedUntil records the end of a temporary authentication lockout.
+	// Nil, or a time already in the past, means the account authenticates
+	// normally. It is set only by the optional automatic-lockout mechanism
+	// (see WithFailureLockout) after repeated wrong passwords; the same
+	// post-verification checks that reject ErrAccountDisabled also reject
+	// ErrAccountLocked while this is still in the future. It is cleared
+	// (along with FailedLoginAttempts) the next time a correct password
+	// verifies outside the window — there is no explicit unlock call.
+	// Unlike DisabledAt, an active lock does not invalidate sessions already
+	// issued: ValidateSession does not check it, only new authentication
+	// does (see the README's "Account disable and lockout" section for why).
+	LockedUntil *time.Time
+	// FailedLoginAttempts counts consecutive wrong passwords since the last
+	// correct one. It only ever advances when WithFailureLockout is
+	// configured, and is reset to 0 whenever a correct password verifies
+	// outside an active lockout window.
+	FailedLoginAttempts int
 	// Version guards against lost updates. It is set by the store on read and
 	// must be passed back unchanged in UpdateUser, which applies the write
 	// only if it still matches the persisted row. Callers outside the store
@@ -32,15 +61,16 @@ type User struct {
 // Consumers implement this interface for their own database.
 //
 // A store MUST NOT share mutable state with its callers in either direction.
-// Metadata is a map and EmailVerifiedAt is a pointer, so copying a *User with
-// a plain struct assignment copies a map header and an address, not the map
-// and not the time — leaving the caller holding a live handle on the stored
-// row. That is a way to rewrite a persisted user without going through
-// UpdateUser at all, which defeats the Version precondition below by simply
-// stepping around it. Copy the map (one level is enough; values inside it are
-// the caller's business) and the pointed-to time when storing a user and when
-// returning one. Stores that reconstruct rows from a database read get this
-// for free; in-memory ones do not. storetest.RunUserStore checks it.
+// Metadata is a map and EmailVerifiedAt, DisabledAt, and LockedUntil are each
+// a pointer, so copying a *User with a plain struct assignment copies a map
+// header and an address, not the map and not the time — leaving the caller
+// holding a live handle on the stored row. That is a way to rewrite a
+// persisted user without going through UpdateUser at all, which defeats the
+// Version precondition below by simply stepping around it. Copy the map (one
+// level is enough; values inside it are the caller's business) and each
+// pointed-to time when storing a user and when returning one. Stores that
+// reconstruct rows from a database read get this for free; in-memory ones do
+// not. storetest.RunUserStore checks it.
 //
 // Email uniqueness MUST be enforced at the storage layer — e.g. a SQL UNIQUE
 // index on the normalized email column — and CreateUser and UpdateUser MUST

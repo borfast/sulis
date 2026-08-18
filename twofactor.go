@@ -54,6 +54,14 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	if err != nil {
 		return nil, err
 	}
+	// This mints a session directly, exactly like completeFirstFactor and
+	// issueSessionForUser do (see accountStatus's doc comment on why every
+	// such path checks this) — an account disabled between the first
+	// factor and this completion step must not be able to finish logging
+	// in on the strength of a pending token minted before the disable.
+	if err := s.accountStatus(user); err != nil {
+		return nil, err
+	}
 	if err := s.requireVerifiedEmail(user); err != nil {
 		return nil, err
 	}

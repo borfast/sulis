@@ -51,4 +51,22 @@ var (
 
 	// Rate limiting.
 	ErrRateLimited = errors.New("sulis: rate limited")
+
+	// Account status errors.
+	//
+	// ErrAccountDisabled is returned once a credential has verified for an
+	// account DisableUser marked disabled — VerifyPassword checks this only
+	// after a successful password verification, so a caller who has not
+	// proven the password cannot use it to learn whether an account exists
+	// and is disabled. ValidateSession also returns it for a pre-existing
+	// session belonging to a disabled account, so disabling takes effect on
+	// every live session immediately rather than only on the next login.
+	ErrAccountDisabled = errors.New("sulis: account disabled")
+	// ErrAccountLocked is returned the same way — only after a credential
+	// has verified — for an account whose LockedUntil (set by the optional
+	// automatic lockout; see WithFailureLockout) has not yet passed. Unlike
+	// ErrAccountDisabled, it is not checked by ValidateSession: a lockout
+	// throttles new authentication attempts, it does not invalidate a
+	// session already issued before the lockout began.
+	ErrAccountLocked = errors.New("sulis: account locked")
 )

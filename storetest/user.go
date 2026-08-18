@@ -318,6 +318,86 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 		assertMetadataUnchanged(t, "UpdateUser", updated.Metadata, "role", "admin")
 	})
 
+	t.Run("DisableAndLockFieldsRoundTripAndAreNotAliased", func(t *testing.T) {
+		store := factory()
+		u := newUser()
+		if err := store.CreateUser(ctx, u); err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+
+		read, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		disabledAt := time.Now().UTC().Truncate(time.Second)
+		lockedUntil := disabledAt.Add(time.Hour)
+		read.DisabledAt = &disabledAt
+		read.DisabledReason = "reported for abuse"
+		read.LockedUntil = &lockedUntil
+		read.FailedLoginAttempts = 3
+		if err := store.UpdateUser(ctx, read); err != nil {
+			t.Fatalf("UpdateUser: %v", err)
+		}
+
+		after, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		if after.DisabledAt == nil || !after.DisabledAt.Equal(disabledAt) {
+			t.Errorf("DisabledAt = %v, want %v", after.DisabledAt, disabledAt)
+		}
+		if after.DisabledReason != "reported for abuse" {
+			t.Errorf("DisabledReason = %q, want %q", after.DisabledReason, "reported for abuse")
+		}
+		if after.LockedUntil == nil || !after.LockedUntil.Equal(lockedUntil) {
+			t.Errorf("LockedUntil = %v, want %v", after.LockedUntil, lockedUntil)
+		}
+		if after.FailedLoginAttempts != 3 {
+			t.Errorf("FailedLoginAttempts = %d, want 3", after.FailedLoginAttempts)
+		}
+
+		// Mutating the pointers on a value returned by the store must not
+		// reach the stored row — the same aliasing trap EmailVerifiedAt
+		// already guards against above, and DisabledAt/LockedUntil are
+		// pointers for the same reason.
+		if after.DisabledAt != nil {
+			*after.DisabledAt = time.Unix(0, 0).UTC()
+		}
+		if after.LockedUntil != nil {
+			*after.LockedUntil = time.Unix(0, 0).UTC()
+		}
+		reread, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		if reread.DisabledAt != nil && reread.DisabledAt.Equal(time.Unix(0, 0).UTC()) {
+			t.Fatal("mutating *DisabledAt on the value returned by GetUserByID changed stored state — the pointer must not be shared with the store")
+		}
+		if reread.LockedUntil != nil && reread.LockedUntil.Equal(time.Unix(0, 0).UTC()) {
+			t.Fatal("mutating *LockedUntil on the value returned by GetUserByID changed stored state — the pointer must not be shared with the store")
+		}
+
+		// EnableUser-equivalent: clearing both pointers back to nil must
+		// round-trip as nil, not linger as a stale non-nil value.
+		reread.DisabledAt = nil
+		reread.DisabledReason = ""
+		reread.LockedUntil = nil
+		reread.FailedLoginAttempts = 0
+		if err := store.UpdateUser(ctx, reread); err != nil {
+			t.Fatalf("UpdateUser clearing disable/lock fields: %v", err)
+		}
+		cleared, err := store.GetUserByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID: %v", err)
+		}
+		if cleared.DisabledAt != nil {
+			t.Errorf("DisabledAt = %v, want nil after clearing", cleared.DisabledAt)
+		}
+		if cleared.LockedUntil != nil {
+			t.Errorf("LockedUntil = %v, want nil after clearing", cleared.LockedUntil)
+		}
+	})
+
 	t.Run("ConcurrentUpdateUserFromOneReadHasExactlyOneWinner", func(t *testing.T) {
 		const racers = 8
 
@@ -480,5 +560,11 @@ func assertUserMatches(t *testing.T, op string, got, want *sulis.User) {
 	}
 	if got.PendingEmail != want.PendingEmail {
 		t.Errorf("%s: PendingEmail = %q, want %q", op, got.PendingEmail, want.PendingEmail)
+	}
+	if got.DisabledReason != want.DisabledReason {
+		t.Errorf("%s: DisabledReason = %q, want %q", op, got.DisabledReason, want.DisabledReason)
+	}
+	if got.FailedLoginAttempts != want.FailedLoginAttempts {
+		t.Errorf("%s: FailedLoginAttempts = %d, want %d", op, got.FailedLoginAttempts, want.FailedLoginAttempts)
 	}
 }

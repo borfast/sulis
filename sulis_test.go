@@ -111,8 +111,9 @@ func (s *memUserStore) UpdateUser(_ context.Context, u *User) error {
 
 // cloneTestUser mirrors memstore's cloneUser: UserStore's contract forbids a
 // store from sharing mutable state with its callers, and a plain struct copy
-// shares Metadata's map and EmailVerifiedAt's pointer. Kept here so this
-// double is not weaker than the contract storetest holds real stores to.
+// shares Metadata's map and EmailVerifiedAt/DisabledAt/LockedUntil's
+// pointers. Kept here so this double is not weaker than the contract
+// storetest holds real stores to.
 func cloneTestUser(u *User) *User {
 	cp := *u
 	if u.Metadata != nil {
@@ -121,6 +122,14 @@ func cloneTestUser(u *User) *User {
 	if u.EmailVerifiedAt != nil {
 		when := *u.EmailVerifiedAt
 		cp.EmailVerifiedAt = &when
+	}
+	if u.DisabledAt != nil {
+		when := *u.DisabledAt
+		cp.DisabledAt = &when
+	}
+	if u.LockedUntil != nil {
+		when := *u.LockedUntil
+		cp.LockedUntil = &when
 	}
 	return &cp
 }
@@ -3014,5 +3023,455 @@ func TestCompleteTwoFactorRecordsTwoFactorMethod(t *testing.T) {
 	}
 	if res2.Session.Method != AuthMethodTwoFactor {
 		t.Errorf("CompleteTwoFactor session Method = %q, want %q", res2.Session.Method, AuthMethodTwoFactor)
+	}
+}
+
+// --- T502: Account disable and lockout ------------------------------------
+//
+// See status.go. The four required behaviors are covered by one test each:
+// a disabled account cannot authenticate, an already-issued session dies
+// via ValidateSession's own check the moment the account is disabled
+// (isolated from DisableUser's session-revocation side effect below),
+// a locked account recovers once LockedUntil passes, and DisableUser
+// revokes every session. The optional automatic-lockout mechanism
+// (WithFailureLockout) is covered separately further down.
+
+// disableUserDirect stamps DisabledAt/DisabledReason on the stored user
+// without calling DisableUser, so a test can isolate ValidateSession's own
+// status check from DisableUser's session-revocation side effect.
+func disableUserDirect(t *testing.T, users *memUserStore, userID, reason string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := users.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	now := time.Now()
+	u.DisabledAt = &now
+	u.DisabledReason = reason
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+}
+
+// lockUserUntil stamps LockedUntil directly on the stored user, bypassing
+// the automatic-lockout mechanism, so a test can pin the pure
+// locked/expired check in isolation from whatever triggers a lock in
+// practice.
+func lockUserUntil(t *testing.T, users *memUserStore, userID string, until time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := users.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	u.LockedUntil = &until
+	if err := users.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+}
+
+// TestDisableUserBlocksLogin asserts that Login for a disabled account fails
+// with ErrAccountDisabled, carrying the ratified message
+// "sulis: account disabled".
+func TestDisableUserBlocksLogin(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	_, err = s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("Login error = %v, want ErrAccountDisabled", err)
+	}
+	if err.Error() != "sulis: account disabled" {
+		t.Fatalf("Login error message = %q, want %q", err.Error(), "sulis: account disabled")
+	}
+}
+
+// TestValidateSessionRejectsDisabledAccountsExistingSession asserts that
+// ValidateSession's own status check — not DisableUser's session
+// revocation — is what kills a pre-existing session immediately once the
+// account is disabled. DisabledAt is stamped directly here, bypassing
+// DisableUser entirely, so the session this test validates was never
+// touched by revocation; this is the isolation the T502 brief's mutation
+// test ("remove the ValidateSession status check -> this test must fail")
+// depends on.
+func TestValidateSessionRejectsDisabledAccountsExistingSession(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, token, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	disableUserDirect(t, users, user.ID, "reported for abuse")
+
+	if _, _, err := s.ValidateSession(ctx, token); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("ValidateSession error = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// TestDisableUserRevokesAllSessions asserts that DisableUser itself deletes
+// every session belonging to the account, independent of ValidateSession's
+// own check (proven separately above).
+func TestDisableUserRevokesAllSessions(t *testing.T) {
+	s, users, sessions, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+	if _, _, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPassword); err != nil {
+		t.Fatalf("IssueSessionUnchecked: %v", err)
+	}
+	if got := sessions.count(); got != 2 {
+		t.Fatalf("sessions.count() before DisableUser = %d, want 2", got)
+	}
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	if got := sessions.count(); got != 0 {
+		t.Fatalf("sessions.count() after DisableUser = %d, want 0", got)
+	}
+}
+
+// TestEnableUserRestoresLogin asserts that EnableUser reverses DisableUser:
+// login works again, and DisabledAt/DisabledReason are cleared.
+func TestEnableUserRestoresLogin(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	if err := s.EnableUser(ctx, user.ID); err != nil {
+		t.Fatalf("EnableUser: %v", err)
+	}
+
+	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+		t.Fatalf("Login after EnableUser: %v", err)
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.DisabledAt != nil {
+		t.Errorf("DisabledAt = %v, want nil after EnableUser", after.DisabledAt)
+	}
+	if after.DisabledReason != "" {
+		t.Errorf("DisabledReason = %q, want empty after EnableUser", after.DisabledReason)
+	}
+}
+
+// TestDisableUserUnknownUserReturnsErrUserNotFound and
+// TestEnableUserUnknownUserReturnsErrUserNotFound pin the not-found case
+// for both methods.
+func TestDisableUserUnknownUserReturnsErrUserNotFound(t *testing.T) {
+	s := newTestSulis()
+	if err := s.DisableUser(context.Background(), "no-such-user", "reason"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("DisableUser error = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestEnableUserUnknownUserReturnsErrUserNotFound(t *testing.T) {
+	s := newTestSulis()
+	if err := s.EnableUser(context.Background(), "no-such-user"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("EnableUser error = %v, want ErrUserNotFound", err)
+	}
+}
+
+// TestAccountLockBlocksLoginUntilDeadlinePasses pins the pure
+// locked/expired check: LockedUntil in the future blocks Login with
+// ErrAccountLocked (message "sulis: account locked"); once the deadline is
+// in the past, Login succeeds again with no explicit unlock call. LockedUntil
+// is stamped directly, independent of whatever triggers a lock in practice
+// (see the WithFailureLockout tests below for that), so this is the
+// isolation the T502 brief's mutation test ("remove the lockout expiry
+// check -> this test must fail") depends on.
+func TestAccountLockBlocksLoginUntilDeadlinePasses(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	lockUserUntil(t, users, user.ID, time.Now().Add(time.Hour))
+
+	_, err = s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if !errors.Is(err, ErrAccountLocked) {
+		t.Fatalf("Login error = %v, want ErrAccountLocked", err)
+	}
+	if err.Error() != "sulis: account locked" {
+		t.Fatalf("Login error message = %q, want %q", err.Error(), "sulis: account locked")
+	}
+
+	lockUserUntil(t, users, user.ID, time.Now().Add(-time.Minute))
+
+	if _, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+		t.Fatalf("Login after LockedUntil passed: %v", err)
+	}
+}
+
+// TestVerifyPasswordChecksAccountStatusOnlyAfterPasswordVerifies pins the
+// account-status oracle discipline the T502 brief demands: a wrong password
+// against a disabled account returns the ordinary ErrInvalidCredentials,
+// not ErrAccountDisabled, so a caller who has not proven the password
+// cannot use the distinct error to learn that the account exists and is
+// disabled.
+func TestVerifyPasswordChecksAccountStatusOnlyAfterPasswordVerifies(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	_, err = s.VerifyPassword(ctx, "alice@example.com", "wrong-password", RequestInfo{})
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("VerifyPassword with a wrong password for a disabled account error = %v, want ErrInvalidCredentials", err)
+	}
+	if errors.Is(err, ErrAccountDisabled) {
+		t.Fatal("VerifyPassword leaked ErrAccountDisabled on a wrong password — this is the oracle the brief forbids")
+	}
+}
+
+// TestCompleteTwoFactorRejectsDisabledAccount asserts that a pending
+// two-factor login cannot be completed for an account disabled after the
+// first factor was verified but before the second-factor step —
+// CompleteTwoFactor mints a session directly (like completeFirstFactor and
+// issueSessionForUser do) and so must be gated too, even though it is not
+// named in the T502 brief's file list (see the T502 Decisions row).
+func TestCompleteTwoFactorRejectsDisabledAccount(t *testing.T) {
+	s, users, _, _, factors := newTestEnvWithFactors(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+	factors.enroll(user.ID)
+
+	res, err := s.Login(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if !res.NeedsSecondFactor {
+		t.Fatal("expected NeedsSecondFactor")
+	}
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	if _, err := s.CompleteTwoFactor(ctx, user.ID, res.PendingToken, RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("CompleteTwoFactor error = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// TestIssueSessionUncheckedRejectsDisabledAccount asserts that the
+// caller-vouches-for-it session-issuance primitive still refuses a
+// disabled account — a caller vouching for a factor sulis doesn't verify
+// itself must not be able to sidestep account status.
+func TestIssueSessionUncheckedRejectsDisabledAccount(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	if _, _, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPasskey); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("IssueSessionUnchecked error = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// TestRedeemMagicLinkRejectsDisabledAccount asserts that completeFirstFactor
+// gates the magic-link path too, not only Login's password path — magic
+// link redemption never calls VerifyPassword at all, so this is the only
+// check that protects it.
+func TestRedeemMagicLinkRejectsDisabledAccount(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	rawToken, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+
+	if err := s.DisableUser(ctx, user.ID, "reported for abuse"); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	if _, err := s.RedeemMagicLink(ctx, rawToken, RequestInfo{}); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("RedeemMagicLink error = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// --- Optional automatic lockout (WithFailureLockout) ----------------------
+
+// TestFailureLockoutDisabledByDefault asserts that a Sulis built with no
+// options never locks an account no matter how many wrong passwords it
+// sees — the feature is opt-in because an attacker-triggered lockout is
+// itself a denial of service. Rate limiting is disabled here so the loop
+// exercises VerifyPassword's own bookkeeping rather than tripping the
+// (separate, on-by-default) limiter.
+func TestFailureLockoutDisabledByDefault(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	for i := 0; i < 20; i++ {
+		if _, err := s.VerifyPassword(ctx, "alice@example.com", "wrong-password", RequestInfo{}); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: VerifyPassword error = %v, want ErrInvalidCredentials", i, err)
+		}
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.FailedLoginAttempts != 0 {
+		t.Errorf("FailedLoginAttempts = %d, want 0 with lockout disabled", after.FailedLoginAttempts)
+	}
+	if after.LockedUntil != nil {
+		t.Errorf("LockedUntil = %v, want nil with lockout disabled", after.LockedUntil)
+	}
+
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+		t.Fatalf("VerifyPassword with the correct password after 20 failures: %v", err)
+	}
+}
+
+// TestWithFailureLockoutLocksAfterThreshold drives the configured automatic
+// lockout end to end: threshold consecutive wrong passwords set LockedUntil
+// in the future and block even the correct password with ErrAccountLocked;
+// once the window has passed (simulated by direct store manipulation rather
+// than sleeping, for a deterministic test), the correct password both
+// succeeds and clears the bookkeeping.
+func TestWithFailureLockoutLocksAfterThreshold(t *testing.T) {
+	s, users, _, _ := newTestEnv(
+		WithArgon2Params(testArgon2Params),
+		WithoutRateLimiting(),
+		WithFailureLockout(3, 100*time.Millisecond, time.Second),
+	)
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.VerifyPassword(ctx, "alice@example.com", "wrong-password", RequestInfo{}); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: VerifyPassword error = %v, want ErrInvalidCredentials", i, err)
+		}
+	}
+
+	after, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if after.FailedLoginAttempts != 3 {
+		t.Fatalf("FailedLoginAttempts = %d, want 3", after.FailedLoginAttempts)
+	}
+	if after.LockedUntil == nil || !after.LockedUntil.After(time.Now()) {
+		t.Fatalf("LockedUntil = %v, want a time in the future", after.LockedUntil)
+	}
+
+	// The correct password no longer authenticates immediately: the account
+	// is locked until the backoff passes.
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); !errors.Is(err, ErrAccountLocked) {
+		t.Fatalf("VerifyPassword with the correct password while locked error = %v, want ErrAccountLocked", err)
+	}
+
+	// Fast-forward past the lockout window by direct store manipulation
+	// (rather than sleeping) and confirm the correct password both succeeds
+	// and clears the bookkeeping — no explicit unlock call exists or is
+	// needed.
+	lockUserUntil(t, users, user.ID, time.Now().Add(-time.Minute))
+
+	if _, err := s.VerifyPassword(ctx, "alice@example.com", "password123", RequestInfo{}); err != nil {
+		t.Fatalf("VerifyPassword after the lockout window: %v", err)
+	}
+
+	cleared, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if cleared.FailedLoginAttempts != 0 {
+		t.Errorf("FailedLoginAttempts = %d, want 0 after a successful verification past the lockout window", cleared.FailedLoginAttempts)
+	}
+	if cleared.LockedUntil != nil {
+		t.Errorf("LockedUntil = %v, want nil after a successful verification past the lockout window", cleared.LockedUntil)
+	}
+}
+
+// TestLockoutBackoffGrowsExponentiallyAndCaps pins lockoutBackoff's pure
+// math directly: base, doubling per excess failure, capped at max, with no
+// overflow or negative result for an absurdly large excess.
+func TestLockoutBackoffGrowsExponentiallyAndCaps(t *testing.T) {
+	base := 100 * time.Millisecond
+	max := time.Second
+	cases := []struct {
+		excess int
+		want   time.Duration
+	}{
+		{0, 100 * time.Millisecond},
+		{1, 200 * time.Millisecond},
+		{2, 400 * time.Millisecond},
+		{3, 800 * time.Millisecond},
+		{4, time.Second},             // uncapped would be 1.6s; clamped to max
+		{-1, 100 * time.Millisecond}, // negative excess clamps to 0
+		{1000, time.Second},          // absurd excess still clamps, no overflow
+	}
+	for _, c := range cases {
+		if got := lockoutBackoff(base, max, c.excess); got != c.want {
+			t.Errorf("lockoutBackoff(%v, %v, %d) = %v, want %v", base, max, c.excess, got, c.want)
+		}
 	}
 }
