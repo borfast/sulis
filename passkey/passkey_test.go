@@ -1307,6 +1307,109 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent(t *testing.
 	}
 }
 
+// TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKFalse is carried
+// coverage for T203: it pins the other half of credPropsResidentKey's
+// boolean case, a client that reports the credProps extension but explicitly
+// says the credential is not client-side discoverable (credProps.rk =
+// false), as distinct from a client that omits the extension entirely
+// (TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent). Both hit
+// the same safe-fallback return in credPropsResidentKey, but only this test
+// exercises the explicit-false branch of its type assertion.
+func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKFalse(t *testing.T) {
+	t.Parallel()
+
+	rk := false
+	body, challenge, _ := registrationSpecVectorNoneES256(t, &rk, nil)
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if cred.Discoverable {
+		t.Error("Discoverable = true, want false when the client's credProps.rk = false")
+	}
+}
+
+// TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKIsNotBool is
+// carried coverage for T203: credPropsResidentKey's type assertion on
+// credProps.rk (rk, _ := credProps["rk"].(bool)) must fail safe — not
+// discoverable, no error — when a client reports credProps.rk as something
+// other than a bool (a malformed or unexpected browser response), rather
+// than panicking, erroring the ceremony, or defaulting to discoverable. This
+// pins that the OR of "absent" and "wrong type" both land on the same
+// fallback, which is why the two cases were previously carried together with
+// only one covered.
+func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKIsNotBool(t *testing.T) {
+	t.Parallel()
+
+	placeholder := true
+	body, challenge, _ := registrationSpecVectorNoneES256(t, &placeholder, nil)
+
+	var response map[string]any
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("unmarshal fixture response: %v", err)
+	}
+	ext, ok := response["clientExtensionResults"].(map[string]any)
+	if !ok {
+		t.Fatalf("fixture response has no clientExtensionResults: %#v", response)
+	}
+	credProps, ok := ext["credProps"].(map[string]any)
+	if !ok {
+		t.Fatalf("fixture clientExtensionResults has no credProps: %#v", ext)
+	}
+	credProps["rk"] = "yes" // non-bool: a malformed or unexpected client value
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal mutated response: %v", err)
+	}
+
+	store := &fakeStore{}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+
+	cred, err := service.FinishRegistration(context.Background(), user, req)
+	if err != nil {
+		t.Fatalf("FinishRegistration() error = %v", err)
+	}
+	if cred.Discoverable {
+		t.Error("Discoverable = true, want false when the client's credProps.rk is not a bool")
+	}
+}
+
 // TestFinishRegistrationRecordsBackupFlags is part of the regression coverage
 // for audit finding C12: BackupEligible/BackupState were discarded even
 // though go-webauthn already verifies them from the signed authenticator
