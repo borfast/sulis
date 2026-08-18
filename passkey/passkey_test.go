@@ -42,6 +42,40 @@ func TestBeginRegistrationSavesChallenge(t *testing.T) {
 	}
 }
 
+// TestBeginRegistrationExcludesExistingCredentials is the regression test for
+// audit finding A5: BeginRegistration never consulted the store, so the
+// browser's "you already registered this key" prompt never fired and users
+// could create duplicate credentials for the same authenticator.
+func TestBeginRegistrationExcludesExistingCredentials(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{credentialsByUser: map[string][]Credential{
+		"user-1": {
+			{CredentialID: []byte("credential-1")},
+		},
+	}}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+	user := &User{
+		ID:          []byte("user-1"),
+		Name:        "user@example.com",
+		DisplayName: "User One",
+	}
+
+	creation, err := service.BeginRegistration(context.Background(), user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+
+	exclude := creation.Response.CredentialExcludeList
+	if len(exclude) != 1 {
+		t.Fatalf("CredentialExcludeList has %d entries, want 1 (got %#v)", len(exclude), exclude)
+	}
+	if string(exclude[0].CredentialID) != "credential-1" {
+		t.Fatalf("CredentialExcludeList[0].CredentialID = %q, want %q", exclude[0].CredentialID, "credential-1")
+	}
+}
+
 func TestBeginLoginSavesChallenge(t *testing.T) {
 	t.Parallel()
 

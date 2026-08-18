@@ -54,19 +54,32 @@ func WithUserVerification(uv protocol.UserVerificationRequirement) Option {
 	return func(c *serviceConfig) { c.userVerification = uv }
 }
 
-// User adapts a consumer's user type to the webauthn.User interface.
-// Consumers create this from their own user type when calling Service methods.
+// User identifies a consumer's user account to the passkey Service.
+// Consumers create this from their own user type when calling Service
+// methods.
 type User struct {
 	ID          []byte
 	Name        string
 	DisplayName string
-	Credentials []Credential
 }
 
-func (u *User) WebAuthnID() []byte                         { return u.ID }
-func (u *User) WebAuthnName() string                       { return u.Name }
-func (u *User) WebAuthnDisplayName() string                { return u.DisplayName }
-func (u *User) WebAuthnCredentials() []webauthn.Credential { return toWebAuthnCreds(u.Credentials) }
+// webauthnUser adapts a *User plus a store-loaded credential list to the
+// webauthn.User interface expected by github.com/go-webauthn/webauthn.
+// Service builds this internally for every ceremony so the credential list
+// always reflects what the store has on record; User itself carries no
+// Credentials field, so a caller cannot smuggle in a stale or fabricated
+// list.
+type webauthnUser struct {
+	user        *User
+	credentials []Credential
+}
+
+func (u *webauthnUser) WebAuthnID() []byte          { return u.user.ID }
+func (u *webauthnUser) WebAuthnName() string        { return u.user.Name }
+func (u *webauthnUser) WebAuthnDisplayName() string { return u.user.DisplayName }
+func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential {
+	return toWebAuthnCreds(u.credentials)
+}
 
 // Service manages WebAuthn passkey registration and authentication.
 type Service struct {
@@ -109,9 +122,21 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 }
 
 // BeginRegistration starts the WebAuthn registration ceremony.
-// Returns the credential creation options to send to the client.
+// Returns the credential creation options to send to the client. The
+// options' excludeCredentials list is populated from the store's existing
+// credentials for this user, so the authenticator can tell the browser
+// "you already registered this key" instead of silently creating a
+// duplicate credential.
 func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.CredentialCreation, error) {
-	creation, sessionData, err := s.wa.BeginRegistration(user)
+	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	waUser := &webauthnUser{user: user, credentials: creds}
+	exclude := webauthn.Credentials(toWebAuthnCreds(creds)).CredentialDescriptors()
+
+	creation, sessionData, err := s.wa.BeginRegistration(waUser, webauthn.WithExclusions(exclude))
 	if err != nil {
 		return nil, fmt.Errorf("passkey: begin registration: %w", err)
 	}
@@ -147,7 +172,8 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
-	waCredential, err := s.wa.FinishRegistration(user, sessionData, r)
+	waUser := &webauthnUser{user: user}
+	waCredential, err := s.wa.FinishRegistration(waUser, sessionData, r)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: finish registration: %w", err)
 	}
@@ -185,9 +211,9 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 	if len(creds) == 0 {
 		return nil, "", ErrPasskeyNotFound
 	}
-	user.Credentials = creds
+	waUser := &webauthnUser{user: user, credentials: creds}
 
-	assertion, sessionData, err := s.wa.BeginLogin(user, webauthn.WithUserVerification(s.cfg.userVerification))
+	assertion, sessionData, err := s.wa.BeginLogin(waUser, webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
 		return nil, "", fmt.Errorf("passkey: begin login: %w", err)
 	}
@@ -221,7 +247,7 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string
 	if err != nil {
 		return nil, err
 	}
-	user.Credentials = creds
+	waUser := &webauthnUser{user: user, credentials: creds}
 
 	key := challengeKey("login", ceremonyID)
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
@@ -234,7 +260,7 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
-	waCredential, err := s.wa.FinishLogin(user, sessionData, r)
+	waCredential, err := s.wa.FinishLogin(waUser, sessionData, r)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrChallengeFailed, err)
 	}
@@ -296,7 +322,7 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string
 		if cred.UserID != string(userHandle) {
 			return nil, ErrChallengeFailed
 		}
-		return &User{ID: userHandle, Credentials: []Credential{*cred}}, nil
+		return &webauthnUser{user: &User{ID: userHandle}, credentials: []Credential{*cred}}, nil
 	}
 
 	waCred, err := s.wa.FinishDiscoverableLogin(handler, sessionData, r)
@@ -339,9 +365,9 @@ func toWebAuthnCreds(creds []Credential) []webauthn.Credential {
 	return result
 }
 
-// challengeKey scopes a challenge store key by ceremony kind ("register" or
-// "login") so that concurrent registration and login ceremonies for the same
-// user do not overwrite each other's saved challenge.
+// challengeKey scopes a challenge store key by ceremony kind ("register",
+// "login", or "discover") so that concurrent registration and login
+// ceremonies for the same user do not overwrite each other's saved challenge.
 func challengeKey(kind, id string) string {
 	return kind + ":" + id
 }
