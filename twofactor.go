@@ -56,7 +56,12 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 	}
 	// Both factors are done, so this issues a session directly rather than
 	// going through completeFirstFactor — asking the checker again here would
-	// demand a second factor immediately after verifying one.
+	// demand a second factor immediately after verifying one. It also skips
+	// the public IssueSession(Authentication) path: user is already loaded,
+	// and IssueSession would just reload it by ID, paying a store round trip
+	// this call site doesn't need to pay. Everything this function just
+	// checked (token ownership, current email-verification state) is exactly
+	// what an Authentication would otherwise vouch for.
 	session, sessionToken, err := s.createSession(ctx, user.ID)
 	if err != nil {
 		return nil, err

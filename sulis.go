@@ -164,31 +164,6 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 	return user, nil
 }
 
-// IssueSession creates a new session for the given user ID. It returns
-// ErrUserNotFound if userID does not exist, and ErrEmailNotVerified if the
-// account's email is unverified and RequireVerifiedEmail is enabled
-// (default).
-//
-// Callers MUST invoke this only after fully authenticating the user (e.g. a
-// finished passkey ceremony or completed 2FA).
-func (s *Sulis) IssueSession(ctx context.Context, userID string) (*Session, string, error) {
-	user, err := s.users.GetUserByID(ctx, userID)
-	if err != nil {
-		return nil, "", err
-	}
-	return s.issueSessionForUser(ctx, user)
-}
-
-// issueSessionForUser gates and creates a session for an already-loaded user,
-// avoiding a redundant store round-trip for callers (like Login) that already
-// have the user in hand.
-func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, string, error) {
-	if err := s.requireVerifiedEmail(user); err != nil {
-		return nil, "", err
-	}
-	return s.createSession(ctx, user.ID)
-}
-
 // ChangePassword changes a user's password after verifying the old password.
 // The length policy applies only to the new password; the old one was
 // already validated when it was set.

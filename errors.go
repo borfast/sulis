@@ -13,6 +13,15 @@ var (
 	// Credential errors.
 	ErrInvalidCredentials = errors.New("sulis: invalid credentials")
 
+	// Authentication errors.
+	//
+	// ErrNotAuthenticated is returned by IssueSession when given the zero
+	// value Authentication{} (or any Authentication not obtained by
+	// completing a factor sulis itself verified, since nothing outside this
+	// package can construct one otherwise). It means there is no proof of
+	// authentication to act on, not that a specific credential was wrong.
+	ErrNotAuthenticated = errors.New("sulis: not authenticated")
+
 	// Session errors.
 	ErrSessionNotFound = errors.New("sulis: session not found")
 	ErrSessionExpired  = errors.New("sulis: session expired")

@@ -1550,10 +1550,25 @@ func TestVerifyPasswordWrongPasswordReturnsInvalidCredentials(t *testing.T) {
 	}
 }
 
+// TestIssueSessionRejectsZeroValueAuthentication is the regression test for
+// finding B6: IssueSession used to accept a bare userID, so any caller could
+// mint a fully-privileged session for an arbitrary user with nothing proving
+// they had actually authenticated. Authentication's zero value carries no
+// user ID, and IssueSession must reject it with ErrNotAuthenticated rather
+// than treating the empty string as a real (if unlikely) user ID.
+func TestIssueSessionRejectsZeroValueAuthentication(t *testing.T) {
+	s := newTestSulis()
+	ctx := context.Background()
+
+	if _, _, err := s.IssueSession(ctx, Authentication{}); err != ErrNotAuthenticated {
+		t.Fatalf("expected ErrNotAuthenticated, got %v", err)
+	}
+}
+
 // TestIssueSessionReturnsValidatableSession asserts that IssueSession
-// produces a session that round-trips through ValidateSession, since it's
-// meant to be called directly after out-of-band authentication (passkey,
-// completed 2FA) with no password check of its own.
+// produces a session that round-trips through ValidateSession, given a valid
+// Authentication proof (minted here via newAuthentication, since only this
+// package can construct one).
 func TestIssueSessionReturnsValidatableSession(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 	ctx := context.Background()
@@ -1565,9 +1580,44 @@ func TestIssueSessionReturnsValidatableSession(t *testing.T) {
 	// Verification is incidental to this test; the gate is covered elsewhere.
 	verifyUserEmail(t, users, user.ID)
 
-	session, sessionTok, err := s.IssueSession(ctx, user.ID)
+	auth := newAuthentication(user.ID, AuthMethodPassword)
+	session, sessionTok, err := s.IssueSession(ctx, auth)
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
+	}
+	if sessionTok == "" {
+		t.Fatal("expected non-empty session token")
+	}
+
+	gotSession, gotUser, err := s.ValidateSession(ctx, sessionTok)
+	if err != nil {
+		t.Fatalf("ValidateSession: %v", err)
+	}
+	if gotSession.ID != session.ID {
+		t.Fatalf("expected session ID %s, got %s", session.ID, gotSession.ID)
+	}
+	if gotUser.ID != user.ID {
+		t.Fatalf("expected user ID %s, got %s", user.ID, gotUser.ID)
+	}
+}
+
+// TestIssueSessionUncheckedCreatesValidatableSession asserts that
+// IssueSessionUnchecked preserves IssueSession's old bare-userID behavior —
+// under a name that says so in code review — for a factor sulis does not
+// know about (e.g. a finished passkey ceremony).
+func TestIssueSessionUncheckedCreatesValidatableSession(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	verifyUserEmail(t, users, user.ID)
+
+	session, sessionTok, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPasskey)
+	if err != nil {
+		t.Fatalf("IssueSessionUnchecked: %v", err)
 	}
 	if sessionTok == "" {
 		t.Fatal("expected non-empty session token")
@@ -2104,8 +2154,12 @@ func TestUnverifiedAccountCannotStartNewSessions(t *testing.T) {
 		t.Fatalf("CreateTwoFactorToken: expected ErrEmailNotVerified, got %v", err)
 	}
 
-	if _, _, err := s.IssueSession(ctx, user.ID); err != ErrEmailNotVerified {
+	if _, _, err := s.IssueSession(ctx, newAuthentication(user.ID, AuthMethodPassword)); err != ErrEmailNotVerified {
 		t.Fatalf("IssueSession: expected ErrEmailNotVerified, got %v", err)
+	}
+
+	if _, _, err := s.IssueSessionUnchecked(ctx, user.ID, AuthMethodPasskey); err != ErrEmailNotVerified {
+		t.Fatalf("IssueSessionUnchecked: expected ErrEmailNotVerified, got %v", err)
 	}
 
 	// Mint a pending 2FA token while the account is verified, then unverify
@@ -2215,8 +2269,12 @@ func TestIssueSessionUnknownUserReturnsErrUserNotFound(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, _, err := s.IssueSession(ctx, "unknown-user-id"); err != ErrUserNotFound {
+	if _, _, err := s.IssueSession(ctx, newAuthentication("unknown-user-id", AuthMethodPassword)); err != ErrUserNotFound {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+
+	if _, _, err := s.IssueSessionUnchecked(ctx, "unknown-user-id", AuthMethodPasskey); err != ErrUserNotFound {
+		t.Fatalf("IssueSessionUnchecked: expected ErrUserNotFound, got %v", err)
 	}
 }
 

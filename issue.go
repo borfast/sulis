@@ -100,6 +100,96 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 	return &LoginResult{User: user, Session: session, SessionToken: token}, nil
 }
 
+// Authentication is opaque proof that a user has completed authentication —
+// every factor sulis itself verified, not merely a caller's say-so. Its
+// fields are unexported and there is no exported constructor that takes a
+// bare user ID, so nothing outside this package can produce a valid value.
+//
+// The zero value carries no user ID. IssueSession rejects it (and any other
+// invalid Authentication) with ErrNotAuthenticated rather than treating an
+// empty user ID as real, so a forgotten or zeroed proof fails loudly instead
+// of silently minting a session for whichever account that empty string
+// happens to resolve to.
+//
+// completeFirstFactor mints one internally when a first factor is verified
+// and no second factor is enrolled; CompleteTwoFactor mints one once the
+// second factor is verified too. Neither currently routes through
+// IssueSession itself — both already hold the *User in hand and call
+// createSession/issueSessionForUser directly, avoiding the redundant store
+// round trip IssueSession's user-ID-only input would otherwise force — but
+// the type exists so that, in code rather than only in a doc comment, "this
+// user is authenticated" is a value only this package can produce.
+type Authentication struct {
+	userID string
+	method AuthMethod
+	at     time.Time
+}
+
+// newAuthentication mints an Authentication proof for userID via method,
+// timestamped now. It is unexported: this is the only way to produce a valid
+// Authentication, and nothing outside this package can reach it.
+func newAuthentication(userID string, method AuthMethod) Authentication {
+	return Authentication{userID: userID, method: method, at: time.Now()}
+}
+
+// IssueSession creates a new session for the user identified by auth, which
+// must come from completing a factor sulis itself verified. The zero value
+// Authentication{} — and, since no exported constructor takes a bare user
+// ID, any other Authentication not obtained from such a flow — is rejected
+// with ErrNotAuthenticated before any store is touched.
+//
+// Beyond that check, this behaves exactly like IssueSessionUnchecked:
+// ErrUserNotFound if the proof's user no longer exists, and
+// ErrEmailNotVerified if the account's email is unverified and
+// RequireVerifiedEmail is enabled (default).
+//
+// Applications authenticating by a factor sulis does not know how to verify
+// itself — most notably a finished passkey ceremony, verified entirely by
+// the passkey subpackage and the calling application — have no way to
+// obtain an Authentication and must call IssueSessionUnchecked instead.
+func (s *Sulis) IssueSession(ctx context.Context, auth Authentication) (*Session, string, error) {
+	if auth.userID == "" {
+		return nil, "", ErrNotAuthenticated
+	}
+	return s.issueSession(ctx, auth)
+}
+
+// IssueSessionUnchecked creates a new session for userID without requiring
+// an Authentication proof. It is IssueSession's old, unguarded behavior kept
+// under a name that says so in code review: legitimate for a factor sulis
+// does not know about — most commonly a finished passkey ceremony, which
+// has no way to produce an Authentication — but calling it means the
+// CALLER, not this package, is vouching that userID has completed every
+// factor the application requires. sulis performs no credential check of
+// its own here, only the same ErrUserNotFound / ErrEmailNotVerified gating
+// IssueSession applies. method records which credential the caller is
+// vouching for; sulis does not yet act on it beyond that, but capturing it
+// keeps this method's contract symmetric with IssueSession's.
+func (s *Sulis) IssueSessionUnchecked(ctx context.Context, userID string, method AuthMethod) (*Session, string, error) {
+	return s.issueSession(ctx, newAuthentication(userID, method))
+}
+
+// issueSession is the shared implementation behind IssueSession and
+// IssueSessionUnchecked: load the user named by auth and hand off to
+// issueSessionForUser.
+func (s *Sulis) issueSession(ctx context.Context, auth Authentication) (*Session, string, error) {
+	user, err := s.users.GetUserByID(ctx, auth.userID)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.issueSessionForUser(ctx, user)
+}
+
+// issueSessionForUser gates and creates a session for an already-loaded user,
+// avoiding a redundant store round-trip for callers (like Login) that already
+// have the user in hand.
+func (s *Sulis) issueSessionForUser(ctx context.Context, user *User) (*Session, string, error) {
+	if err := s.requireVerifiedEmail(user); err != nil {
+		return nil, "", err
+	}
+	return s.createSession(ctx, user.ID)
+}
+
 // createSession creates a new session and returns it alongside the raw session
 // token. The token is a return value rather than a field on Session, so the
 // struct handed to SessionStore has no way to carry it.
