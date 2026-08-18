@@ -988,6 +988,125 @@ func TestMagicLinkNonceIsStoredHashed(t *testing.T) {
 	}
 }
 
+// TestRedeemMagicLinkRejectsMissingOrWrongNonceOnExistingUserPathWhenBindingOn
+// is the existing-user-path counterpart to
+// TestRedeemMagicLinkRejectsMissingOrWrongNonceWhenBindingOn, which only
+// exercises the pre-registration (unknown-email) path. CreateMagicLinkToken
+// takes a different branch once a user already exists — issueMagicLinkToken
+// is called with a non-empty userID instead of a non-empty email — and a
+// success-only test on that branch (passing the correct nonce) cannot tell
+// "the nonce is enforced" apart from "no NonceHash was ever stored, so any
+// nonce silently passes" (see TestMagicLinkNonceIsStoredHashed, which checks
+// the latter only on the OTHER branch). This test drives the same
+// missing/wrong-nonce-rejected, correct-nonce-accepted, and
+// NonceHash-is-stored assertions against an already-registered user.
+func TestRedeemMagicLinkRejectsMissingOrWrongNonceOnExistingUserPathWhenBindingOn(t *testing.T) {
+	s, _, _, tokens := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// (c) the token row for an existing user carries a NonceHash too, not
+	// just the pre-registration path.
+	rawToken0, nonce0, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken: %v", err)
+	}
+	if nonce0 == "" {
+		t.Fatal("expected a non-empty binding nonce for the existing-user path")
+	}
+	stored := storedTokenByHash(t, tokens, rawToken0)
+	if stored.UserID != user.ID {
+		t.Fatalf("expected the stored token to carry the existing user's ID, got %q", stored.UserID)
+	}
+	if stored.NonceHash == "" {
+		t.Fatal("expected a non-empty stored NonceHash on the existing-user path when binding is on")
+	}
+
+	// (a) wrong nonce -> ErrTokenInvalid.
+	rawToken1, _, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (second): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken1, "wrong-nonce", RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("wrong nonce (existing-user path): expected ErrTokenInvalid, got %v", err)
+	}
+
+	// (b) missing nonce -> ErrTokenInvalid.
+	rawToken2, _, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (third): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken2, "", RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("missing nonce (existing-user path): expected ErrTokenInvalid, got %v", err)
+	}
+
+	// The correct nonce still redeems — proving the two rejections above
+	// were about the nonce, not some wider breakage on this path.
+	rawToken3, nonce3, err := s.CreateMagicLinkToken(ctx, "alice@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (fourth): %v", err)
+	}
+	if _, err := s.RedeemMagicLink(ctx, rawToken3, nonce3, RequestInfo{}); err != nil {
+		t.Fatalf("expected the correct nonce to redeem successfully on the existing-user path, got %v", err)
+	}
+}
+
+// TestMagicLinkBindingDecidedByStoredTokenNotLiveConfig pins the Decisions-
+// row property: whether a nonce is required is decided by the TOKEN's own
+// stored NonceHash, not by whatever MagicLinkBinding the *redeeming* Sulis
+// instance happens to be configured with. Two Sulis instances share the same
+// underlying stores — standing in for the same deployment's config changing
+// between issuance and redemption (e.g. a rolling deploy, or one instance
+// mid-rollout with a new flag while another still has the old one) — and
+// differ only in MagicLinkBinding.
+func TestMagicLinkBindingDecidedByStoredTokenNotLiveConfig(t *testing.T) {
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+	ctx := context.Background()
+
+	sOn := mustNew(users, sessions, tokens)                               // MagicLinkBinding: true (default)
+	sOff := mustNew(users, sessions, tokens, WithMagicLinkBinding(false)) // MagicLinkBinding: false
+
+	// Issued with binding ON, redeemed by an instance configured with
+	// binding OFF: the nonce must still be REQUIRED, because the token
+	// itself carries a NonceHash.
+	rawToken1, _, err := sOn.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (issued on): %v", err)
+	}
+	if _, err := sOff.RedeemMagicLink(ctx, rawToken1, "", RequestInfo{}); err != ErrTokenInvalid {
+		t.Fatalf("issued binding-ON, redeemed binding-OFF, no nonce: expected ErrTokenInvalid, got %v", err)
+	}
+
+	rawToken2, nonce2, err := sOn.CreateMagicLinkToken(ctx, "bob@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (issued on, second): %v", err)
+	}
+	if _, err := sOff.RedeemMagicLink(ctx, rawToken2, nonce2, RequestInfo{}); err != nil {
+		t.Fatalf("issued binding-ON, redeemed binding-OFF, correct nonce: expected success, got %v", err)
+	}
+
+	// Issued with binding OFF, redeemed by an instance configured with
+	// binding ON: the token carries no NonceHash, so redemption must still
+	// succeed nonce-less — the redeeming instance's own default does not
+	// retroactively demand a nonce the token was never issued with.
+	rawToken3, nonce3, err := sOff.CreateMagicLinkToken(ctx, "carol@example.com", RequestInfo{})
+	if err != nil {
+		t.Fatalf("CreateMagicLinkToken (issued off): %v", err)
+	}
+	if nonce3 != "" {
+		t.Fatalf("expected an empty binding nonce when the ISSUING instance has binding off, got %q", nonce3)
+	}
+	if _, err := sOn.RedeemMagicLink(ctx, rawToken3, "", RequestInfo{}); err != nil {
+		t.Fatalf("issued binding-OFF, redeemed binding-ON, no nonce: expected success, got %v", err)
+	}
+}
+
 type observingSessionStore struct {
 	mu              sync.Mutex
 	created         *Session

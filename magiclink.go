@@ -114,12 +114,20 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (
 // When the token carries no NonceHash — binding was disabled when it was
 // issued — any bindingNonce is accepted, including "".
 //
-// The binding check runs AFTER the token is consumed (see consumeToken): a
-// wrong nonce still burns the token, the same fail-safe direction expiry is
-// already checked in. This is deliberate — a magic link is single-use
-// regardless of which half of the (token, nonce) pair was wrong, so an
-// attacker who obtains a token but not its nonce cannot keep retrying
-// nonces against the same still-live token.
+// The binding check runs AFTER the token is consumed (see consumeToken),
+// primarily because consumeToken's atomicity contract — one indivisible
+// find-and-mark-used operation — has no room for a nonce check in the
+// middle of it without either breaking that atomicity (a check-first design
+// would need to read the row, check the nonce, and mark it used as three
+// separate steps, reopening exactly the TOCTOU consumeToken's single
+// operation exists to close) or widening TokenStore.ConsumeToken to accept
+// and verify a nonce hash itself, a larger interface change this task does
+// not make. A secondary effect of the ordering, the same fail-safe
+// direction expiry is already checked in: a wrong nonce still burns the
+// token, so an attacker who obtains a token but not its nonce gets exactly
+// one attempt rather than unlimited retries against a token that stays
+// live — though with a 128-bit nonce, guessing was never the realistic
+// threat this closes; the atomicity constraint is.
 //
 // A magic link is a FULL first factor — proving control of the mailbox is
 // equivalent to knowing the password — so it is gated by two-factor
