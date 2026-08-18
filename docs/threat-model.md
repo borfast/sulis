@@ -178,9 +178,35 @@ named here; this document only asserts what each one is *for*.
   accept a code only if its counter is strictly greater than the last one
   accepted for that credential — reusing or replaying an old code returns
   `ErrTOTPReplayed`.
+- **TOTP and recovery-code guessing rate limits are shipped, but not
+  wired by default.** `totp.Config.Limiter` and `recovery.Config.Limiter`
+  both default to `nil`; unless an application calls
+  `totp.WithLimiter`/`recovery.WithLimiter`, `Validate`, `ConfirmEnrollment`,
+  and `Consume` skip the rate-limit check entirely, no matter how many
+  wrong codes are submitted. `sulis.MemoryLimiter` ships a `"totp:"`
+  budget pre-configured (the same generous per-account shape as the
+  password budget) precisely so that wiring it up is
+  `totp.WithLimiter(sameLimiterInstance)` rather than an application
+  having to design its own budget — but that pre-configured budget does
+  nothing until that line is written. This is an **operational
+  requirement**, in the README's own words: "a 6-digit code is a 10^6
+  space, brute-forceable without a limiter." `recovery.WithLimiter` has
+  the same off-by-default shape, at lower severity — a recovery code is
+  80 bits of `crypto/rand`, not a 6-digit space, so throttling it is
+  defense in depth rather than the only thing standing between a code and
+  a brute force. Both are also listed under "Residual risks" below.
 - **WebAuthn user verification is required by default.** `passkey.NewService`
   sets `UserVerification: required`, so a presence-only tap (no PIN, no
   biometric) is rejected rather than silently accepted as a full factor.
+- **WebAuthn clone detection.** go-webauthn flags a sign-count anomaly —
+  a credential presenting a counter that didn't advance the way a single
+  physical authenticator would — as `Authenticator.CloneWarning`; both
+  `FinishLogin` and `FinishDiscoverableLogin` treat that as a hard
+  rejection (`ErrCloneWarning`), not a routine auth failure. This is the
+  shipped defense against a duplicated authenticator standing in for the
+  genuine one: a passkey's value as a factor rests partly on it being
+  unclonable hardware, and a sign-count anomaly is the signal that this
+  may no longer hold for a given credential.
 
 ### CSRF on the cookie path
 
@@ -193,7 +219,12 @@ named here; this document only asserts what each one is *for*.
   back in a header or form field.
 - **`RequireSameOrigin`** rejects a cross-site, state-changing request
   using the `Sec-Fetch-Site` header (falling back to `Origin`) —
-  independent of, and layered alongside, the double-submit defense.
+  independent of, and layered alongside, the double-submit defense. When
+  both headers are absent, the request is allowed through by design: that
+  combination is the signature of a non-browser client (a Bearer-token
+  API caller, in particular), which was never CSRF-exploitable to begin
+  with, so rejecting on absence would block that population for no CSRF
+  benefit.
 - **Bearer-header cookie-fallback suppression.** `extractToken` treats
   *any* non-empty `Authorization` header — not only a well-formed
   `"Bearer <token>"` one — as suppressing the cookie fallback for that
@@ -268,6 +299,15 @@ implementation record rather than invented for this document:
   which in effect multiplies an attacker's usable guessing budget by the
   instance count unless `WithLimiter` is configured with a shared
   (e.g. Redis-backed) implementation.
+- **TOTP and recovery-code rate limiting are opt-in, not shipped-on.**
+  Unlike the root package's own guessable surfaces (password, reset,
+  magic-link — all throttled the moment `sulis.New` is called), `totp`
+  and `recovery` ship no limiter at all until the application explicitly
+  passes one via `totp.WithLimiter`/`recovery.WithLimiter`. An application
+  that wires up `totp.Service`/`recovery.Service` without also doing that
+  gets a fully unthrottled 6-digit-code or recovery-code guessing surface
+  — the library does not fail loudly, or at all, to flag the omission. See
+  "2FA bypass" above for the specifics.
 - **Security events are best-effort, not a guarantee.** `EventSink.Emit`
   cannot fail a flow — a panicking sink is contained and dropped, a slow
   sink runs on the caller's own goroutine and latency budget, and several
@@ -281,12 +321,15 @@ implementation record rather than invented for this document:
   `store/sql/postgres` takes `pg_advisory_xact_lock` on two fixed,
   hand-picked 32-bit class values (one for TOTP operations, one for
   passkey operations) to make three specific store contracts atomic under
-  real concurrency. `pg_advisory_lock`'s key space is shared by the whole
-  database, not scoped to sulis's own tables — the two class values are
-  chosen to be unlikely to collide with typical application use, but
-  nothing enforces that. An application (or another library sharing the
-  same database) that happens to take an advisory lock with the same
-  class and a colliding per-user key could contend with, or in principle
-  deadlock against, sulis's own locking. Different users' locks never
-  collide with each other; this risk is specifically about sulis's fixed
-  class constants colliding with something else's chosen keys.
+  real concurrency. PostgreSQL has exactly one advisory-lock key space per
+  database, shared by every caller regardless of which advisory-lock
+  function they use (`pg_advisory_lock`, `pg_advisory_xact_lock`, and the
+  `_shared` variants all draw from the same space) — it is not scoped to
+  sulis's own tables. The two class values here are chosen to be unlikely
+  to collide with typical application use, but nothing enforces that. An
+  application (or another library sharing the same database) that
+  happens to take an advisory lock with the same class and a colliding
+  per-user key could contend with, or in principle deadlock against,
+  sulis's own locking. Different users' locks never collide with each
+  other; this risk is specifically about sulis's fixed class constants
+  colliding with something else's chosen keys.
