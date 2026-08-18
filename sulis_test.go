@@ -2356,3 +2356,180 @@ func TestSessionStructHasNoRawTokenField(t *testing.T) {
 		t.Error("Session should still carry TokenHash, which is what stores persist")
 	}
 }
+
+// failSessionStore wraps a real memSessionStore but forces DeleteUserSessions
+// to fail, so tests can cover the session-revocation error path.
+type failSessionStore struct {
+	*memSessionStore
+	deleteUserSessionsErr error
+}
+
+func (s *failSessionStore) DeleteUserSessions(ctx context.Context, userID string) error {
+	if s.deleteUserSessionsErr != nil {
+		return s.deleteUserSessionsErr
+	}
+	return s.memSessionStore.DeleteUserSessions(ctx, userID)
+}
+
+// failGetUserStore wraps a real memUserStore but forces GetUserByID to fail,
+// so tests can cover the user-lookup error paths in flows that load the user
+// by ID.
+type failGetUserStore struct {
+	*memUserStore
+	getErr error
+}
+
+func (s *failGetUserStore) GetUserByID(ctx context.Context, id string) (*User, error) {
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	return s.memUserStore.GetUserByID(ctx, id)
+}
+
+// TestVerifyEmailIsANoOpWhenAnotherRequestVerifiesFirst covers
+// stampEmailVerified's concurrent-verification guard. Two verification tokens
+// for the same address are both valid, and a user who clicks an older link
+// after a newer one has already landed must not be treated as an error — nor
+// have the original verification timestamp overwritten, which is the whole
+// reason the stamp is written under a guard rather than unconditionally.
+//
+// The interleaving is deterministic rather than timing-dependent: the
+// beforeUpdate hook lands a complete second verification between this one's
+// read and its write, so the optimistic-concurrency retry re-reads a row that
+// is already verified and the guard fires on the second attempt.
+func TestVerifyEmailIsANoOpWhenAnotherRequestVerifiesFirst(t *testing.T) {
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
+	ctx := context.Background()
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	firstToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+	secondToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	users.beforeUpdate = func(*User) {
+		if _, err := s.VerifyEmail(ctx, secondToken); err != nil {
+			t.Errorf("racing VerifyEmail: %v", err)
+		}
+	}
+
+	beforeSecondVerification, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+
+	if _, err := s.VerifyEmail(ctx, firstToken); err != nil {
+		t.Fatalf("VerifyEmail: %v, want nil — losing the race to another verification of the same address is not a failure", err)
+	}
+
+	stored, err := users.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if stored.EmailVerifiedAt == nil {
+		t.Fatal("EmailVerifiedAt is nil, want the timestamp written by the racing verification")
+	}
+	if beforeSecondVerification.EmailVerifiedAt != nil {
+		t.Fatal("the user was already verified before the race was set up; the test proves nothing")
+	}
+}
+
+// TestVerifyEmailPropagatesUserUpdateFailure covers stampEmailVerified's
+// error path. A verification whose write never landed must be reported as a
+// failure: returning nil would tell the caller the address is verified while
+// the stored row still says it is not, and the token has already been burned.
+func TestVerifyEmailPropagatesUserUpdateFailure(t *testing.T) {
+	ctx := context.Background()
+	updateErr := errors.New("update user failed")
+
+	mem := newMemUserStore()
+	users := &failUpdateUserStore{memUserStore: mem}
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+	s := mustNew(users, sessions, tokens, WithArgon2Params(testArgon2Params))
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	users.updateErr = updateErr
+	if _, err := s.VerifyEmail(ctx, rawToken); !errors.Is(err, updateErr) {
+		t.Fatalf("VerifyEmail error = %v, want errors.Is(err, updateErr)", err)
+	}
+}
+
+// TestVerifyEmailPropagatesSessionRevocationFailure covers the last step of
+// stampEmailVerified: when an account that already has a password is verified
+// for the first time, every existing session is revoked, because an attacker
+// may have registered the victim's address with their own password before the
+// victim ever proved mailbox control. If that revocation cannot be performed,
+// the caller must hear about it rather than continue believing the attacker's
+// sessions are gone.
+func TestVerifyEmailPropagatesSessionRevocationFailure(t *testing.T) {
+	ctx := context.Background()
+	revokeErr := errors.New("delete user sessions failed")
+
+	users := newMemUserStore()
+	sessions := &failSessionStore{memSessionStore: newMemSessionStore()}
+	s := mustNew(users, sessions, newMemTokenStore(), WithArgon2Params(testArgon2Params))
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	sessions.deleteUserSessionsErr = revokeErr
+	if _, err := s.VerifyEmail(ctx, rawToken); !errors.Is(err, revokeErr) {
+		t.Fatalf("VerifyEmail error = %v, want errors.Is(err, revokeErr)", err)
+	}
+}
+
+// TestEmailVerificationPropagatesUserLookupFailures covers the two
+// GetUserByID calls in the email-verification flow. The VerifyEmail case
+// matters most: its lookup happens after the token has been consumed, so a
+// swallowed error there would burn the user's only token and report success
+// without verifying anything.
+func TestEmailVerificationPropagatesUserLookupFailures(t *testing.T) {
+	ctx := context.Background()
+	lookupErr := errors.New("user lookup failed")
+
+	users := &failGetUserStore{memUserStore: newMemUserStore()}
+	s := mustNew(users, newMemSessionStore(), newMemTokenStore(), WithArgon2Params(testArgon2Params))
+
+	user, _, _, err := s.Register(ctx, "alice@example.com", "password123", RequestInfo{})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	rawToken, err := s.CreateEmailVerificationToken(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("CreateEmailVerificationToken: %v", err)
+	}
+
+	users.getErr = lookupErr
+
+	if _, err := s.CreateEmailVerificationToken(ctx, user.ID); !errors.Is(err, lookupErr) {
+		t.Fatalf("CreateEmailVerificationToken error = %v, want errors.Is(err, lookupErr)", err)
+	}
+	if _, err := s.VerifyEmail(ctx, rawToken); !errors.Is(err, lookupErr) {
+		t.Fatalf("VerifyEmail error = %v, want errors.Is(err, lookupErr)", err)
+	}
+}

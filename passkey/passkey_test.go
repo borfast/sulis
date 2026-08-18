@@ -428,8 +428,19 @@ type fakeStore struct {
 	credentialsByUser     map[string][]Credential
 	credentialByID        map[string]*Credential
 	getCredentialsCalls   int
+	saveCredentialCalls   int
 	lastUserID            string
 	updateAfterLoginCalls int
+
+	// Injected failures. Each is returned by the corresponding method
+	// instead of doing its normal work, so tests can cover the store-error
+	// branches of every ceremony without a second, differently-broken
+	// Store implementation per case. The call counter is still incremented
+	// first, so a test can tell "failed" from "never reached".
+	saveCredentialErr    error
+	getCredentialsErr    error
+	getCredentialByIDErr error
+	updateAfterLoginErr  error
 
 	deleteCredentialCalls int
 	deletedCredentialID   string
@@ -438,7 +449,45 @@ type fakeStore struct {
 	deletedUserID                  string
 }
 
-func (f *fakeStore) SaveCredential(context.Context, *Credential) error { return nil }
+// seed registers cred in both of fakeStore's lookup maps, as a store would
+// hold it after a completed registration ceremony. It exists so a login test
+// can start from an existing credential without first running (and having to
+// keep valid) a whole registration.
+func (f *fakeStore) seed(cred Credential) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.store(cred)
+}
+
+// store records cred in both lookup maps. Callers must hold f.mu.
+func (f *fakeStore) store(cred Credential) {
+	if f.credentialsByUser == nil {
+		f.credentialsByUser = make(map[string][]Credential)
+	}
+	if f.credentialByID == nil {
+		f.credentialByID = make(map[string]*Credential)
+	}
+	f.credentialsByUser[cred.UserID] = append(f.credentialsByUser[cred.UserID], cred)
+	stored := cred
+	f.credentialByID[string(cred.CredentialID)] = &stored
+}
+
+// SaveCredential persists the credential in both lookup maps, so a
+// registration ceremony can be followed by a login ceremony against the
+// credential it just created — the round trip a real deployment performs and
+// the only way to prove the two halves agree on what was stored.
+func (f *fakeStore) SaveCredential(_ context.Context, cred *Credential) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.saveCredentialCalls++
+	if f.saveCredentialErr != nil {
+		return f.saveCredentialErr
+	}
+	f.store(*cred)
+	return nil
+}
 
 func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID string) ([]Credential, error) {
 	f.mu.Lock()
@@ -446,6 +495,9 @@ func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID string) ([]
 
 	f.getCredentialsCalls++
 	f.lastUserID = userID
+	if f.getCredentialsErr != nil {
+		return nil, f.getCredentialsErr
+	}
 	if f.credentialsByUser == nil {
 		return nil, nil
 	}
@@ -456,6 +508,9 @@ func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.getCredentialByIDErr != nil {
+		return nil, f.getCredentialByIDErr
+	}
 	if f.credentialByID == nil {
 		return nil, errors.New("credential not found")
 	}
@@ -469,12 +524,18 @@ func (f *fakeStore) GetCredentialByID(_ context.Context, credentialID []byte) (*
 // UpdateCredentialAfterLogin mutates the credentialByID entry in place, when
 // one is registered under credentialID, so that a subsequent
 // GetCredentialByID call — exactly what finishLoginCredential makes right
-// after this one — observes the update, the same as a real store would.
+// after this one — observes the update, the same as a real store would. The
+// by-user list is updated to match, so a second login ceremony for the same
+// user reads the advanced sign count rather than a stale one and the
+// clone-detection check sees what a real store would have shown it.
 func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID []byte, signCount uint32, backupState bool, lastUsedAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.updateAfterLoginCalls++
+	if f.updateAfterLoginErr != nil {
+		return f.updateAfterLoginErr
+	}
 	if f.credentialByID == nil {
 		return nil
 	}
@@ -485,6 +546,16 @@ func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID [
 	cred.SignCount = signCount
 	cred.BackupState = backupState
 	cred.LastUsedAt = &lastUsedAt
+
+	for _, creds := range f.credentialsByUser {
+		for i := range creds {
+			if bytes.Equal(creds[i].CredentialID, credentialID) {
+				creds[i].SignCount = signCount
+				creds[i].BackupState = backupState
+				creds[i].LastUsedAt = &lastUsedAt
+			}
+		}
+	}
 	return nil
 }
 
@@ -564,6 +635,11 @@ func (f *fakeStore) RenameCredential(_ context.Context, id, name string) error {
 type fakeChallengeStore struct {
 	mu    sync.Mutex
 	saved map[string][]byte
+
+	// saveErr, when set, is returned by SaveChallenge instead of storing
+	// anything, so tests can cover each Begin* method's persistence-failure
+	// branch.
+	saveErr error
 }
 
 func newFakeChallengeStore() *fakeChallengeStore {
@@ -573,6 +649,9 @@ func newFakeChallengeStore() *fakeChallengeStore {
 func (f *fakeChallengeStore) SaveChallenge(_ context.Context, key string, sessionData []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.saved[key] = append([]byte(nil), sessionData...)
 	return nil
 }
@@ -1640,4 +1719,415 @@ func TestFakeStoreDeleteCredentialsByUserIDRemovesOnlyThatUsersCredentials(t *te
 	if got := store.credentialsByUser["user-2"]; len(got) != 1 {
 		t.Errorf("user-2 credentials = %v, want 1 untouched", got)
 	}
+}
+
+// errStoreFailure stands in for any failure a real Store might return —
+// a dropped database connection, a timeout, a constraint violation. What
+// matters is only that it is a distinct sentinel the tests can match with
+// errors.Is, so an assertion proves the store's error reached the caller
+// rather than being swallowed and replaced with something generic.
+var errStoreFailure = errors.New("store unavailable")
+
+// TestBeginRegistrationPropagatesCredentialLookupFailure covers the store
+// error path T202 opened but did not test: BeginRegistration reads the user's
+// existing credentials to build excludeCredentials, and a failure there must
+// abort the ceremony rather than silently proceeding with an empty exclusion
+// list — which would quietly reintroduce exactly the duplicate-credential
+// problem T202 fixed.
+func TestBeginRegistrationPropagatesCredentialLookupFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{getCredentialsErr: errStoreFailure}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	creation, err := service.BeginRegistration(context.Background(), &User{ID: []byte("user-1")})
+	if !errors.Is(err, errStoreFailure) {
+		t.Fatalf("BeginRegistration() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+	if creation != nil {
+		t.Fatalf("BeginRegistration() creation = %#v, want nil", creation)
+	}
+	if len(challenges.saved) != 0 {
+		t.Fatalf("BeginRegistration() saved %d challenges, want 0 — an aborted ceremony must not leave a challenge behind", len(challenges.saved))
+	}
+}
+
+// TestBeginLoginPropagatesCredentialLookupFailure is BeginRegistration's
+// counterpart. The distinction that matters here is against
+// ErrPasskeyNotFound: a store that is broken must not be reported as a user
+// who has no passkey, since a caller would reasonably route the latter to a
+// "register a passkey" flow.
+func TestBeginLoginPropagatesCredentialLookupFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{getCredentialsErr: errStoreFailure}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	assertion, ceremonyID, err := service.BeginLogin(context.Background(), &User{ID: []byte("user-1")})
+	if !errors.Is(err, errStoreFailure) {
+		t.Fatalf("BeginLogin() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+	if errors.Is(err, ErrPasskeyNotFound) {
+		t.Error("BeginLogin() reported ErrPasskeyNotFound for a store failure — a broken store must not look like a user without a passkey")
+	}
+	if assertion != nil || ceremonyID != "" {
+		t.Fatalf("BeginLogin() = (%#v, %q), want (nil, \"\")", assertion, ceremonyID)
+	}
+}
+
+// TestFinishLoginResponsePropagatesCredentialLookupFailure covers the same
+// lookup on the finish side, which happens before the challenge is consumed.
+func TestFinishLoginResponsePropagatesCredentialLookupFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{getCredentialsErr: errStoreFailure}
+	challenges := newFakeChallengeStore()
+	service := newTestService(t, store, challenges)
+
+	_, err := service.FinishLoginResponse(context.Background(), &User{ID: []byte("user-1")}, "ceremony-1", []byte("{}"))
+	if !errors.Is(err, errStoreFailure) {
+		t.Fatalf("FinishLoginResponse() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+	if errors.Is(err, ErrChallengeExpired) {
+		t.Error("FinishLoginResponse() reported ErrChallengeExpired for a store failure — the two must stay distinguishable")
+	}
+}
+
+// TestBeginCeremoniesPropagateChallengeSaveFailure covers the other
+// persistence dependency every Begin* method has. A ceremony whose challenge
+// could not be stored is unfinishable, so returning the options anyway would
+// hand the caller a ceremony guaranteed to fail later with
+// ErrChallengeExpired — a confusing way to report a storage outage.
+func TestBeginCeremoniesPropagateChallengeSaveFailure(t *testing.T) {
+	t.Parallel()
+
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+
+	newService := func(t *testing.T) *Service {
+		t.Helper()
+		store := &fakeStore{credentialsByUser: map[string][]Credential{
+			"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		}}
+		return newTestService(t, store, &fakeChallengeStore{saved: map[string][]byte{}, saveErr: errStoreFailure})
+	}
+
+	t.Run("registration", func(t *testing.T) {
+		t.Parallel()
+		if _, err := newService(t).BeginRegistration(context.Background(), user); !errors.Is(err, errStoreFailure) {
+			t.Fatalf("BeginRegistration() error = %v, want errors.Is(err, errStoreFailure)", err)
+		}
+	})
+
+	t.Run("login", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := newService(t).BeginLogin(context.Background(), user); !errors.Is(err, errStoreFailure) {
+			t.Fatalf("BeginLogin() error = %v, want errors.Is(err, errStoreFailure)", err)
+		}
+	})
+
+	t.Run("discoverable login", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := newService(t).BeginDiscoverableLogin(context.Background()); !errors.Is(err, errStoreFailure) {
+			t.Fatalf("BeginDiscoverableLogin() error = %v, want errors.Is(err, errStoreFailure)", err)
+		}
+	})
+}
+
+// TestFinishRegistrationResponsePropagatesSaveFailure covers the last store
+// call in the registration ceremony. A credential that verified but could not
+// be persisted must surface as an error: reporting success would tell the
+// caller a passkey exists that no later login will ever find.
+func TestFinishRegistrationResponsePropagatesSaveFailure(t *testing.T) {
+	t.Parallel()
+
+	body, challenge, _ := registrationSpecVectorNoneES256(t, nil, nil)
+
+	store := &fakeStore{saveCredentialErr: errStoreFailure}
+	challenges := newFakeChallengeStore()
+	service, err := NewService(store, challenges, WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.org",
+		RPOrigins:     []string{"https://example.org"},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
+
+	cred, err := service.FinishRegistrationResponse(context.Background(), user, body)
+	if !errors.Is(err, errStoreFailure) {
+		t.Fatalf("FinishRegistrationResponse() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishRegistrationResponse() credential = %#v, want nil", cred)
+	}
+}
+
+// TestFinishLoginCredentialPropagatesUpdateFailure covers the bookkeeping
+// write that follows a verified assertion. The sign count, backup state, and
+// last-used timestamp must be persisted before a login is reported as
+// successful — if that write fails and the login succeeds anyway, the sign
+// count never advances and clone detection is silently disabled for that
+// credential from then on.
+func TestFinishLoginCredentialPropagatesUpdateFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{
+		credentialByID:      map[string]*Credential{"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		updateAfterLoginErr: errStoreFailure,
+	}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
+
+	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	if !errors.Is(err, errStoreFailure) {
+		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+	if cred != nil {
+		t.Fatalf("finishLoginCredential() credential = %#v, want nil", cred)
+	}
+}
+
+// TestFinishLoginCredentialPropagatesReloadFailure covers the final read: the
+// credential is re-fetched so the caller receives the row as persisted, and a
+// failure there must not be reported as a successful login with a nil
+// credential.
+func TestFinishLoginCredentialPropagatesReloadFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeStore{
+		credentialByID:       map[string]*Credential{"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		getCredentialByIDErr: errStoreFailure,
+	}
+	service := newTestService(t, store, newFakeChallengeStore())
+
+	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
+
+	if _, err := service.finishLoginCredential(context.Background(), waCred); !errors.Is(err, errStoreFailure) {
+		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
+	}
+}
+
+// TestFinishCeremoniesRejectCorruptSessionData covers a challenge store that
+// returns something that is not session data — a truncated write, a
+// serialization change, a key collision with another subsystem. Each Finish*
+// method must fail rather than proceeding with a zero-valued
+// webauthn.SessionData, whose empty Challenge and empty UserVerification
+// would disable both the challenge match and the user-verification check.
+func TestFinishCeremoniesRejectCorruptSessionData(t *testing.T) {
+	t.Parallel()
+
+	const corrupt = "this is not session data"
+	user := &User{ID: []byte("user-1")}
+	ctx := context.Background()
+
+	t.Run("registration", func(t *testing.T) {
+		t.Parallel()
+
+		challenges := newFakeChallengeStore()
+		service := newTestService(t, &fakeStore{}, challenges)
+		if err := challenges.SaveChallenge(ctx, challengeKey("register", string(user.ID)), []byte(corrupt)); err != nil {
+			t.Fatalf("SaveChallenge: %v", err)
+		}
+
+		_, err := service.FinishRegistrationResponse(ctx, user, []byte("{}"))
+		if err == nil || !strings.Contains(err.Error(), "unmarshaling session") {
+			t.Fatalf("FinishRegistrationResponse() error = %v, want it to name the session unmarshal step", err)
+		}
+	})
+
+	t.Run("login", func(t *testing.T) {
+		t.Parallel()
+
+		challenges := newFakeChallengeStore()
+		service := newTestService(t, &fakeStore{}, challenges)
+		if err := challenges.SaveChallenge(ctx, challengeKey("login", "ceremony-1"), []byte(corrupt)); err != nil {
+			t.Fatalf("SaveChallenge: %v", err)
+		}
+
+		_, err := service.FinishLoginResponse(ctx, user, "ceremony-1", []byte("{}"))
+		if err == nil || !strings.Contains(err.Error(), "unmarshaling session") {
+			t.Fatalf("FinishLoginResponse() error = %v, want it to name the session unmarshal step", err)
+		}
+	})
+
+	t.Run("discoverable login", func(t *testing.T) {
+		t.Parallel()
+
+		challenges := newFakeChallengeStore()
+		service := newTestService(t, &fakeStore{}, challenges)
+		if err := challenges.SaveChallenge(ctx, challengeKey("discover", "ceremony-1"), []byte(corrupt)); err != nil {
+			t.Fatalf("SaveChallenge: %v", err)
+		}
+
+		_, err := service.FinishDiscoverableLoginResponse(ctx, "ceremony-1", []byte("{}"))
+		if err == nil || !strings.Contains(err.Error(), "unmarshaling session") {
+			t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want it to name the session unmarshal step", err)
+		}
+	})
+}
+
+// TestNewServiceRejectsInvalidRelyingPartyConfig covers the constructor's
+// remaining failure mode: go-webauthn requires at least one relying party
+// origin, and a Service built without one would accept a credential from any
+// origin at all — the check that makes passkeys unphishable.
+func TestNewServiceRejectsInvalidRelyingPartyConfig(t *testing.T) {
+	t.Parallel()
+
+	svc, err := NewService(&fakeStore{}, newFakeChallengeStore(), WebAuthnConfig{
+		RPDisplayName: "Test",
+		RPID:          "example.com",
+	})
+	if err == nil {
+		t.Fatal("NewService() error = nil, want a rejection for a relying party config with no origins")
+	}
+	if svc != nil {
+		t.Fatalf("NewService() service = %#v, want nil", svc)
+	}
+}
+
+// failingBodyReader is an io.Reader that fails partway through, standing in
+// for a client connection that drops mid-upload.
+type failingBodyReader struct{}
+
+func (failingBodyReader) Read([]byte) (int, error) { return 0, errStoreFailure }
+
+// TestFinishCeremoniesReportBodyReadFailures covers the net/http wrappers'
+// remaining branch: a body that fails to read for a reason other than
+// exceeding the size cap must be reported as a read failure, and must be
+// clearly distinguishable from ErrCeremonyBodyTooLarge so a caller does not
+// log a dropped connection as an oversized-body attack.
+func TestFinishCeremoniesReportBodyReadFailures(t *testing.T) {
+	t.Parallel()
+
+	user := &User{ID: []byte("user-1")}
+	ctx := context.Background()
+
+	newFailingRequest := func(t *testing.T) *http.Request {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, "https://example.com", failingBodyReader{})
+		if err != nil {
+			t.Fatalf("http.NewRequest() error = %v", err)
+		}
+		req.ContentLength = -1
+		return req
+	}
+
+	assertReadFailure := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, errStoreFailure) {
+			t.Fatalf("error = %v, want errors.Is(err, errStoreFailure)", err)
+		}
+		if errors.Is(err, ErrCeremonyBodyTooLarge) {
+			t.Error("a failed read was reported as an oversized body")
+		}
+		if !strings.Contains(err.Error(), "reading ceremony response body") {
+			t.Errorf("error = %q, want it to name the body read step", err)
+		}
+	}
+
+	t.Run("registration", func(t *testing.T) {
+		t.Parallel()
+		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishRegistration(ctx, user, newFailingRequest(t))
+		assertReadFailure(t, err)
+	})
+
+	t.Run("login", func(t *testing.T) {
+		t.Parallel()
+		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishLogin(ctx, user, "ceremony-1", newFailingRequest(t))
+		assertReadFailure(t, err)
+	})
+
+	t.Run("discoverable login", func(t *testing.T) {
+		t.Parallel()
+		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishDiscoverableLogin(ctx, "ceremony-1", newFailingRequest(t))
+		assertReadFailure(t, err)
+	})
+}
+
+// TestBeginCeremoniesRejectIncompleteRelyingPartyConfig documents where the
+// two WebAuthnConfig fields NewService does NOT validate are actually
+// enforced. go-webauthn's own config validation only rejects an empty
+// RPOrigins list (see TestNewServiceRejectsInvalidRelyingPartyConfig); an
+// empty RPID or RPDisplayName passes construction and is caught later, per
+// ceremony, by go-webauthn's Begin* methods.
+//
+// That ordering is worth pinning down rather than leaving to chance: a
+// misconfigured Service that constructs cleanly and only fails on the first
+// real user's first ceremony is a deployment-time surprise, so these tests
+// record which ceremony reports it and make it obvious if a future version of
+// the library moves the check.
+func TestBeginCeremoniesRejectIncompleteRelyingPartyConfig(t *testing.T) {
+	t.Parallel()
+
+	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	ctx := context.Background()
+
+	newService := func(t *testing.T, cfg WebAuthnConfig) *Service {
+		t.Helper()
+		store := &fakeStore{credentialsByUser: map[string][]Credential{
+			"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		}}
+		svc, err := NewService(store, newFakeChallengeStore(), cfg)
+		if err != nil {
+			t.Fatalf("NewService() error = %v, want nil — this config is only rejected at ceremony time", err)
+		}
+		return svc
+	}
+
+	t.Run("registration needs a relying party display name", func(t *testing.T) {
+		t.Parallel()
+
+		svc := newService(t, WebAuthnConfig{RPID: "example.com", RPOrigins: []string{"https://example.com"}})
+
+		creation, err := svc.BeginRegistration(ctx, user)
+		if err == nil {
+			t.Fatal("BeginRegistration() error = nil, want a rejection for an empty RPDisplayName")
+		}
+		if creation != nil {
+			t.Fatalf("BeginRegistration() creation = %#v, want nil", creation)
+		}
+		if !strings.Contains(err.Error(), "begin registration") {
+			t.Errorf("BeginRegistration() error = %q, want it to name the ceremony step", err)
+		}
+	})
+
+	t.Run("login needs a relying party id", func(t *testing.T) {
+		t.Parallel()
+
+		svc := newService(t, WebAuthnConfig{RPDisplayName: "Sulis Test", RPOrigins: []string{"https://example.com"}})
+
+		_, ceremonyID, err := svc.BeginLogin(ctx, user)
+		if err == nil {
+			t.Fatal("BeginLogin() error = nil, want a rejection for an empty RPID")
+		}
+		if ceremonyID != "" {
+			t.Fatalf("BeginLogin() ceremony ID = %q, want empty", ceremonyID)
+		}
+		if !strings.Contains(err.Error(), "begin login") {
+			t.Errorf("BeginLogin() error = %q, want it to name the ceremony step", err)
+		}
+	})
+
+	t.Run("discoverable login needs a relying party id", func(t *testing.T) {
+		t.Parallel()
+
+		svc := newService(t, WebAuthnConfig{RPDisplayName: "Sulis Test", RPOrigins: []string{"https://example.com"}})
+
+		_, ceremonyID, err := svc.BeginDiscoverableLogin(ctx)
+		if err == nil {
+			t.Fatal("BeginDiscoverableLogin() error = nil, want a rejection for an empty RPID")
+		}
+		if ceremonyID != "" {
+			t.Fatalf("BeginDiscoverableLogin() ceremony ID = %q, want empty", ceremonyID)
+		}
+		if !strings.Contains(err.Error(), "begin discoverable login") {
+			t.Errorf("BeginDiscoverableLogin() error = %q, want it to name the ceremony step", err)
+		}
+	})
 }
