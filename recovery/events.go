@@ -24,9 +24,9 @@ const (
 
 	// EventCodeRejected reports that Consume refused a code that did not
 	// match any stored, unused code for the user (ErrCodeInvalid). It is
-	// NOT emitted for a rate-limited attempt (see WithLimiter, which
-	// returns ErrCodeRateLimited before the store is ever touched) or for
-	// a Store error — only for a code that was actually checked and did
+	// NOT emitted for a rate-limited attempt (see EventCodeRateLimited) or
+	// for a Store error (out of scope — see EventCodeRateLimited's doc
+	// comment for why) — only for a code that was actually checked and did
 	// not match.
 	EventCodeRejected EventKind = "recovery.code_rejected"
 
@@ -37,6 +37,29 @@ const (
 	// application should treat as its signal to push the user toward
 	// re-enrolling a real second factor.
 	EventCodesExhausted EventKind = "recovery.codes_exhausted"
+
+	// EventCodeRateLimited reports that Consume refused an attempt because
+	// the configured Limiter denied it (ErrCodeRateLimited), before the
+	// submitted code was ever hashed or looked up. Carried forward from
+	// T510 (see PROGRESS.md): without this, an operator watching only
+	// EventCodeRejected has no way to see repeated rate-limited guessing —
+	// EventCodeRejected is deliberately scoped to a code that was actually
+	// checked and did not match (see its doc comment), so a flood of
+	// denied attempts against a Limiter-protected user would otherwise
+	// produce zero events, the same visibility gap the root package's own
+	// EventRateLimitTripped exists to close for its choke points.
+	//
+	// A Store error from ConsumeCode or CountCodes deliberately does NOT
+	// get its own EventKind. Rate limiting and a bad code are both
+	// decisions ABOUT the caller's attempt — signal an operator watching
+	// for abuse needs. A Store error is not a decision about the caller at
+	// all; it is this package's own infrastructure failing, already
+	// surfaced synchronously to the caller via Consume's returned err, with
+	// no aggregate abuse pattern for an event to add. Giving it a kind
+	// would blur the taxonomy's one purpose — recovery-code security
+	// decisions — with generic operational noise a sink was never meant to
+	// carry.
+	EventCodeRateLimited EventKind = "recovery.code_rate_limited"
 )
 
 // Event is one recovery-code security decision, as reported to an
@@ -55,8 +78,8 @@ type Event struct {
 
 	// Remaining is the number of unused codes left for UserID after the
 	// decision. Meaningful for EventCodeConsumed; zero (and not
-	// meaningful) for EventCodeRejected and EventCodesExhausted, which
-	// carry the fact in their Kind instead.
+	// meaningful) for EventCodeRejected, EventCodesExhausted, and
+	// EventCodeRateLimited, which carry the fact in their Kind instead.
 	Remaining int
 
 	// At is when the decision was made, stamped at emission if left zero.
