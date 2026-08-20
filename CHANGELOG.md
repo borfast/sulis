@@ -16,6 +16,14 @@ does and does not promise.
   and a diff scan never looks twice at a commit. Nothing consumer-visible —
   no new dependency, and nothing added to the module graph.
 
+### Changed
+
+- The minimum supported Go version is now 1.27.0 (both modules' `go`
+  directives, the CI floor, and the README requirement moved together from
+  1.26.6). CI already built and tested against 1.27 through setup-go's
+  `stable`, which resolves to the newest release on the day it runs; this
+  makes the requirement explicit rather than incidental.
+
 ## [0.1.0] - 2026-08-20
 
 The first tagged release: `v0.1.0`, plus `store/sql/v0.1.0` for the nested
