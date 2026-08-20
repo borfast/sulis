@@ -5,6 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), adapted for
 a pre-1.0 project: see README.md's "Versioning" section for what a `v0.x` tag
 does and does not promise.
 
+## [Unreleased]
+
+### Added
+
+- CI scans for leaked credentials with
+  [trufflehog](https://github.com/trufflesecurity/trufflehog): the `analyze`
+  job scans each push's and each pull request's diff, and a new weekly
+  workflow re-walks the whole history, since the detector set grows over time
+  and a diff scan never looks twice at a commit. Nothing consumer-visible —
+  no new dependency, and nothing added to the module graph.
+
 ## [0.1.0] - 2026-08-20
 
 The first tagged release: `v0.1.0`, plus `store/sql/v0.1.0` for the nested

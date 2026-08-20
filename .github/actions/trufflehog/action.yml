@@ -1,0 +1,93 @@
+name: trufflehog
+description: >-
+  Scan this repository for leaked credentials with a checksum-verified
+  trufflehog release binary.
+
+inputs:
+  since:
+    description: >-
+      Commit to diff against, so only the commits after it are scanned. Leave
+      empty to walk the entire history instead.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        # trufflehog cannot be installed the way ci.yml installs staticcheck,
+        # gosec and govulncheck: `go run <module>@<version>` refuses a module
+        # whose go.mod carries `replace` directives, and trufflehog's carries
+        # two (both forked dependencies). Building from a clone of the tag does
+        # work — the clone becomes the main module, so the directives apply —
+        # but costs minutes of CPU per run. So the release binary is fetched
+        # instead, and pinned the only way a downloaded binary can be: by
+        # checksum, verified before it is executed.
+        #
+        # These two values move together on a bump, and Dependabot tracks
+        # neither — a version string is not an action reference or a Go
+        # requirement. The checksum is the linux_amd64 archive's, taken from
+        # the release's trufflehog_<version>_checksums.txt, which upstream also
+        # cosign-signs (.sig/.pem beside it) should this ever need to become a
+        # signature check as well.
+        VERSION: '3.97.0'
+        SHA256: '62224de2f9dd7cd418800feb953760a302ed2f82a7c547fe1146a4874fb179e4'
+
+        # Excluded from a history walk only, never from a diff scan. The file
+        # holds a deliberate fixture DSN — the test asserts that a DSN's
+        # password never reaches an error string — and the line carries a
+        # `trufflehog:ignore` marker. That marker is enough for a diff scan,
+        # which only ever reads the current version of a line, and it is why
+        # this exclusion must not apply there: a real credential added to that
+        # file tomorrow still has to fail the build. A history walk also reads
+        # the version committed before the marker existed, and no edit today
+        # changes what an old commit contains, so without this a full walk
+        # would fail forever.
+        #
+        # The cost is bounded and deliberate: a future detector never
+        # re-examines that one file's history. The alternative — dropping
+        # `unknown` results from the walk — would blind it to every credential
+        # kind that cannot be verified, private keys included, across the whole
+        # tree.
+        HISTORY_EXCLUDE_GLOBS: 'store/sql/postgres/postgres_test.go'
+
+        SINCE: ${{ inputs.since }}
+      run: |
+        set -euo pipefail
+
+        tmp="$(mktemp -d)"
+        archive="$tmp/trufflehog.tar.gz"
+
+        curl --silent --show-error --fail --location --output "$archive" \
+          "https://github.com/trufflesecurity/trufflehog/releases/download/v${VERSION}/trufflehog_${VERSION}_linux_amd64.tar.gz"
+
+        # The point of fetching a binary rather than building one: verify it
+        # before running it. --strict fails on a malformed checksum line, so a
+        # typo above cannot degrade into an unverified run.
+        echo "${SHA256}  ${archive}" | sha256sum --check --strict -
+        tar -xzf "$archive" -C "$tmp" trufflehog
+
+        # A base commit that is not in this clone leaves nothing to diff
+        # against, so walk the history instead of failing. Two cases reach
+        # here: a first push to a branch, where github.event.before is all
+        # zeros, and a force-push whose previous tip was never fetched.
+        if [ -n "$SINCE" ] && ! git cat-file -e "${SINCE}^{commit}" 2>/dev/null; then
+          echo "::notice::base commit ${SINCE} is not in this clone; walking the full history instead"
+          SINCE=''
+        fi
+
+        # --results=verified,unknown is upstream's recommendation. `unknown` is
+        # a detector that matched but could not complete verification — an
+        # unreachable endpoint, or a credential kind that has none — so
+        # dropping it would silently discard exactly the findings CI cannot
+        # confirm for itself. --fail turns a finding into a red build, and
+        # --no-update stops the binary reaching for a newer self.
+        args=(git 'file://.' --results=verified,unknown --fail --no-update)
+        if [ -n "$SINCE" ]; then
+          args+=(--since-commit "$SINCE" --branch HEAD)
+        else
+          args+=(--exclude-globs "$HISTORY_EXCLUDE_GLOBS")
+        fi
+
+        "$tmp/trufflehog" "${args[@]}"

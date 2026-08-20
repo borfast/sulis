@@ -545,10 +545,16 @@ func TestSearchPathDSN(t *testing.T) {
 	// Both the whole password and the fragment a url.EscapeError would quote
 	// back ("%ss") are asserted absent, because the obvious partial fix —
 	// unwrapping to url.Error.Err — still leaks three characters of it.
+	//
+	// The second fixture below carries a `trufflehog:ignore` marker: it is a
+	// well-formed DSN, so CI's secret scan reports it as a credential it could
+	// not verify, and the marker is how that scan is told a line is deliberate.
+	// The first needs none — a bare '%' makes it unparseable as a URL, which is
+	// the entire reason it is here.
 	t.Run("NeverPutsTheDSNOrThePasswordInTheErrorMessage", func(t *testing.T) {
 		for _, dsn := range []string{
 			"postgres://app:p%ssword@db.internal:5432/sulis",
-			"postgres://app:sup3rSecret@db.internal:5432/sulis\n",
+			"postgres://app:sup3rSecret@db.internal:5432/sulis\n", // trufflehog:ignore
 		} {
 			_, err := postgres.SearchPathDSN(dsn, "tenant_7")
 			if err == nil {
