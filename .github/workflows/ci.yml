@@ -115,14 +115,34 @@ jobs:
     name: static analysis
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0, unlike every other job in this file, because the
+      # secret scan below resolves a base commit to diff against and the
+      # default shallow clone does not contain one.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
 
-      # All three tools are pinned. An unpinned @latest would execute whatever
-      # that resolves to on the day CI runs. Dependabot proposes the bumps.
+      # Secret scanning, and a diff rather than a history walk: on a pull
+      # request the range is base..head, and on a push it is the commits that
+      # push added. That is the right shape for a gate — it blocks a
+      # credential from entering the tree — and it is cheap enough to run
+      # first, ahead of the tool builds below, since it needs no Go toolchain
+      # of its own. The full-history walk is a separate weekly workflow
+      # (secret-scan.yml): its value is a detector set that grows over time,
+      # not this diff, and a cron trigger here would fire every other job in
+      # this file too.
+      - name: trufflehog
+        uses: ./.github/actions/trufflehog
+        with:
+          since: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
+      # All three `go run` tools are pinned. An unpinned @latest would
+      # execute whatever that resolves to on the day CI runs. Dependabot
+      # proposes the bumps.
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
 
