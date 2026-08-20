@@ -705,7 +705,7 @@ Admin tooling that has already authenticated an operator and genuinely needs to 
 
 ## Versioning
 
-sulis is pre-1.0 (`v0.x`) for the duration of the security-hardening plan (`docs/superpowers/plans/2026-08-17-security-hardening-v1/PLAN.md`) that closed the second-factor bypass, added the safe-by-default posture, and built the store-contract conformance suite, among everything else CHANGELOG.md's Unreleased entry lists. **Before 1.0, the public API can and does break between commits on this branch** — CHANGELOG.md's migration guide covers every break shipped so far, and there is no compatibility promise yet.
+sulis is pre-1.0 (`v0.x`) for the duration of the security-hardening plan (`docs/superpowers/plans/2026-08-17-security-hardening-v1/PLAN.md`) that closed the second-factor bypass, added the safe-by-default posture, and built the store-contract conformance suite, among everything else CHANGELOG.md's `[0.1.0]` entry lists. **Before 1.0, the public API can and does break between commits on this branch** — CHANGELOG.md's migration guide covers every break shipped so far, and there is no compatibility promise yet.
 
 Once this plan completes and sulis tags `v1.0.0`, it adopts a [Go-1-style compatibility promise](https://go.dev/doc/go1compat) for the public API of `sulis`, `totp`, `passkey`, `recovery`, and `passwordcheck`: exported identifiers, exported types' exported fields, and documented behavior will not change incompatibly within the v1 line. A v1.x release only adds; it does not remove or repurpose anything already there, and only a v2 major version may break compatibility, following the usual Go convention of a `/v2` module path.
 
