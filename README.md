@@ -2,7 +2,7 @@
 
 `sulis` is a small Go authentication library for consumer-owned persistence. The root package provides password-based auth, password reset, magic-link login, two-factor pending-login tokens, email verification, server-side sessions, and HTTP middleware for attaching the authenticated user and session to a request context. The `totp`, `passkey`, and `recovery` subpackages add TOTP, WebAuthn passkeys, and recovery codes as second factors or standalone credentials, and `passwordcheck` screens new passwords against known-compromised values. Because you own persistence, the `storetest` package ships a conformance suite that proves your store implementations satisfy the contracts the library depends on, and `memstore` is a reference in-memory implementation of all of them — see [Proving your stores correct](#proving-your-stores-correct).
 
-Requires Go 1.26.6+ (matching `go.mod`).
+Requires Go 1.27.0+ (matching `go.mod`).
 
 ## Root Package
 

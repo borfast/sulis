@@ -1,6 +1,6 @@
 module github.com/borfast/sulis/store/sql
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/borfast/sulis v0.1.0

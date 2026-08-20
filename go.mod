@@ -1,6 +1,6 @@
 module github.com/borfast/sulis
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/go-webauthn/webauthn v0.17.4
