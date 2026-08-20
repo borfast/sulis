@@ -3,7 +3,7 @@ module github.com/borfast/sulis/store/sql
 go 1.26.6
 
 require (
-	github.com/borfast/sulis v0.0.0
+	github.com/borfast/sulis v0.1.0
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/jackc/pgx/v5 v5.10.0
 	modernc.org/sqlite v1.56.0
