@@ -2,10 +2,15 @@
 
 All notable changes to sulis are documented in this file. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), adapted for
-a pre-1.0 project: see README.md's "Versioning" section for why this file has
-no tagged version numbers yet, only one running `[Unreleased]` entry.
+a pre-1.0 project: see README.md's "Versioning" section for what a `v0.x` tag
+does and does not promise.
 
-## [Unreleased]
+## [0.1.0] - 2026-08-20
+
+The first tagged release: `v0.1.0`, plus `store/sql/v0.1.0` for the nested
+module, which versions independently. Both tags point at `f5fc4ca`, the commit
+before this heading replaced `[Unreleased]` — the section was closed just
+after tagging rather than just before.
 
 This entry covers the entire `security-hardening-v1` branch (branched from
 `main` at `bf18c6e`): closing every finding in
