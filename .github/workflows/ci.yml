@@ -143,19 +143,28 @@ jobs:
       # All three `go run` tools are pinned. An unpinned @latest would
       # execute whatever that resolves to on the day CI runs. Dependabot
       # proposes the bumps.
+      #
+      # staticcheck and govulncheck sit at the first versions that understand
+      # Go 1.27, which the `stable` above began resolving to on 2026-08-20 —
+      # a pin protects against a tool moving under CI, not against the
+      # toolchain moving under the tool. staticcheck 2026.1 could not decode
+      # 1.27's export data ("export data version 4 is greater than maximum
+      # supported version 2") and govulncheck v1.1.4 panicked on an AST it
+      # did not expect (`unexpected expr: *ast.KeyValueExpr`), both on either
+      # module. gosec needed no bump, and v2.28.0 is still its latest.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2 ./...
 
       - name: gosec
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
 
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
       # Same three tools, same pins, against the nested store/sql module.
       - name: staticcheck (store/sql)
         working-directory: store/sql
-        run: go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2 ./...
 
       - name: gosec (store/sql)
         working-directory: store/sql
@@ -163,7 +172,7 @@ jobs:
 
       - name: govulncheck (store/sql)
         working-directory: store/sql
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   fuzz:
     name: fuzz smoke
