@@ -112,6 +112,13 @@ runs:
         # legs still exit 0 against this repository even though their logs
         # carry no-such-host lookups.
         #
+        # Worth re-checking whenever VERSION moves: unlike --fail, whose help
+        # text names its exit code ("Exit with code 183 if results are
+        # found"), this one promises only a "non-zero error code" and does not
+        # say which. Measured on 3.97.0 a scan error exits 1 while findings
+        # exit 183, and scan() below leans on precisely that split — so the
+        # split is observed behaviour, not a documented guarantee.
+        #
         # One array shared by every invocation, so a leg cannot be added
         # later that quietly omits one of these.
         common_flags=(
@@ -184,13 +191,18 @@ runs:
           # this repository's own .git, the pre-marker fixture comes back as
           # `.git/objects/d3/38c7…` at exit 183. Packfiles it does not read —
           # measured, a blob still reachable from history but packed by `git
-          # gc` is reported by nothing, exit 0 — so a freshly cloned checkout,
-          # whose objects are all in one pack, happens not to trip this today.
-          # That is git's packing policy, not a guarantee: anything that
-          # writes an object after checkout leaves it loose, and the exclusion
-          # is what keeps the gate independent of when git next repacks. It
-          # also keeps the scan off the whole object store, 409 chunks down to
-          # 280 on this repository.
+          # gc` is reported by nothing, exit 0.
+          #
+          # Whether .git leaks therefore depends on how the objects happen to
+          # be stored, which is exactly why the exclusion cannot rest on any
+          # particular checkout being packed. What actions/checkout fetches
+          # over HTTPS arrives as a pack and does not trip this; a plain local
+          # `git clone` of this repository inherits its loose objects and does
+          # trip it, at 183. Anything writing an object after checkout leaves
+          # one loose too. So the exclusion is what makes the gate independent
+          # of git's packing policy, and it keeps the scan off the object store
+          # besides — about a third of the chunks here. Exact counts are left
+          # out on purpose: they drift with every commit that grows the tree.
           #
           # The regex is anchored on a path separator rather than the string
           # start so it holds whether the scan root is given as `.` or as an
