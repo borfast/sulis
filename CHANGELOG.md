@@ -33,8 +33,9 @@ does and does not promise.
 
 The first tagged release: `v0.1.0`, plus `store/sql/v0.1.0` for the nested
 module, which versions independently. Both tags point at `f5fc4ca`, the commit
-before this heading replaced `[Unreleased]` — the section was closed just
-after tagging rather than just before.
+before this heading was inserted above the entry's body — the section was
+closed just after tagging rather than just before, and `[Unreleased]` stayed
+at the top of the file for whatever landed next.
 
 This entry covers the entire `security-hardening-v1` branch (branched from
 `main` at `bf18c6e`): closing every finding in
