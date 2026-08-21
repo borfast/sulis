@@ -6,8 +6,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
 
-  # Keeps the SHA-pinned actions in ci.yml current. Without this, pinning
-  # trades supply-chain risk for staleness.
+  # Keeps the SHA-pinned actions in .github/workflows current. Without this,
+  # pinning trades supply-chain risk for staleness.
   - package-ecosystem: github-actions
     directory: /
     schedule:
