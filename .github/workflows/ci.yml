@@ -119,7 +119,8 @@ jobs:
     steps:
       # fetch-depth: 0, unlike every other job in this file, because the
       # secret scan below resolves a base commit to diff against and the
-      # default shallow clone does not contain one.
+      # default shallow clone does not contain one. The scan's working-tree
+      # leg would survive a shallow clone; its range leg would not.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -128,19 +129,24 @@ jobs:
           go-version: stable
           check-latest: true
 
-      # Secret scanning, and a diff rather than a history walk: on a pull
-      # request the range is base..head, and on a push it is the commits that
-      # push added. That is the right shape for a gate — it blocks a
-      # credential from entering the tree — and it is cheap enough to run
+      # Secret scanning as a gate rather than a history walk: it blocks a
+      # credential from entering the tree, and it is cheap enough to run
       # first, ahead of the tool builds below, since it needs no Go toolchain
       # of its own. The full-history walk is a separate weekly workflow
       # (secret-scan.yml): its value is a detector set that grows over time,
-      # not this diff, and a cron trigger here would fire every other job in
+      # not this range, and a cron trigger here would fire every other job in
       # this file too.
+      #
+      # `head` matters as much as `since`. On a pull_request the checked-out
+      # HEAD is the merge ref whose first parent is base.sha, and handing that
+      # to the range scan makes it pass in silence — the action's own comments
+      # carry the measurement. So the PR's head sha is passed explicitly, and
+      # github.sha on a push, where it is the pushed commit.
       - name: trufflehog
         uses: ./.github/actions/trufflehog
         with:
           since: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       # All three `go run` tools are pinned. An unpinned @latest would
       # execute whatever that resolves to on the day CI runs. Dependabot
