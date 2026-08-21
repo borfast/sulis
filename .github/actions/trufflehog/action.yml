@@ -14,18 +14,18 @@ description: >-
 inputs:
   since:
     description: >-
-      Base commit the range scan diffs against. Setting it selects a gate:
-      the working tree is scanned and so is the range. Leave it empty to walk
-      the entire history instead, which is what the weekly workflow does.
+      Base commit the range scan diffs against. Empty skips the range scan;
+      empty together with `head` makes the whole run a history walk, which is
+      what the weekly workflow does.
     required: false
     default: ''
   head:
     description: >-
-      Commit the range scan stops at. Required whenever `since` is set, and
-      it must be the pull request's head sha on a pull_request — never HEAD,
-      which there is the merge ref, and see the args comment below for what
-      passing it costs. The pushed commit on a push. Ignored when `since` is
-      empty.
+      Commit the range scan stops at, and the input that selects a gate — set
+      it and the working tree is always scanned. It must be the pull request's
+      head sha on a pull_request, never HEAD, which there is the merge ref;
+      the two-scan comment below measures what passing HEAD costs. On a push
+      it is the pushed commit.
     required: false
     default: ''
 
@@ -64,8 +64,8 @@ runs:
         #
         # The cost is bounded and deliberate: a future detector never
         # re-examines that one file's history. Narrowing --results is not an
-        # alternative to it — see the args comment below for why all three
-        # result buckets have to stay on.
+        # alternative to it — see the --results comment below for why all
+        # three result buckets have to stay on.
         HISTORY_EXCLUDE_GLOBS: 'store/sql/postgres/postgres_test.go'
 
         SINCE: ${{ inputs.since }}
@@ -100,7 +100,26 @@ runs:
         # rather than omitted so that a future release narrowing that default
         # cannot quietly narrow this gate. --fail turns a finding into a red
         # build, and --no-update stops the binary reaching for a newer self.
-        results='--results=verified,unverified,unknown'
+        #
+        # --fail-on-scan-errors is what stops a scan that examined nothing
+        # from reporting success. Without it a scan whose source failed to
+        # chunk logs its errors and still exits 0: measured, a --branch sha
+        # absent from the clone logs "unable to resolve commit: object not
+        # found", scans 0 chunks of 0 bytes, and exits 0 — the same silent
+        # pass this gate was rewritten to close, arriving by another route.
+        # With it that run exits 1. It does not make findings-free runs
+        # noisier: a failed *verification* is not a scan error, so all three
+        # legs still exit 0 against this repository even though their logs
+        # carry no-such-host lookups.
+        #
+        # One array shared by every invocation, so a leg cannot be added
+        # later that quietly omits one of these.
+        common_flags=(
+          --results=verified,unverified,unknown
+          --fail
+          --fail-on-scan-errors
+          --no-update
+        )
 
         # --fail makes 183 mean "found something". Any other non-zero exit is
         # the tool failing rather than the tree being dirty, and must never be
@@ -130,14 +149,18 @@ runs:
           esac
         }
 
-        if [ -z "$SINCE" ]; then
-          # No base requested, so this is a history walk: one full `git` walk,
-          # and the only context in which --exclude-globs is allowed.
-          scan "history walk" git 'file://.' "$results" --fail --no-update \
-            --exclude-globs "$HISTORY_EXCLUDE_GLOBS"
-        else
-          # A base was requested, so this is a gate, and a gate runs two scans
-          # because neither one alone is sufficient.
+        # The mode is keyed on HEAD_SHA, not on SINCE. Both inputs default to
+        # the empty string, and inferring "history walk" from an empty SINCE
+        # is how a gate could turn itself into a history walk — complete with
+        # --exclude-globs, the one thing a gate must never apply — if ci.yml's
+        # `since:` expression ever evaluated empty while `head:` did not. An
+        # empty expression is exactly the failure that produced the original
+        # silent pass, so the exclusion is now unreachable from any branch a
+        # gate can enter: HEAD_SHA non-empty means gate, and only the case
+        # where both are empty walks history.
+        if [ -n "$HEAD_SHA" ]; then
+          # A gate, and a gate runs two scans because neither one alone is
+          # sufficient.
           #
           # The range scan below is the one that reads a diff, and on its own
           # it can pass in silence. `git --since-commit BASE --branch REF`
@@ -154,40 +177,69 @@ runs:
           # The filesystem scan is the belt to that braces. It reads the
           # checked-out tree, so no commit ordering, rewritten date or unusual
           # merge shape can hide a credential from it, and it honours
-          # `trufflehog:ignore` markers exactly as the range scan does. It
-          # does need .git kept out: measured, `filesystem .` descends into it
-          # and reports secrets read straight out of loose objects and
-          # packfiles, which would resurrect the pre-marker fixture named
-          # above and so fail every gate forever. The regex is anchored on a
-          # path separator rather than the string start so it holds whether
-          # the scan root is given as `.` or as an absolute path, and `.git/`
-          # with its trailing slash leaves `.github/` alone.
+          # `trufflehog:ignore` markers exactly as the range scan does.
+          #
+          # It does need .git kept out, because `filesystem` treats a loose
+          # object as just another compressed file and reads it: measured on
+          # this repository's own .git, the pre-marker fixture comes back as
+          # `.git/objects/d3/38c7…` at exit 183. Packfiles it does not read —
+          # measured, a blob still reachable from history but packed by `git
+          # gc` is reported by nothing, exit 0 — so a freshly cloned checkout,
+          # whose objects are all in one pack, happens not to trip this today.
+          # That is git's packing policy, not a guarantee: anything that
+          # writes an object after checkout leaves it loose, and the exclusion
+          # is what keeps the gate independent of when git next repacks. It
+          # also keeps the scan off the whole object store, 409 chunks down to
+          # 280 on this repository.
+          #
+          # The regex is anchored on a path separator rather than the string
+          # start so it holds whether the scan root is given as `.` or as an
+          # absolute path, and `.git/` with its trailing slash leaves
+          # `.github/` alone.
           printf '(^|/)\\.git/\n' > "$tmp/exclude-paths.txt"
-          scan "working tree" filesystem . "$results" --fail --no-update \
+          scan "working tree" filesystem . "${common_flags[@]}" \
             --exclude-paths "$tmp/exclude-paths.txt"
 
-          if [ -z "$HEAD_SHA" ]; then
-            echo "::error::since was set but head was not; the range scan cannot run"
+          # An unresolvable --branch is the same silent pass in a different
+          # costume: trufflehog logs "unable to resolve commit", scans nothing
+          # and exits 0, so this fails loudly instead. --fail-on-scan-errors
+          # above would also catch it, and both are kept — that flag covers
+          # chunking failures this check cannot foresee, while this check says
+          # which input was wrong.
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::head commit ${HEAD_SHA} is not in this clone; the range scan would examine nothing"
             exit 1
           fi
 
-          # A requested base that is not in this clone is not the same thing
-          # as no base at all, and the two must not converge on the same code
-          # path. Falling back to a history walk here would drag
-          # --exclude-globs into a gate, excluding the one file a gate most
-          # has to watch precisely when someone force-pushes. So only the
-          # range scan is skipped; the working-tree scan above has already
-          # covered the tree, and the weekly workflow still covers history.
+          # A base that is not in this clone is not the same thing as no base
+          # at all, and the two must not converge on the same code path.
+          # Falling back to a history walk here would drag --exclude-globs
+          # into a gate, excluding the one file a gate most has to watch
+          # precisely when someone force-pushes. So only the range scan is
+          # skipped; the working-tree scan above has already covered the tree,
+          # and the weekly workflow still covers history.
           #
-          # Two cases reach here: a first push to a branch, where
-          # github.event.before is all zeros, and a force-push whose previous
-          # tip was never fetched.
-          if git cat-file -e "${SINCE}^{commit}" 2>/dev/null; then
-            scan "range ${SINCE}..${HEAD_SHA}" git 'file://.' "$results" \
-              --fail --no-update --since-commit "$SINCE" --branch "$HEAD_SHA"
+          # Three cases reach the skip: no base given at all, a first push to
+          # a branch, where github.event.before is all zeros, and a force-push
+          # whose previous tip was never fetched.
+          if [ -z "$SINCE" ]; then
+            echo "::notice::no base commit was given, so the range scan is skipped; the working-tree scan above still gated this run"
+          elif git cat-file -e "${SINCE}^{commit}" 2>/dev/null; then
+            scan "range ${SINCE}..${HEAD_SHA}" git 'file://.' \
+              "${common_flags[@]}" --since-commit "$SINCE" --branch "$HEAD_SHA"
           else
             echo "::notice::base commit ${SINCE} is not in this clone, so the range scan is skipped; the working-tree scan above still gated this run"
           fi
+        elif [ -n "$SINCE" ]; then
+          # A base with nothing to diff it against. Treating this as a history
+          # walk is the trap described above, so it is an error instead.
+          echo "::error::since was set but head was not; the range scan cannot run"
+          exit 1
+        else
+          # Neither input set, so this is a history walk: one full `git` walk,
+          # and the only context in which --exclude-globs is allowed.
+          scan "history walk" git 'file://.' "${common_flags[@]}" \
+            --exclude-globs "$HISTORY_EXCLUDE_GLOBS"
         fi
 
         if [ "$findings" -ne 0 ]; then
