@@ -11,10 +11,15 @@ does and does not promise.
 
 - CI scans for leaked credentials with
   [trufflehog](https://github.com/trufflesecurity/trufflehog): the `analyze`
-  job scans each push's and each pull request's diff, and a new weekly
-  workflow re-walks the whole history, since the detector set grows over time
-  and a diff scan never looks twice at a commit. Nothing consumer-visible —
-  no new dependency, and nothing added to the module graph.
+  job gates every pull request and every push to `main` with two scans — the
+  checked-out working tree, and the commit range the change adds — failing on
+  a finding from either. Two, because a range scan alone walks commits in
+  committer-date order and stops at its base, so it can examine nothing and
+  still pass; a working-tree scan cannot be defeated that way. A new weekly
+  workflow re-walks the whole history in addition, since the detector set
+  grows over time and a gate never looks twice at a commit. Nothing
+  consumer-visible — no new dependency, and nothing added to the module
+  graph.
 
 ### Changed
 

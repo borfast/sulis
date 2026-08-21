@@ -1,3 +1,11 @@
+# On a pull_request the workflow checks out the PR's own tree, so this
+# composite action — and the workflow step that calls it — are read from the
+# branch under review, not from main. A fork PR can therefore rewrite its own
+# secret scan: weaken the flags, exclude the path holding its payload, or
+# point the checksum at a binary of its choosing. Nothing inside this file
+# can prevent that, and it is not meant to — the control is human review. Any
+# diff touching .github/workflows or .github/actions is security-relevant and
+# has to be read before the run is approved.
 name: trufflehog
 description: >-
   Scan this repository for leaked credentials with a checksum-verified
@@ -6,8 +14,18 @@ description: >-
 inputs:
   since:
     description: >-
-      Commit to diff against, so only the commits after it are scanned. Leave
-      empty to walk the entire history instead.
+      Base commit the range scan diffs against. Setting it selects a gate:
+      the working tree is scanned and so is the range. Leave it empty to walk
+      the entire history instead, which is what the weekly workflow does.
+    required: false
+    default: ''
+  head:
+    description: >-
+      Commit the range scan stops at. Required whenever `since` is set, and
+      it must be the pull request's head sha on a pull_request — never HEAD,
+      which there is the merge ref, and see the args comment below for what
+      passing it costs. The pushed commit on a push. Ignored when `since` is
+      empty.
     required: false
     default: ''
 
@@ -34,25 +52,24 @@ runs:
         VERSION: '3.97.0'
         SHA256: '62224de2f9dd7cd418800feb953760a302ed2f82a7c547fe1146a4874fb179e4'
 
-        # Excluded from a history walk only, never from a diff scan. The file
+        # Excluded from the history walk only, never from a gate. The file
         # holds a deliberate fixture DSN — the test asserts that a DSN's
         # password never reaches an error string — and the line carries a
-        # `trufflehog:ignore` marker. That marker is enough for a diff scan,
-        # which only ever reads the current version of a line, and it is why
-        # this exclusion must not apply there: a real credential added to that
-        # file tomorrow still has to fail the build. A history walk also reads
-        # the version committed before the marker existed, and no edit today
-        # changes what an old commit contains, so without this a full walk
-        # would fail forever.
+        # `trufflehog:ignore` marker. Both of a gate's scans honour that
+        # marker, which is why this exclusion must not reach them: a real
+        # credential added to that file tomorrow still has to fail the build.
+        # A history walk also reads the version committed before the marker
+        # existed (commit 28b81dd), and no edit today changes what an old
+        # commit contains, so without this a full walk would fail forever.
         #
         # The cost is bounded and deliberate: a future detector never
-        # re-examines that one file's history. The alternative — dropping
-        # `unknown` results from the walk — would blind it to every credential
-        # kind that cannot be verified, private keys included, across the whole
-        # tree.
+        # re-examines that one file's history. Narrowing --results is not an
+        # alternative to it — see the args comment below for why all three
+        # result buckets have to stay on.
         HISTORY_EXCLUDE_GLOBS: 'store/sql/postgres/postgres_test.go'
 
         SINCE: ${{ inputs.since }}
+        HEAD_SHA: ${{ inputs.head }}
       run: |
         set -euo pipefail
 
@@ -68,26 +85,111 @@ runs:
         echo "${SHA256}  ${archive}" | sha256sum --check --strict -
         tar -xzf "$archive" -C "$tmp" trufflehog
 
-        # A base commit that is not in this clone leaves nothing to diff
-        # against, so walk the history instead of failing. Two cases reach
-        # here: a first push to a branch, where github.event.before is all
-        # zeros, and a force-push whose previous tip was never fetched.
-        if [ -n "$SINCE" ] && ! git cat-file -e "${SINCE}^{commit}" 2>/dev/null; then
-          echo "::notice::base commit ${SINCE} is not in this clone; walking the full history instead"
-          SINCE=''
-        fi
+        # --results names all three buckets explicitly. Upstream's own help
+        # text defines them as: verified (confirmed valid by API), unknown
+        # (verification failed due to error), unverified (detected but not
+        # verified). So `unknown` means a verification that ERRORED — not
+        # "this credential kind has no verifier". Anything whose detector
+        # reaches no verdict at all lands in `unverified`, which is why the
+        # narrower verified,unknown silently dropped private keys, AWS key
+        # pairs and Slack tokens. Measured against a planted RSA private key
+        # PEM: verified,unknown exits 0 reporting nothing, all three exit 183
+        # with `Detector Type: PrivateKey`.
+        #
+        # All three is also upstream's documented default. It is spelled out
+        # rather than omitted so that a future release narrowing that default
+        # cannot quietly narrow this gate. --fail turns a finding into a red
+        # build, and --no-update stops the binary reaching for a newer self.
+        results='--results=verified,unverified,unknown'
 
-        # --results=verified,unknown is upstream's recommendation. `unknown` is
-        # a detector that matched but could not complete verification — an
-        # unreachable endpoint, or a credential kind that has none — so
-        # dropping it would silently discard exactly the findings CI cannot
-        # confirm for itself. --fail turns a finding into a red build, and
-        # --no-update stops the binary reaching for a newer self.
-        args=(git 'file://.' --results=verified,unknown --fail --no-update)
-        if [ -n "$SINCE" ]; then
-          args+=(--since-commit "$SINCE" --branch HEAD)
+        # --fail makes 183 mean "found something". Any other non-zero exit is
+        # the tool failing rather than the tree being dirty, and must never be
+        # mistaken for a clean scan. `|| rc=$?` is what stops `set -e` from
+        # abandoning the scans that follow once the first one finds a
+        # credential — a gate runs two, and both have to report.
+        findings=0
+        scan() {
+          label="$1"
+          shift
+          echo "::group::trufflehog: ${label}"
+          rc=0
+          "$tmp/trufflehog" "$@" || rc=$?
+          echo "::endgroup::"
+          case "$rc" in
+            0)
+              echo "${label}: clean"
+              ;;
+            183)
+              findings=1
+              echo "::error::${label}: trufflehog reported a credential"
+              ;;
+            *)
+              echo "::error::${label}: trufflehog exited ${rc}"
+              exit "$rc"
+              ;;
+          esac
+        }
+
+        if [ -z "$SINCE" ]; then
+          # No base requested, so this is a history walk: one full `git` walk,
+          # and the only context in which --exclude-globs is allowed.
+          scan "history walk" git 'file://.' "$results" --fail --no-update \
+            --exclude-globs "$HISTORY_EXCLUDE_GLOBS"
         else
-          args+=(--exclude-globs "$HISTORY_EXCLUDE_GLOBS")
+          # A base was requested, so this is a gate, and a gate runs two scans
+          # because neither one alone is sufficient.
+          #
+          # The range scan below is the one that reads a diff, and on its own
+          # it can pass in silence. `git --since-commit BASE --branch REF`
+          # walks commits in COMMITTER DATE order and stops the instant it
+          # emits BASE, so when the base tip is dated newer than the commits
+          # under review the walk ends after a single chunk having examined
+          # nothing. A pull_request checkout makes that the ordinary case
+          # rather than a corner: HEAD is the merge ref whose first parent IS
+          # base.sha. Measured on exactly that topology with a planted DSN in
+          # the branch — `--branch HEAD` reports 1 chunk and exits 0, while
+          # `--branch <head sha>` reports 2 chunks and exits 183. That is what
+          # the `head` input is for, and why it must not be handed HEAD.
+          #
+          # The filesystem scan is the belt to that braces. It reads the
+          # checked-out tree, so no commit ordering, rewritten date or unusual
+          # merge shape can hide a credential from it, and it honours
+          # `trufflehog:ignore` markers exactly as the range scan does. It
+          # does need .git kept out: measured, `filesystem .` descends into it
+          # and reports secrets read straight out of loose objects and
+          # packfiles, which would resurrect the pre-marker fixture named
+          # above and so fail every gate forever. The regex is anchored on a
+          # path separator rather than the string start so it holds whether
+          # the scan root is given as `.` or as an absolute path, and `.git/`
+          # with its trailing slash leaves `.github/` alone.
+          printf '(^|/)\\.git/\n' > "$tmp/exclude-paths.txt"
+          scan "working tree" filesystem . "$results" --fail --no-update \
+            --exclude-paths "$tmp/exclude-paths.txt"
+
+          if [ -z "$HEAD_SHA" ]; then
+            echo "::error::since was set but head was not; the range scan cannot run"
+            exit 1
+          fi
+
+          # A requested base that is not in this clone is not the same thing
+          # as no base at all, and the two must not converge on the same code
+          # path. Falling back to a history walk here would drag
+          # --exclude-globs into a gate, excluding the one file a gate most
+          # has to watch precisely when someone force-pushes. So only the
+          # range scan is skipped; the working-tree scan above has already
+          # covered the tree, and the weekly workflow still covers history.
+          #
+          # Two cases reach here: a first push to a branch, where
+          # github.event.before is all zeros, and a force-push whose previous
+          # tip was never fetched.
+          if git cat-file -e "${SINCE}^{commit}" 2>/dev/null; then
+            scan "range ${SINCE}..${HEAD_SHA}" git 'file://.' "$results" \
+              --fail --no-update --since-commit "$SINCE" --branch "$HEAD_SHA"
+          else
+            echo "::notice::base commit ${SINCE} is not in this clone, so the range scan is skipped; the working-tree scan above still gated this run"
+          fi
         fi
 
-        "$tmp/trufflehog" "${args[@]}"
+        if [ "$findings" -ne 0 ]; then
+          exit 1
+        fi
