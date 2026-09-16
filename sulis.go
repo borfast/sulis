@@ -54,6 +54,12 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 	if err := validateCookieName(cfg.CSRFCookieName); err != nil {
 		return nil, err
 	}
+	// Both cookies are written with Path=/ and no Domain, so a shared name
+	// is one cookie to the browser: whichever is set last wins and the
+	// other silently vanishes.
+	if cfg.CookieName == cfg.CSRFCookieName {
+		return nil, fmt.Errorf("sulis: session and CSRF cookie names must differ; both are %q", cfg.CookieName)
+	}
 
 	s := &Sulis{
 		users:    users,

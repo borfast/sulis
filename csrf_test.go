@@ -123,6 +123,23 @@ func TestWithCSRFCookieNameRejectsInvalidName(t *testing.T) {
 	}
 }
 
+func TestNewRejectsCollidingCookieNames(t *testing.T) {
+	const shared = "app_token"
+	users := newMemUserStore()
+	sessions := newMemSessionStore()
+	tokens := newMemTokenStore()
+	factors := newFakeFactors()
+	_, err := New(users, sessions, tokens, factors,
+		WithArgon2Params(testArgon2Params),
+		WithCookieName(shared), WithCSRFCookieName(shared))
+	if err == nil {
+		t.Fatal("expected New to reject a session cookie name equal to the CSRF cookie name")
+	}
+	if !strings.Contains(err.Error(), shared) {
+		t.Fatalf("error should name the colliding value, got %v", err)
+	}
+}
+
 func TestSulisRequireCSRFTokenUsesConfiguredName(t *testing.T) {
 	const customName = "csrf_token"
 	s, _, _, _ := newTestEnv(WithCSRFCookieName(customName))

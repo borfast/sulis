@@ -13,7 +13,10 @@ does and does not promise.
   `(*Sulis).IssueCSRFToken`/`VerifyCSRFToken`/`RequireCSRFToken` methods.
   Package-level helpers retain the default `__Host-csrf_token` name; custom
   names keep `Secure`, `Path=/`, no `Domain`, `HttpOnly=false`, and
-  `SameSite=Lax` fixed.
+  `SameSite=Lax` fixed. `New` rejects a CSRF cookie name equal to the
+  session cookie name: both are written with `Path=/` and no `Domain`, so
+  a shared name is a single cookie to the browser and one silently
+  destroys the other.
 
 - CI scans for leaked credentials with
   [trufflehog](https://github.com/trufflesecurity/trufflehog): the `analyze`
