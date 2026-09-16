@@ -474,18 +474,25 @@ func WithCookieName(name string) Option {
 
 // WithCSRFCookieName overrides the CSRF cookie's name (default:
 // "__Host-csrf_token"). New rejects a name that isn't a valid HTTP cookie
-// token (empty, or containing whitespace/control/separator characters).
+// token (empty, or containing whitespace/control/separator characters), and
+// rejects a name equal to CookieName.
 //
-// Choosing a name without the "__Host-" prefix is a valid, explicit opt-out
-// of one layer of protection for this pure double-submit token: the prefix
-// prevents a sibling subdomain or a non-HTTPS network attacker from planting
-// a chosen cookie value for this origin. RequireSameOrigin and SameSite remain
-// available as the other defenses. This option is intended for local
-// development or an integration that has a concrete naming requirement, never
-// as a production security relaxation. Secure, Path=/, no Domain, and
-// HttpOnly=false remain fixed on every CSRF cookie; choosing a non-__Host- name
-// does not guarantee Secure-cookie acceptance over plain HTTP, so use local
-// TLS where the browser requires it.
+// A name without the "__Host-" prefix does not weaken the double-submit
+// check, it defeats it. The token is a bare random value, not bound to the
+// session, so the entire defense rests on an attacker being unable to write
+// this cookie for this origin. Without the prefix, a sibling subdomain (or a
+// network attacker on any plain-HTTP origin under the same registrable
+// domain) can set the same name with Domain=.example.com. The browser then
+// sends both cookies, VerifyCSRFToken reads the attacker's value first, and
+// the attacker echoes that same value back in CSRFHeaderName: every forged
+// state-changing request passes. RequireSameOrigin becomes the only
+// remaining defense and must be wired up.
+//
+// Use this for local development or a concrete integration requirement,
+// never as a production relaxation. Secure, Path=/, no Domain, and
+// HttpOnly=false remain fixed on every CSRF cookie. Renaming does not make a
+// Secure cookie acceptable over plain HTTP, so use local TLS where the
+// browser requires it.
 func WithCSRFCookieName(name string) Option {
 	return func(c *Config) { c.CSRFCookieName = name }
 }
