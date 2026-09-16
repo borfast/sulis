@@ -25,14 +25,17 @@ import (
 // this origin could echo the very same value back in CSRFHeaderName/
 // CSRFFormField themselves, defeating the check — the classical weakness
 // of a bare double-submit token versus a session-bound one. This package
-// closes that gap by layering, not by binding the token: CSRFCookieName
-// carries the __Host- prefix, so neither a sibling subdomain nor a
-// network attacker without HTTPS can set it for this origin in the first
-// place, and RequireSameOrigin adds an independent, Fetch-Metadata-based
-// check that doesn't depend on cookie contents at all. Treat
-// IssueCSRFToken/RequireCSRFToken/VerifyCSRFToken as one layer of a
-// defense meant to be combined with __Host- and RequireSameOrigin, not as
-// a standalone guarantee.
+// closes that gap by layering, not by binding the token: the default
+// CSRFCookieName carries the __Host- prefix, so neither a sibling
+// subdomain nor a network attacker without HTTPS can set it for this
+// origin in the first place, and RequireSameOrigin adds an independent,
+// Fetch-Metadata-based check that doesn't depend on cookie contents at
+// all. Treat IssueCSRFToken/RequireCSRFToken/VerifyCSRFToken as one layer
+// of a defense meant to be combined with __Host- and RequireSameOrigin,
+// not as a standalone guarantee. WithCSRFCookieName can replace the name
+// with one that has no __Host- prefix, which removes the first of those
+// two layers entirely and leaves RequireSameOrigin carrying the whole
+// defense; see that option's own documentation before using it.
 const (
 	// CSRFCookieName is the cookie IssueCSRFToken sets and
 	// RequireCSRFToken/VerifyCSRFToken read the expected value from.
