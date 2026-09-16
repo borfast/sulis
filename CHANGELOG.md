@@ -9,6 +9,12 @@ does and does not promise.
 
 ### Added
 
+- Configurable CSRF cookie names via `WithCSRFCookieName` and the
+  `(*Sulis).IssueCSRFToken`/`VerifyCSRFToken`/`RequireCSRFToken` methods.
+  Package-level helpers retain the default `__Host-csrf_token` name; custom
+  names keep `Secure`, `Path=/`, no `Domain`, `HttpOnly=false`, and
+  `SameSite=Lax` fixed.
+
 - CI scans for leaked credentials with
   [trufflehog](https://github.com/trufflesecurity/trufflehog): the `analyze`
   job gates every pull request and every push to `main` with two scans — the

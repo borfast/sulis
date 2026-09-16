@@ -126,6 +126,11 @@ type Config struct {
 	// WithCookieName.
 	CookieName string
 
+	// CSRFCookieName is the name the Sulis instance's IssueCSRFToken sets and
+	// its CSRF verification helpers read (default: "__Host-csrf_token"). The
+	// package-level helpers always use the default. See WithCSRFCookieName.
+	CSRFCookieName string
+
 	// TokenSource controls which channel(s) Authenticate accepts a session
 	// token from (default: TokenSourceBoth). See WithTokenSource.
 	TokenSource TokenSource
@@ -168,6 +173,7 @@ func defaultConfig() Config {
 		Limiter:                        NewMemoryLimiter(),
 		PasswordChecker:                passwordcheck.NewBlocklist(),
 		CookieName:                     defaultCookieName,
+		CSRFCookieName:                 CSRFCookieName,
 		Argon2: Argon2Params{
 			Memory:      64 * 1024,
 			Iterations:  3,
@@ -464,6 +470,24 @@ func WithoutRateLimiting() Option {
 // name: nothing in this package's configuration surface can turn them off.
 func WithCookieName(name string) Option {
 	return func(c *Config) { c.CookieName = name }
+}
+
+// WithCSRFCookieName overrides the CSRF cookie's name (default:
+// "__Host-csrf_token"). New rejects a name that isn't a valid HTTP cookie
+// token (empty, or containing whitespace/control/separator characters).
+//
+// Choosing a name without the "__Host-" prefix is a valid, explicit opt-out
+// of one layer of protection for this pure double-submit token: the prefix
+// prevents a sibling subdomain or a non-HTTPS network attacker from planting
+// a chosen cookie value for this origin. RequireSameOrigin and SameSite remain
+// available as the other defenses. This option is intended for local
+// development or an integration that has a concrete naming requirement, never
+// as a production security relaxation. Secure, Path=/, no Domain, and
+// HttpOnly=false remain fixed on every CSRF cookie; choosing a non-__Host- name
+// does not guarantee Secure-cookie acceptance over plain HTTP, so use local
+// TLS where the browser requires it.
+func WithCSRFCookieName(name string) Option {
+	return func(c *Config) { c.CSRFCookieName = name }
 }
 
 // WithTokenSource restricts which channel(s) Authenticate accepts a

@@ -51,6 +51,9 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 	if err := validateCookieName(cfg.CookieName); err != nil {
 		return nil, err
 	}
+	if err := validateCookieName(cfg.CSRFCookieName); err != nil {
+		return nil, err
+	}
 
 	s := &Sulis{
 		users:    users,

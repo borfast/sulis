@@ -1,6 +1,6 @@
 # Proposal: `WithCSRFCookieName` — configurable CSRF cookie name
 
-Status: proposed (2026-08-19). Origin: family-photos integration (first real consumer).
+Status: implemented (2026-09-16). Origin: family-photos integration (first real consumer).
 
 ## Problem
 
@@ -18,10 +18,14 @@ Why the hatch matters — local development over plain HTTP:
 - A `__Host-` cookie is only stored by the browser when set with `Secure`, `Path=/`, no `Domain`,
   **from a secure context**. Chrome and Firefox treat `http://localhost` as a trustworthy origin
   and store it; **Safari does not**, and silently drops the cookie.
-- Result on Safari against a plain-http dev server: `IssueCSRFToken`'s cookie never persists, so
+- Result on Safari against a plain-http dev server: `IssueCSRFToken`'s cookie may not persist, so
   every state-changing request fails `VerifyCSRFToken` and dies with 403 in `RequireCSRFToken`.
-  The session cookie side is already solvable (`WithCookieName("session")` in dev); the CSRF side
-  is not, so the whole app remains broken on Safari regardless.
+  A custom name can address browsers that reject the `__Host-` prefix in that context, but the
+  CSRF cookie still carries `Secure=true`; renaming it does not guarantee Secure-cookie
+  acceptance over plain HTTP. Use local TLS where the browser requires it. The session cookie
+  side has the same fixed Secure behavior and a configurable name; the CSRF side now has the
+  same naming escape hatch, with browser compatibility still requiring validation in the target
+  development setup.
 
 family-photos ships with this as a documented caveat ("dev on localhost with Chrome/Firefox, or
 run local TLS") and selects the session cookie name per environment. The CSRF cookie should be
@@ -95,4 +99,6 @@ only" philosophy, and the same already-established dual package-function/method 
   `sulis.CSRFCookieName` to the new method forms, and select the CSRF cookie name alongside the
   session cookie name: `__Host-csrf_token` in production, `csrf_token` in development.
 - Bump the sulis pseudo-version, re-run the store conformance suite (`make test-integration`),
-  and delete the Safari caveat from the design watch-items / README.
+  and reassess the Safari caveat in the design watch-items / README after validating the chosen
+  name and Secure-cookie behavior in the supported local browsers; the option alone does not
+  establish plain-HTTP compatibility.

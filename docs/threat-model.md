@@ -259,9 +259,12 @@ everything that mailbox could still reach.
   `SessionCookie`.
 - **Double-submit helpers.** `IssueCSRFToken`/`RequireCSRFToken`/
   `VerifyCSRFToken` implement a double-submit cookie pattern: the value in
-  the (non-`HttpOnly`, `__Host-`-prefixed) CSRF cookie must match, byte for
-  byte via `crypto/subtle.ConstantTimeCompare`, whatever the client echoes
-  back in a header or form field.
+  the default (non-`HttpOnly`, `__Host-`-prefixed) CSRF cookie must match, byte
+  for byte via `crypto/subtle.ConstantTimeCompare`, whatever the client echoes
+  back in a header or form field. `WithCSRFCookieName` is an explicit opt-out
+  of the `__Host-` layer for a configured Sulis instance; its security trade-
+  off and fixed `Secure`/`Path=/`/no-`Domain` attributes are documented in the
+  option's GoDoc and README.
 - **`RequireSameOrigin`** rejects a cross-site, state-changing request
   using the `Sec-Fetch-Site` header (falling back to `Origin`) —
   independent of, and layered alongside, the double-submit defense. When
@@ -332,12 +335,16 @@ implementation record rather than invented for this document:
 
 - **The double-submit CSRF token is not cryptographically bound to the
   session.** It is a bare random value proving only that the requester
-  can read the `__Host-`-prefixed CSRF cookie for this origin, not that
-  they hold any particular session. This is mitigated, but not
-  eliminated, by the `__Host-` prefix (blocking cross-subdomain cookie
+  can read the default `__Host-`-prefixed CSRF cookie for this origin, not
+  that they hold any particular session. This is mitigated, but not
+  eliminated, by the default `__Host-` prefix (blocking cross-subdomain cookie
   injection) and by `RequireSameOrigin` as an independent, cookie-content-
   agnostic layer — but the two mechanisms are genuinely separate defenses
   stacked together, not one defense reinforcing the other cryptographically.
+  `WithCSRFCookieName` deliberately removes the prefix layer when configured
+  with a name without `__Host-` for a concrete naming requirement; it does not
+  disable the other fixed cookie attributes or guarantee Secure-cookie
+  acceptance over plain HTTP.
 - **The default rate limiter is per-process.** `MemoryLimiter` is
   in-memory; a deployment running several instances behind a load
   balancer has each instance enforcing its own budget independently,

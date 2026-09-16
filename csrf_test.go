@@ -52,6 +52,136 @@ func TestIssueCSRFTokenIsRandomPerCall(t *testing.T) {
 	}
 }
 
+func TestSulisIssueCSRFTokenUsesConfiguredNameAndFixedAttributes(t *testing.T) {
+	const customName = "csrf_token"
+	s, _, _, _ := newTestEnv(WithCSRFCookieName(customName))
+
+	token, cookie, err := s.IssueCSRFToken()
+	if err != nil {
+		t.Fatalf("(*Sulis).IssueCSRFToken: %v", err)
+	}
+	if cookie.Name != customName {
+		t.Fatalf("expected cookie name %q, got %q", customName, cookie.Name)
+	}
+	if cookie.Value != token {
+		t.Fatalf("expected cookie value to equal the returned token; got %q vs %q", cookie.Value, token)
+	}
+	if !cookie.Secure || cookie.Path != "/" || cookie.Domain != "" || cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("custom CSRF cookie changed fixed attributes: %+v", cookie)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.AddCookie(cookie)
+	req.Header.Set(CSRFHeaderName, token)
+	if err := s.VerifyCSRFToken(req); err != nil {
+		t.Fatalf("(*Sulis).VerifyCSRFToken with custom cookie: %v", err)
+	}
+	if err := VerifyCSRFToken(req); err == nil {
+		t.Fatal("package-level VerifyCSRFToken unexpectedly accepted a custom-name cookie")
+	}
+
+	formReq := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(url.Values{CSRFFormField: {token}}.Encode()))
+	formReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	formReq.AddCookie(cookie)
+	if err := s.VerifyCSRFToken(formReq); err != nil {
+		t.Fatalf("(*Sulis).VerifyCSRFToken with custom cookie and form fallback: %v", err)
+	}
+	precedenceReq := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(url.Values{CSRFFormField: {token}}.Encode()))
+	precedenceReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	precedenceReq.AddCookie(cookie)
+	precedenceReq.Header.Set(CSRFHeaderName, "wrong-header-token")
+	if err := s.VerifyCSRFToken(precedenceReq); err == nil {
+		t.Fatal("(*Sulis).VerifyCSRFToken unexpectedly fell back to the form when the header was present")
+	}
+
+	defaultToken, defaultCookie, err := IssueCSRFToken()
+	if err != nil {
+		t.Fatalf("IssueCSRFToken: %v", err)
+	}
+	defaultReq := httptest.NewRequest(http.MethodPost, "/", nil)
+	defaultReq.AddCookie(defaultCookie)
+	defaultReq.Header.Set(CSRFHeaderName, defaultToken)
+	if err := VerifyCSRFToken(defaultReq); err != nil {
+		t.Fatalf("package-level VerifyCSRFToken with default cookie: %v", err)
+	}
+	if err := s.VerifyCSRFToken(defaultReq); err == nil {
+		t.Fatal("configured VerifyCSRFToken unexpectedly accepted a default-name cookie")
+	}
+}
+
+func TestWithCSRFCookieNameRejectsInvalidName(t *testing.T) {
+	for _, name := range []string{"", "not a valid name"} {
+		t.Run(name, func(t *testing.T) {
+			users := newMemUserStore()
+			sessions := newMemSessionStore()
+			tokens := newMemTokenStore()
+			factors := newFakeFactors()
+			if _, err := New(users, sessions, tokens, factors, WithCSRFCookieName(name)); err == nil {
+				t.Fatal("expected invalid CSRF cookie name to be rejected")
+			}
+		})
+	}
+}
+
+func TestSulisRequireCSRFTokenUsesConfiguredName(t *testing.T) {
+	const customName = "csrf_token"
+	s, _, _, _ := newTestEnv(WithCSRFCookieName(customName))
+	token, cookie, err := s.IssueCSRFToken()
+	if err != nil {
+		t.Fatalf("(*Sulis).IssueCSRFToken: %v", err)
+	}
+
+	handler := s.RequireCSRFToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.AddCookie(cookie)
+	req.Header.Set(CSRFHeaderName, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("configured middleware rejected its configured cookie: got %d", rec.Code)
+	}
+
+	packageHandler := RequireCSRFToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	packageRec := httptest.NewRecorder()
+	packageHandler.ServeHTTP(packageRec, req)
+	if packageRec.Code != http.StatusForbidden {
+		t.Fatalf("package-level middleware accepted a custom-name cookie: got %d", packageRec.Code)
+	}
+}
+
+func TestSulisRequireCSRFTokenEmitsRejectionForCustomName(t *testing.T) {
+	sink := &recordingSink{}
+	s, _, _, _ := newTestEnv(WithCSRFCookieName("csrf_token"), WithEventSink(sink))
+	_, defaultCookie, err := IssueCSRFToken()
+	if err != nil {
+		t.Fatalf("IssueCSRFToken: %v", err)
+	}
+
+	handler := s.RequireCSRFToken(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.AddCookie(defaultCookie)
+	req.Header.Set(CSRFHeaderName, defaultCookie.Value)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected custom-name middleware to reject default-name cookie, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	e, ok := sink.first(EventCSRFRejected)
+	if !ok {
+		t.Fatal("expected EventCSRFRejected from custom-name middleware")
+	}
+	if e.Metadata[MetaReason] != ReasonCSRFTokenInvalid {
+		t.Fatalf("event reason = %q, want %q", e.Metadata[MetaReason], ReasonCSRFTokenInvalid)
+	}
+}
+
 func TestVerifyCSRFTokenAcceptsMatchingHeader(t *testing.T) {
 	token, cookie, err := IssueCSRFToken()
 	if err != nil {

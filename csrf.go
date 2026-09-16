@@ -14,6 +14,10 @@ import (
 // — one that never calls SessionCookie either — needs none of this; see
 // the README's "Cookie sessions and CSRF" section.
 //
+// The package-level helpers use the default CSRFCookieName. A Sulis instance
+// can opt into a different cookie name with WithCSRFCookieName; its methods
+// IssueCSRFToken, VerifyCSRFToken, and RequireCSRFToken then use that name.
+//
 // This is a PURE double-submit: CSRFCookieName's value is a bare random
 // token, not cryptographically bound to the session that requested it (no
 // HMAC over a session ID, no server-side lookup). By itself that means
@@ -61,7 +65,8 @@ const (
 // Call it once per session (right after SessionCookie, at login, is the
 // natural place) or once per page/form render; either works, since
 // VerifyCSRFToken only ever compares against whatever value is currently
-// in the cookie, not anything remembered server-side.
+// in the cookie, not anything remembered server-side. Config-aware callers
+// can use (*Sulis).IssueCSRFToken to use the configured cookie name.
 func IssueCSRFToken() (token string, cookie *http.Cookie, err error) {
 	token, _, err = generateRawToken(csrfTokenBytes)
 	if err != nil {
@@ -78,16 +83,28 @@ func IssueCSRFToken() (token string, cookie *http.Cookie, err error) {
 	return token, cookie, nil
 }
 
-// RequireCSRFToken returns middleware enforcing the double-submit check
-// (see VerifyCSRFToken) on every state-changing request — any method other
-// than GET/HEAD/OPTIONS; safe methods pass through untouched, same as
-// RequireSameOrigin.
+// IssueCSRFToken generates a CSRF token and cookie using this Sulis instance's
+// configured CSRF cookie name. The token generation and every cookie security
+// attribute are identical to the package-level IssueCSRFToken function.
+func (s *Sulis) IssueCSRFToken() (token string, cookie *http.Cookie, err error) {
+	token, cookie, err = IssueCSRFToken()
+	if err != nil {
+		return "", nil, err
+	}
+	cookie.Name = s.cfg.CSRFCookieName
+	return token, cookie, nil
+}
+
+// RequireCSRFToken returns middleware enforcing the default-name double-submit
+// check (see VerifyCSRFToken) on every state-changing request — any method
+// other than GET/HEAD/OPTIONS; safe methods pass through untouched, same as
+// RequireSameOrigin. The Sulis method uses the configured CSRF cookie name.
 //
 // Apply this to routes reachable via a cookie-authenticated session; a
 // route reachable only via an Authorization: Bearer header (see
 // WithTokenSource(TokenSourceBearerOnly)) gains nothing from it.
 // It emits no security event: a package-level function has no Sulis and so
-// no configured EventSink to emit to. Use the identically-behaved
+// no configured EventSink to emit to. Use the
 // (*Sulis).RequireCSRFToken method instead if you want rejections to reach
 // your sink as EventCSRFRejected.
 func RequireCSRFToken(next http.Handler) http.Handler {
@@ -95,10 +112,9 @@ func RequireCSRFToken(next http.Handler) http.Handler {
 }
 
 // RequireCSRFToken is the package-level RequireCSRFToken bound to this Sulis,
-// so a rejection reaches the configured EventSink as EventCSRFRejected. The
-// check itself is identical — same VerifyCSRFToken, same 403, same
-// Cache-Control — and either form may be used; this one is simply the one
-// that can report.
+// so a rejection reaches the configured EventSink as EventCSRFRejected and
+// the configured CSRF cookie name is used. The verification rules, 403, and
+// Cache-Control response are otherwise identical to the package-level form.
 //
 // A method and a package-level function of the same name is deliberate
 // rather than a rename: RequireCSRFToken is already-shipped public API, and
@@ -111,12 +127,17 @@ func (s *Sulis) RequireCSRFToken(next http.Handler) http.Handler {
 // requireCSRFToken is the shared implementation. A nil *Sulis means "no
 // events" — emit is nil-receiver safe for exactly this.
 func requireCSRFToken(s *Sulis, next http.Handler) http.Handler {
+	cookieName := CSRFCookieName
+	if s != nil {
+		cookieName = s.cfg.CSRFCookieName
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isSafeMethod(r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if err := VerifyCSRFToken(r); err != nil {
+		if err := verifyCSRFToken(r, cookieName); err != nil {
 			s.emit(r.Context(), Event{
 				Kind:        EventCSRFRejected,
 				RequestInfo: requestInfoFromRequest(r),
@@ -130,7 +151,7 @@ func requireCSRFToken(s *Sulis, next http.Handler) http.Handler {
 }
 
 // VerifyCSRFToken implements the double-submit comparison at the heart of
-// RequireCSRFToken: the value in the CSRFCookieName cookie must be present
+// RequireCSRFToken: the value in the default CSRFCookieName cookie must be present
 // and must match, byte for byte, whatever the client echoed back —
 // checked first in the CSRFHeaderName header, then (for a traditional
 // <form> POST that can't set a custom header) the CSRFFormField form
@@ -161,7 +182,18 @@ func requireCSRFToken(s *Sulis, next http.Handler) http.Handler {
 // directly is not, for the same reason any Go form-handling code already
 // has to call ParseForm before touching the raw body once.
 func VerifyCSRFToken(r *http.Request) error {
-	cookie, err := r.Cookie(CSRFCookieName)
+	return verifyCSRFToken(r, CSRFCookieName)
+}
+
+// VerifyCSRFToken implements the CSRF check using this Sulis instance's
+// configured cookie name. The comparison and header/form precedence are
+// identical to the package-level VerifyCSRFToken.
+func (s *Sulis) VerifyCSRFToken(r *http.Request) error {
+	return verifyCSRFToken(r, s.cfg.CSRFCookieName)
+}
+
+func verifyCSRFToken(r *http.Request, cookieName string) error {
+	cookie, err := r.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
 		return ErrCSRFTokenInvalid
 	}
