@@ -110,8 +110,12 @@ func TestSulisIssueCSRFTokenUsesConfiguredNameAndFixedAttributes(t *testing.T) {
 }
 
 func TestWithCSRFCookieNameRejectsInvalidName(t *testing.T) {
-	for _, name := range []string{"", "not a valid name"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct{ label, name string }{
+		{"empty", ""},
+		{"contains space", "not a valid name"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			name := tc.name
 			users := newMemUserStore()
 			sessions := newMemSessionStore()
 			tokens := newMemTokenStore()
