@@ -54,7 +54,7 @@ func TestIssueCSRFTokenIsRandomPerCall(t *testing.T) {
 
 func TestSulisIssueCSRFTokenUsesConfiguredNameAndFixedAttributes(t *testing.T) {
 	const customName = "csrf_token"
-	s, _, _, _ := newTestEnv(WithCSRFCookieName(customName))
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithCSRFCookieName(customName))
 
 	token, cookie, err := s.IssueCSRFToken()
 	if err != nil {
@@ -116,7 +116,7 @@ func TestWithCSRFCookieNameRejectsInvalidName(t *testing.T) {
 			sessions := newMemSessionStore()
 			tokens := newMemTokenStore()
 			factors := newFakeFactors()
-			if _, err := New(users, sessions, tokens, factors, WithCSRFCookieName(name)); err == nil {
+			if _, err := New(users, sessions, tokens, factors, WithArgon2Params(testArgon2Params), WithCSRFCookieName(name)); err == nil {
 				t.Fatal("expected invalid CSRF cookie name to be rejected")
 			}
 		})
@@ -142,7 +142,7 @@ func TestNewRejectsCollidingCookieNames(t *testing.T) {
 
 func TestSulisRequireCSRFTokenUsesConfiguredName(t *testing.T) {
 	const customName = "csrf_token"
-	s, _, _, _ := newTestEnv(WithCSRFCookieName(customName))
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithCSRFCookieName(customName))
 	token, cookie, err := s.IssueCSRFToken()
 	if err != nil {
 		t.Fatalf("(*Sulis).IssueCSRFToken: %v", err)
@@ -172,7 +172,7 @@ func TestSulisRequireCSRFTokenUsesConfiguredName(t *testing.T) {
 
 func TestSulisRequireCSRFTokenEmitsRejectionForCustomName(t *testing.T) {
 	sink := &recordingSink{}
-	s, _, _, _ := newTestEnv(WithCSRFCookieName("csrf_token"), WithEventSink(sink))
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithCSRFCookieName("csrf_token"), WithEventSink(sink))
 	_, defaultCookie, err := IssueCSRFToken()
 	if err != nil {
 		t.Fatalf("IssueCSRFToken: %v", err)
