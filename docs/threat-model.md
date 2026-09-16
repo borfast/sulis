@@ -262,9 +262,9 @@ everything that mailbox could still reach.
   the default (non-`HttpOnly`, `__Host-`-prefixed) CSRF cookie must match, byte
   for byte via `crypto/subtle.ConstantTimeCompare`, whatever the client echoes
   back in a header or form field. `WithCSRFCookieName` is an explicit opt-out
-  of the `__Host-` layer for a configured Sulis instance; its security trade-
-  off and fixed `Secure`/`Path=/`/no-`Domain` attributes are documented in the
-  option's GoDoc and README.
+  of the `__Host-` layer for a configured Sulis instance; its security
+  trade-off and fixed `Secure`/`Path=/`/no-`Domain` attributes are documented
+  in the option's GoDoc and README.
 - **`RequireSameOrigin`** rejects a cross-site, state-changing request
   using the `Sec-Fetch-Site` header (falling back to `Origin`) —
   independent of, and layered alongside, the double-submit defense. When
