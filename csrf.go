@@ -37,8 +37,12 @@ import (
 // two layers entirely and leaves RequireSameOrigin carrying the whole
 // defense; see that option's own documentation before using it.
 const (
-	// CSRFCookieName is the cookie IssueCSRFToken sets and
-	// RequireCSRFToken/VerifyCSRFToken read the expected value from.
+	// CSRFCookieName is the cookie the package-level IssueCSRFToken sets
+	// and the package-level RequireCSRFToken/VerifyCSRFToken read the
+	// expected value from, and the default for a Sulis instance. The
+	// (*Sulis) methods of those three names use the configured name
+	// instead, so do not hard-code this constant in an application that
+	// passes WithCSRFCookieName.
 	// Unlike the session cookie it is intentionally NOT HttpOnly: a
 	// same-origin script must be able to read it, to mirror it into
 	// CSRFHeaderName on the requests it makes — that same-origin-only
