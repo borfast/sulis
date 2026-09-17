@@ -33,6 +33,7 @@ const (
 	serverPort = "8099"
 	driverAddr = "http://127.0.0.1:4444"
 	renamed    = "csrf_token"
+	control    = "sulis_control_not_secure"
 )
 
 func main() {
@@ -61,10 +62,19 @@ func run() error {
 		return fmt.Errorf("(*Sulis).IssueCSRFToken: %w", err)
 	}
 
+	// Control: same attributes as the two above except Secure. If Safari
+	// drops all three, the session is rejecting cookies for some unrelated
+	// reason and the other two rows prove nothing.
+	controlCookie := &http.Cookie{
+		Name: control, Value: "control", Path: "/",
+		HttpOnly: false, Secure: false, SameSite: http.SameSiteLaxMode,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, defaultCookie)
 		http.SetCookie(w, renamedCookie)
+		http.SetCookie(w, controlCookie)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, "<!doctype html><title>sulis cookie probe</title><p>ok")
 	})
@@ -78,15 +88,15 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("%-26s  %-20s  %s\n", "origin", defaultCookie.Name, renamedCookie.Name)
+	fmt.Printf("%-26s  %-20s  %-12s  %s\n", "origin", defaultCookie.Name, renamedCookie.Name, "control (no Secure)")
 	for _, host := range []string{"localhost", "127.0.0.1"} {
 		origin := "http://" + host + ":" + serverPort
 		stored, err := storedCookies(origin + "/")
 		if err != nil {
 			return fmt.Errorf("%s: %w", origin, err)
 		}
-		fmt.Printf("%-26s  %-20s  %s\n", origin,
-			kept(stored[defaultCookie.Name]), kept(stored[renamedCookie.Name]))
+		fmt.Printf("%-26s  %-20s  %-12s  %s\n", origin,
+			kept(stored[defaultCookie.Name]), kept(stored[renamedCookie.Name]), kept(stored[control]))
 	}
 	return nil
 }
