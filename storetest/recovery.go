@@ -45,7 +45,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			t.Fatalf("CountCodes = %d, want %d", count, len(hashes))
 		}
 		for _, hash := range hashes {
-			if err := store.ConsumeCode(ctx, userID, hash); err != nil {
+			if _, err := store.ConsumeCode(ctx, userID, hash); err != nil {
 				t.Fatalf("ConsumeCode(%q): %v", hash, err)
 			}
 		}
@@ -71,7 +71,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			t.Fatalf("CountCodes = %d, want %d — regenerating must replace the set, not add to it", count, len(fresh))
 		}
 		// Codes from the discarded set must no longer authenticate anyone.
-		if err := store.ConsumeCode(ctx, userID, old[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
+		if _, err := store.ConsumeCode(ctx, userID, old[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("ConsumeCode with a superseded code error = %v, want ErrCodeNotFound", err)
 		}
 	})
@@ -84,8 +84,12 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
 
-		if err := store.ConsumeCode(ctx, userID, hashes[1]); err != nil {
+		remaining, err := store.ConsumeCode(ctx, userID, hashes[1])
+		if err != nil {
 			t.Fatalf("ConsumeCode: %v", err)
+		}
+		if remaining != len(hashes)-1 {
+			t.Fatalf("ConsumeCode remaining = %d, want %d", remaining, len(hashes)-1)
 		}
 		count, err := store.CountCodes(ctx, userID)
 		if err != nil {
@@ -95,7 +99,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			t.Fatalf("CountCodes = %d, want %d", count, len(hashes)-1)
 		}
 		for _, hash := range []string{hashes[0], hashes[2]} {
-			if err := store.ConsumeCode(ctx, userID, hash); err != nil {
+			if _, err := store.ConsumeCode(ctx, userID, hash); err != nil {
 				t.Fatalf("a sibling code was consumed too: ConsumeCode(%q) = %v", hash, err)
 			}
 		}
@@ -108,11 +112,11 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 		if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
-		if err := store.ConsumeCode(ctx, userID, hashes[0]); err != nil {
+		if _, err := store.ConsumeCode(ctx, userID, hashes[0]); err != nil {
 			t.Fatalf("first ConsumeCode: %v", err)
 		}
 
-		if err := store.ConsumeCode(ctx, userID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
+		if _, err := store.ConsumeCode(ctx, userID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("second ConsumeCode error = %v, want ErrCodeNotFound — a recovery code is single-use", err)
 		}
 	})
@@ -126,11 +130,11 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 		}
 
 		attackerID := uniqueID("attacker")
-		if err := store.ConsumeCode(ctx, attackerID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
+		if _, err := store.ConsumeCode(ctx, attackerID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("cross-user ConsumeCode error = %v, want ErrCodeNotFound", err)
 		}
 		// And the owner's code must still be there to use.
-		if err := store.ConsumeCode(ctx, ownerID, hashes[0]); err != nil {
+		if _, err := store.ConsumeCode(ctx, ownerID, hashes[0]); err != nil {
 			t.Fatalf("the owner's code was consumed by another user's attempt: %v", err)
 		}
 	})
@@ -141,7 +145,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 		if err := store.ReplaceCodes(ctx, userID, newCodeHashes(2)); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
-		if err := store.ConsumeCode(ctx, userID, uniqueHash("absent")); !errors.Is(err, recovery.ErrCodeNotFound) {
+		if _, err := store.ConsumeCode(ctx, userID, uniqueHash("absent")); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("ConsumeCode with an unknown hash error = %v, want ErrCodeNotFound", err)
 		}
 	})
@@ -175,7 +179,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 		if count != 0 {
 			t.Fatalf("CountCodes = %d after DeleteCodes, want 0", count)
 		}
-		if err := store.ConsumeCode(ctx, userID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
+		if _, err := store.ConsumeCode(ctx, userID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("ConsumeCode after DeleteCodes error = %v, want ErrCodeNotFound", err)
 		}
 	})
@@ -221,7 +225,8 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			// turns one code into as many authentications as there are
 			// callers.
 			errs := race(racers, func(int) error {
-				return store.ConsumeCode(ctx, userID, hashes[0])
+				_, err := store.ConsumeCode(ctx, userID, hashes[0])
+				return err
 			})
 			exactlyOneWinner(t, errs, recovery.ErrCodeNotFound,
 				fmt.Sprintf("iteration %d: concurrent ConsumeCode", i))
@@ -233,6 +238,49 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			if count != len(hashes)-1 {
 				t.Fatalf("iteration %d: CountCodes = %d, want %d — exactly one code was consumed",
 					i, count, len(hashes)-1)
+			}
+		}
+	})
+
+	t.Run("ConcurrentConsumeReturnsEachRemainingCountExactlyOnce", func(t *testing.T) {
+		const codes = 8
+
+		for i := range raceIterations() {
+			store := factory()
+			userID := uniqueID("user")
+			hashes := newCodeHashes(codes)
+			if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
+				t.Fatalf("iteration %d: ReplaceCodes: %v", i, err)
+			}
+
+			// Each goroutine writes only its own slot, so the slice needs no
+			// lock of its own.
+			remaining := make([]int, codes)
+			errs := race(codes, func(g int) error {
+				n, err := store.ConsumeCode(ctx, userID, hashes[g])
+				remaining[g] = n
+				return err
+			})
+			for g, err := range errs {
+				if err != nil {
+					t.Fatalf("iteration %d: ConsumeCode(%d) = %v, want nil", i, g, err)
+				}
+			}
+
+			// Eight consumptions of an eight-code set must report 7, 6 ... 0,
+			// each exactly once. This is the assertion the returned count
+			// exists for: a store that counts in a separate operation reports
+			// whatever the set held by then, so values repeat and others never
+			// appear at all.
+			seen := make(map[int]int, codes)
+			for _, n := range remaining {
+				seen[n]++
+			}
+			for want := range codes {
+				if seen[want] != 1 {
+					t.Fatalf("iteration %d: remaining counts %v, want each of 0..%d exactly once",
+						i, remaining, codes-1)
+				}
 			}
 		}
 	})
@@ -251,7 +299,8 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 			// Distinct codes contend for nothing: a store that serializes them
 			// too coarsely still has to let every one of them through.
 			errs := race(codes, func(g int) error {
-				return store.ConsumeCode(ctx, userID, hashes[g])
+				_, err := store.ConsumeCode(ctx, userID, hashes[g])
+				return err
 			})
 			for g, err := range errs {
 				if err != nil {

@@ -55,24 +55,56 @@ func (s *RecoveryStore) ReplaceCodes(ctx context.Context, userID string, hashes 
 	return nil
 }
 
-// ConsumeCode deletes the code matching userID and hash, in one statement. Zero
-// rows affected — spent, never issued, or issued to somebody else — is
-// recovery.ErrCodeNotFound.
-func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) error {
-	const q = `DELETE FROM recovery_codes WHERE user_id = $1 AND code_hash = $2`
-
-	res, err := s.db.ExecContext(ctx, q, userID, hash)
+// ConsumeCode deletes the code matching userID and hash and reports how many
+// of the user's codes are left afterwards. Zero rows affected — spent, never
+// issued, or issued to somebody else — is recovery.ErrCodeNotFound.
+//
+// The delete alone would survive READ COMMITTED on its own, the way it did
+// before this method returned a count. The count does not: it asks how many
+// rows are absent, and a snapshot taken before another consumption committed
+// answers that wrongly, so two callers deleting two different codes of a
+// three-code user would both report two remaining. This method therefore
+// takes the user's advisory lock first, the same treatment the package
+// documentation describes for the other count-shaped contracts.
+//
+// ReplaceCodes needs no such lock to stay correct against this one. Its DELETE
+// contends for the same rows, so it either commits before this method's own
+// DELETE, which then finds nothing and reports ErrCodeNotFound, or it blocks
+// until this transaction commits and the count is already taken.
+func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("sulis/postgres: consuming a recovery code: %w", err)
+		return 0, fmt.Errorf("sulis/postgres: consuming a recovery code: %w", err)
+	}
+	defer rollback(tx)
+
+	if err := lockUser(ctx, tx, advisoryClassRecovery, userID); err != nil {
+		return 0, err
+	}
+
+	const del = `DELETE FROM recovery_codes WHERE user_id = $1 AND code_hash = $2`
+	res, err := tx.ExecContext(ctx, del, userID, hash)
+	if err != nil {
+		return 0, fmt.Errorf("sulis/postgres: consuming a recovery code: %w", err)
 	}
 	n, err := affected(res, "consuming a recovery code")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if n == 0 {
-		return recovery.ErrCodeNotFound
+		return 0, recovery.ErrCodeNotFound
 	}
-	return nil
+
+	const count = `SELECT COUNT(*) FROM recovery_codes WHERE user_id = $1`
+	var remaining int
+	if err := tx.QueryRowContext(ctx, count, userID).Scan(&remaining); err != nil {
+		return 0, fmt.Errorf("sulis/postgres: counting the remaining recovery codes: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("sulis/postgres: committing a recovery code consumption: %w", err)
+	}
+	return remaining, nil
 }
 
 // CountCodes returns how many unused codes the user has left. A user with none

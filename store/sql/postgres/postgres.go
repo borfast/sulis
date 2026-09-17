@@ -125,8 +125,9 @@ const uniqueViolation = "23505"
 // whatever advisory locks the surrounding application uses. The values are
 // arbitrary and only have to stay stable.
 const (
-	advisoryClassTOTP    int32 = 0x53554C31
-	advisoryClassPasskey int32 = 0x53554C32
+	advisoryClassTOTP     int32 = 0x53554C31
+	advisoryClassPasskey  int32 = 0x53554C32
+	advisoryClassRecovery int32 = 0x53554C33
 )
 
 // DB owns a database handle and hands out the seven store implementations.

@@ -54,7 +54,11 @@ named here; this document only asserts what each one is *for*.
   all specified as one atomic find-and-mark-used (or find-and-delete)
   operation — a lookup followed by a separate write is a race that lets
   two concurrent redemptions both succeed, which the contract forbids and
-  `storetest`'s concurrency subtests check for.
+  `storetest`'s concurrency subtests check for. `ConsumeCode` additionally
+  returns the count of codes left afterwards from that same operation. The
+  count is what an application shows the user and what it uses to decide the
+  last code is gone, and a count taken separately afterwards can reflect
+  another caller's consumption instead of this one.
 - **Hashed at rest.** Password-reset, magic-link, two-factor, and
   email-verification tokens are stored only as `Token.TokenHash` (SHA-256
   of the raw token); the raw value is returned once for out-of-band

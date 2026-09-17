@@ -45,19 +45,22 @@ func (s *RecoveryStore) ReplaceCodes(_ context.Context, userID string, hashes []
 // for that user. A recovery code bypasses every other factor, so a store that
 // looked the code up and then deleted it would let two concurrent
 // presentations of the same code both authenticate.
-func (s *RecoveryStore) ConsumeCode(_ context.Context, userID, hash string) error {
+// The remaining count is read under the same lock as the delete, so it is
+// the count this consumption produced rather than whatever a later call
+// would find.
+func (s *RecoveryStore) ConsumeCode(_ context.Context, userID, hash string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	set, ok := s.codes[userID]
 	if !ok {
-		return recovery.ErrCodeNotFound
+		return 0, recovery.ErrCodeNotFound
 	}
 	if _, ok := set[hash]; !ok {
-		return recovery.ErrCodeNotFound
+		return 0, recovery.ErrCodeNotFound
 	}
 	delete(set, hash)
-	return nil
+	return len(set), nil
 }
 
 // CountCodes reports how many unused codes userID has left. A user with none
