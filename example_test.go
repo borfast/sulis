@@ -54,7 +54,16 @@ func Example_passwordLoginWithTwoFactor() {
 		fmt.Println("setup:", err)
 		return
 	}
-	totpSvc, err := totp.NewService(totpStore, "ExampleApp")
+	// NewService requires both choices to be stated. A real deployment
+	// supplies a Limiter here too; this example has no shared store to
+	// limit against, so it says so rather than leaving it unset.
+	totpEncryptor, err := totp.NewAESEncryptor(make([]byte, 32))
+	if err != nil {
+		fmt.Println("setup:", err)
+		return
+	}
+	totpSvc, err := totp.NewService(totpStore, "ExampleApp",
+		totp.WithEncryptor(totpEncryptor), totp.WithoutRateLimiting())
 	if err != nil {
 		fmt.Println("setup:", err)
 		return

@@ -46,7 +46,7 @@ func (r *recordingSink) kindsFor(userID string) []EventKind {
 func TestConsumeEmitsCodeConsumedWithRemaining(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithCount(2), WithEventSink(sink))
+	svc := mustService(t, store, WithCount(2), WithEventSink(sink))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -78,7 +78,7 @@ func TestConsumeEmitsCodeConsumedWithRemaining(t *testing.T) {
 func TestConsumeEmitsCodeRejectedOnInvalidCode(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithEventSink(sink))
+	svc := mustService(t, store, WithEventSink(sink))
 	ctx := context.Background()
 
 	if _, err := svc.Generate(ctx, "user1"); err != nil {
@@ -104,7 +104,7 @@ func TestConsumeEmitsCodeRejectedOnInvalidCode(t *testing.T) {
 func TestConsumeEmitsCodesExhaustedOnTheLastCode(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithCount(1), WithEventSink(sink))
+	svc := mustService(t, store, WithCount(1), WithEventSink(sink))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -127,7 +127,7 @@ func TestConsumeEmitsCodesExhaustedOnTheLastCode(t *testing.T) {
 func TestConsumeDoesNotEmitExhaustedWhenCodesRemain(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
-	svc := NewService(store, WithCount(2), WithEventSink(sink))
+	svc := mustService(t, store, WithCount(2), WithEventSink(sink))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -147,7 +147,7 @@ func TestConsumeDoesNotEmitExhaustedWhenCodesRemain(t *testing.T) {
 
 func TestNilEventSinkIsANoOp(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store) // no WithEventSink
+	svc := mustService(t, store) // no WithEventSink
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -167,7 +167,7 @@ func (panicSink) Emit(context.Context, Event) { panic("sink exploded") }
 
 func TestEventSinkPanicDoesNotFailConsume(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store, WithEventSink(panicSink{}))
+	svc := mustService(t, store, WithEventSink(panicSink{}))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -189,7 +189,7 @@ func TestConsumeEmitsCodeRateLimitedOnDeniedAttempt(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
 	limiter := &fakeLimiter{denied: true}
-	svc := NewService(store, WithLimiter(limiter), WithEventSink(sink))
+	svc := mustService(t, store, WithLimiter(limiter), WithEventSink(sink))
 	ctx := context.Background()
 
 	if _, err := svc.Generate(ctx, "user1"); err != nil {
@@ -224,7 +224,7 @@ func TestEveryDeclaredRecoveryEventKindIsEmitted(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
 	limiter := &fakeLimiter{}
-	svc := NewService(store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
+	svc := mustService(t, store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -285,7 +285,7 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	store := newMemStore()
 	sink := &recordingSink{}
 	limiter := &fakeLimiter{}
-	svc := NewService(store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
+	svc := mustService(t, store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")

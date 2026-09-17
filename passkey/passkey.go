@@ -143,8 +143,28 @@ type Service struct {
 	cfg        serviceConfig
 }
 
-// NewService creates a new passkey service with the given stores and configuration.
+// NewService creates a new passkey service with the given stores and
+// configuration.
+//
+// Every argument it cannot work without is checked here rather than at the
+// first ceremony. go-webauthn's own constructor accepts an empty RPID and an
+// empty RPDisplayName without complaint, so before these checks a service
+// built from an incomplete config looked healthy and failed later, during a
+// registration or login a real user was waiting on.
 func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts ...Option) (*Service, error) {
+	switch {
+	case store == nil:
+		return nil, fmt.Errorf("passkey: store must not be nil")
+	case challenges == nil:
+		return nil, fmt.Errorf("passkey: challenge store must not be nil")
+	case cfg.RPID == "":
+		return nil, fmt.Errorf("passkey: RPID must not be empty")
+	case cfg.RPDisplayName == "":
+		return nil, fmt.Errorf("passkey: RPDisplayName must not be empty")
+	case len(cfg.RPOrigins) == 0:
+		return nil, fmt.Errorf("passkey: RPOrigins must list at least one allowed origin")
+	}
+
 	sc := serviceConfig{
 		userVerification: protocol.VerificationRequired,
 		residentKey:      protocol.ResidentKeyRequirementRequired,

@@ -3,6 +3,7 @@ package totp
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,11 +12,30 @@ import (
 // mustService creates a Service, failing the test if construction errors.
 func mustService(t *testing.T, store Store, issuer string, opts ...Option) *Service {
 	t.Helper()
-	svc, err := NewService(store, issuer, opts...)
+	svc, err := NewService(store, issuer, withTestDefaults(opts)...)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	return svc
+}
+
+// withTestDefaults states the encryption and rate-limiting choices that
+// NewService now requires, for the tests that care about neither. A test
+// that passes WithEncryptor or WithLimiter keeps its own choice, since
+// pairing either with its opt-out is itself an error.
+func withTestDefaults(opts []Option) []Option {
+	var probe Config
+	for _, opt := range opts {
+		opt(&probe)
+	}
+	full := make([]Option, 0, len(opts)+2)
+	if probe.Encryptor == nil && !probe.noEncryption {
+		full = append(full, WithoutSecretEncryption())
+	}
+	if probe.Limiter == nil && !probe.noRateLimiting {
+		full = append(full, WithoutRateLimiting())
+	}
+	return append(full, opts...)
 }
 
 // errTOTPCounterRegressed is returned by memTOTPStore.SaveTOTP when a save
@@ -770,7 +790,7 @@ func TestNewServiceRejectsInvalidConfig(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newMemTOTPStore()
-			_, err := NewService(store, "TestApp", tc.opts...)
+			_, err := NewService(store, "TestApp", withTestDefaults(tc.opts)...)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -779,7 +799,7 @@ func TestNewServiceRejectsInvalidConfig(t *testing.T) {
 
 	t.Run("empty issuer", func(t *testing.T) {
 		store := newMemTOTPStore()
-		_, err := NewService(store, "")
+		_, err := NewService(store, "", withTestDefaults(nil)...)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -787,16 +807,67 @@ func TestNewServiceRejectsInvalidConfig(t *testing.T) {
 
 	t.Run("issuer containing colon", func(t *testing.T) {
 		store := newMemTOTPStore()
-		_, err := NewService(store, "My:App")
+		_, err := NewService(store, "My:App", withTestDefaults(nil)...)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 	})
 }
 
+func TestNewServiceRequiresExplicitProtectionChoices(t *testing.T) {
+	enc, err := NewAESEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewAESEncryptor: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		store   Store
+		opts    []Option
+		wantErr string
+	}{
+		{"nil store", nil, []Option{WithoutSecretEncryption(), WithoutRateLimiting()}, "store must not be nil"},
+		{"no encryption choice", newMemTOTPStore(), []Option{WithoutRateLimiting()}, "WithEncryptor"},
+		{"no rate-limiting choice", newMemTOTPStore(), []Option{WithoutSecretEncryption()}, "WithLimiter"},
+		{"no choice at all", newMemTOTPStore(), nil, "WithEncryptor"},
+		{
+			"encryptor and its opt-out", newMemTOTPStore(),
+			[]Option{WithEncryptor(enc), WithoutSecretEncryption(), WithoutRateLimiting()},
+			"contradictory",
+		},
+		{
+			"limiter and its opt-out", newMemTOTPStore(),
+			[]Option{WithoutSecretEncryption(), WithLimiter(&fakeLimiter{}), WithoutRateLimiting()},
+			"contradictory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, err := NewService(tc.store, "TestApp", tc.opts...)
+			if err == nil {
+				t.Fatal("NewService: expected an error, got nil")
+			}
+			if svc != nil {
+				t.Fatalf("NewService: expected a nil service, got %#v", svc)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("NewService error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("stated choices are accepted", func(t *testing.T) {
+		if _, err := NewService(newMemTOTPStore(), "TestApp", WithEncryptor(enc), WithLimiter(&fakeLimiter{})); err != nil {
+			t.Fatalf("NewService with both protections: %v", err)
+		}
+		if _, err := NewService(newMemTOTPStore(), "TestApp", WithoutSecretEncryption(), WithoutRateLimiting()); err != nil {
+			t.Fatalf("NewService with both opt-outs: %v", err)
+		}
+	})
+}
+
 func TestNewServiceAcceptsDefaults(t *testing.T) {
 	store := newMemTOTPStore()
-	svc, err := NewService(store, "TestApp")
+	svc, err := NewService(store, "TestApp", WithoutSecretEncryption(), WithoutRateLimiting())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

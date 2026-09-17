@@ -7,6 +7,28 @@ does and does not promise.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- `recovery.NewService` now returns `(*Service, error)` (was `*Service`). It
+  rejects a nil `Store` and a code count below 1. Migration: capture and check
+  the second return value.
+- `recovery.WithCount` no longer ignores a value below 1. It records what the
+  caller asked for and `NewService` rejects it, instead of quietly generating
+  ten codes for a caller who asked for none.
+- `totp.NewService` now requires the caller to state both protections. Pass
+  `WithEncryptor` or the new `WithoutSecretEncryption`, and `WithLimiter` or
+  the new `WithoutRateLimiting`. Passing a protection together with its own
+  opt-out is an error. Omitting either choice used to produce a Service with
+  plaintext secrets or no rate limiting, which read as an oversight either
+  way. Migration: existing callers that relied on the defaults should add
+  `WithoutSecretEncryption()` and `WithoutRateLimiting()` to keep today's
+  behavior, then plan the real ones.
+- `totp.NewService` and `passkey.NewService` reject a nil store.
+  `passkey.NewService` also rejects a nil challenge store, an empty `RPID`,
+  an empty `RPDisplayName`, and an empty `RPOrigins`. go-webauthn accepts the
+  last three without complaint, so such a service used to look healthy and
+  fail during a real user's first ceremony.
+
 ### Added
 
 - Configurable CSRF cookie names via `WithCSRFCookieName` and the

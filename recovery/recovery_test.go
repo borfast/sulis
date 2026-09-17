@@ -69,7 +69,7 @@ var (
 
 func TestGenerateReturnsFormattedCodesAndStoresOnlyHashes(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -105,7 +105,7 @@ func TestGenerateReturnsFormattedCodesAndStoresOnlyHashes(t *testing.T) {
 
 func TestGenerateReplacesPreviousSet(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	oldCodes, err := svc.Generate(ctx, "user1")
@@ -127,7 +127,7 @@ func TestGenerateReplacesPreviousSet(t *testing.T) {
 
 func TestConsumeAcceptsSloppyInput(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -168,7 +168,7 @@ func TestCanonicalIsIdempotentWithInteriorWhitespace(t *testing.T) {
 
 func TestConsumeIsSingleUse(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -185,7 +185,7 @@ func TestConsumeIsSingleUse(t *testing.T) {
 
 func TestConcurrentConsumeSingleWinner(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store, WithCount(1))
+	svc := mustService(t, store, WithCount(1))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -223,7 +223,7 @@ func TestConcurrentConsumeSingleWinner(t *testing.T) {
 
 func TestRemainingCounts(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store, WithCount(5))
+	svc := mustService(t, store, WithCount(5))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -252,7 +252,7 @@ func TestRemainingCounts(t *testing.T) {
 
 func TestDisableDeletesCodes(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	if _, err := svc.Generate(ctx, "user1"); err != nil {
@@ -272,7 +272,7 @@ func TestDisableDeletesCodes(t *testing.T) {
 
 func TestWithCountGeneratesRequestedNumber(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store, WithCount(3))
+	svc := mustService(t, store, WithCount(3))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -284,12 +284,48 @@ func TestWithCountGeneratesRequestedNumber(t *testing.T) {
 	}
 }
 
-func TestWithCountIgnoresNonPositiveValues(t *testing.T) {
-	store := newMemStore()
-	svc := NewService(store, WithCount(0))
-	ctx := context.Background()
+// mustService builds a Service for a test that is not itself about
+// construction failing. NewService returns an error since it began rejecting
+// a nil store and a non-positive count.
+func mustService(t *testing.T, store Store, opts ...Option) *Service {
+	t.Helper()
+	svc, err := NewService(store, opts...)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
+}
 
-	codes, err := svc.Generate(ctx, "user1")
+func TestNewServiceRejectsInvalidConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		store   Store
+		opts    []Option
+		wantErr string
+	}{
+		{"nil store", nil, nil, "store must not be nil"},
+		{"zero count", newMemStore(), []Option{WithCount(0)}, "count must be positive"},
+		{"negative count", newMemStore(), []Option{WithCount(-1)}, "count must be positive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, err := NewService(tc.store, tc.opts...)
+			if err == nil {
+				t.Fatal("NewService: expected an error, got nil")
+			}
+			if svc != nil {
+				t.Fatalf("NewService: expected a nil service, got %#v", svc)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("NewService error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewServiceDefaultsToTenCodes(t *testing.T) {
+	svc := mustService(t, newMemStore())
+
+	codes, err := svc.Generate(context.Background(), "user1")
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -302,7 +338,7 @@ func TestWithCountIgnoresNonPositiveValues(t *testing.T) {
 
 func TestConsumeReportsRemainingCount(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store, WithCount(2))
+	svc := mustService(t, store, WithCount(2))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -329,7 +365,7 @@ func TestConsumeReportsRemainingCount(t *testing.T) {
 
 func TestConsumeReturnsZeroRemainingOnRejection(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	if _, err := svc.Generate(ctx, "user1"); err != nil {
@@ -374,7 +410,7 @@ func (f *failingConsumeStore) CountCodes(ctx context.Context, userID string) (in
 // unchanged, rather than being folded into ErrCodeInvalid.
 func TestConsumePropagatesConsumeCodeStoreError(t *testing.T) {
 	store := &failingConsumeStore{memStore: newMemStore(), failConsume: true}
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -397,7 +433,7 @@ func TestConsumePropagatesConsumeCodeStoreError(t *testing.T) {
 // successfully consumed but the follow-up CountCodes call fails.
 func TestConsumePropagatesCountCodesStoreError(t *testing.T) {
 	store := &failingConsumeStore{memStore: newMemStore(), failCount: true}
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -423,7 +459,7 @@ func TestConsumePropagatesCountCodesStoreError(t *testing.T) {
 // ErrCodeInvalid rather than some stale prior count.
 func TestConsumeAfterDisablePurgesTheCode(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store)
+	svc := mustService(t, store)
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -483,7 +519,7 @@ func (f *fakeLimiter) sawKey(key string) bool {
 func TestConsumeConsultsLimiterBeforeCheckingCode(t *testing.T) {
 	store := newMemStore()
 	limiter := &fakeLimiter{denied: true}
-	svc := NewService(store, WithLimiter(limiter))
+	svc := mustService(t, store, WithLimiter(limiter))
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
@@ -514,7 +550,7 @@ func TestConsumeConsultsLimiterBeforeCheckingCode(t *testing.T) {
 // default) never denies anything.
 func TestConsumeNilLimiterIsNoOp(t *testing.T) {
 	store := newMemStore()
-	svc := NewService(store) // no WithLimiter
+	svc := mustService(t, store) // no WithLimiter
 	ctx := context.Background()
 
 	codes, err := svc.Generate(ctx, "user1")
