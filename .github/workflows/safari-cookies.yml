@@ -1,10 +1,9 @@
 name: safari cookies
 
-# Manual only. It reports a measurement rather than asserting one, because
-# what Safari does with a Secure cookie over plain HTTP is the open question
-# behind WithCSRFCookieName's caveat. Once the answer is known and written
-# down, turn the probe into an assertion and add a schedule here so a change
-# in Safari is caught.
+# Manual and informational only. It reports a measurement rather than
+# asserting one, because what Safari does with a Secure cookie over plain HTTP
+# is the open question behind the cookie-name caveat. Keep this workflow out
+# of scheduled runs and required CI checks.
 on:
   workflow_dispatch:
 
@@ -33,7 +32,8 @@ jobs:
       - name: start safaridriver
         run: safaridriver --port 4444 &
 
-      # Prints a two-row table: __Host-csrf_token and csrf_token, each
-      # "stored" or "dropped", for http://localhost and http://127.0.0.1.
-      - name: probe
+      # Prints Safari/macOS/runner context and a five-cookie table — default
+      # and renamed session/CSRF cookies plus a non-Secure control — with each
+      # result marked "stored" or "dropped" for localhost and 127.0.0.1.
+      - name: probe (informational)
         run: go run .github/safari/main.go

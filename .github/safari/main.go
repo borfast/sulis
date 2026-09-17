@@ -1,12 +1,12 @@
-// Command safari-cookies measures one fact that the README and
-// WithCSRFCookieName's doc comment currently only hedge about: which of
-// sulis's CSRF cookies does real Safari keep when they are set over plain
-// HTTP, on localhost and on 127.0.0.1?
+// Command safari-cookies measures one fact that the README and cookie-name
+// option docs currently only hedge about: which of sulis's session and CSRF
+// cookies does real Safari keep when they are set over plain HTTP, on
+// localhost and on 127.0.0.1?
 //
-// Both cookies carry Secure, because sulis fixes that attribute on every
-// CSRF cookie. Renaming away from the __Host- prefix is therefore only
-// useful for local development if Safari's objection is to the prefix and
-// not to Secure itself. This program answers that instead of guessing.
+// All four sulis cookies carry Secure, because sulis fixes that attribute on
+// both cookie families. Renaming away from the __Host- prefix is therefore
+// only useful for local development if Safari's objection is to the prefix
+// and not to Secure itself. This program answers that instead of guessing.
 //
 // It is not part of the library build: the go tool skips directories whose
 // name begins with a dot, so ./... never matches this file. CI runs it as
@@ -23,6 +23,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/borfast/sulis"
@@ -30,10 +32,11 @@ import (
 )
 
 const (
-	serverPort = "8099"
-	driverAddr = "http://127.0.0.1:4444"
-	renamed    = "csrf_token"
-	control    = "sulis_control_not_secure"
+	serverPort               = "8099"
+	driverAddr               = "http://127.0.0.1:4444"
+	renamedCSRFCookieName    = "csrf_token"
+	renamedSessionCookieName = "session"
+	controlCookieName        = "sulis_control_not_secure"
 )
 
 func main() {
@@ -44,36 +47,52 @@ func main() {
 }
 
 func run() error {
-	// Build both cookies through sulis itself, so this measures the library
-	// rather than a hand-written imitation of it.
-	_, defaultCookie, err := sulis.IssueCSRFToken()
+	// Build all four sulis cookies through the library itself, so this measures
+	// the library rather than a hand-written imitation of it. No login is
+	// needed: SessionCookie only formats the cookie, so a dummy token and
+	// expiry are sufficient for this browser-storage probe.
+	defaultAuth, err := sulis.New(
+		memstore.NewUserStore(), memstore.NewSessionStore(), memstore.NewTokenStore(),
+		sulis.NoSecondFactors{},
+	)
+	if err != nil {
+		return fmt.Errorf("New default Sulis: %w", err)
+	}
+	_, defaultCSRFCookie, err := sulis.IssueCSRFToken()
 	if err != nil {
 		return fmt.Errorf("IssueCSRFToken: %w", err)
 	}
-	auth, err := sulis.New(
+	defaultSessionCookie := defaultAuth.SessionCookie("probe-session-token", time.Now().Add(time.Hour))
+
+	renamedAuth, err := sulis.New(
 		memstore.NewUserStore(), memstore.NewSessionStore(), memstore.NewTokenStore(),
-		sulis.NoSecondFactors{}, sulis.WithCSRFCookieName(renamed),
+		sulis.NoSecondFactors{},
+		sulis.WithCookieName(renamedSessionCookieName),
+		sulis.WithCSRFCookieName(renamedCSRFCookieName),
 	)
 	if err != nil {
-		return fmt.Errorf("New: %w", err)
+		return fmt.Errorf("New renamed Sulis: %w", err)
 	}
-	_, renamedCookie, err := auth.IssueCSRFToken()
+	_, renamedCSRFCookie, err := renamedAuth.IssueCSRFToken()
 	if err != nil {
 		return fmt.Errorf("(*Sulis).IssueCSRFToken: %w", err)
 	}
+	renamedSessionCookie := renamedAuth.SessionCookie("probe-session-token", time.Now().Add(time.Hour))
 
-	// Control: same attributes as the two above except Secure. If Safari
-	// drops all three, the session is rejecting cookies for some unrelated
-	// reason and the other two rows prove nothing.
+	// Control: same basic attributes as the four above except Secure. If Safari
+	// drops all five, the session is rejecting cookies for some unrelated
+	// reason and the other rows prove nothing.
 	controlCookie := &http.Cookie{
-		Name: control, Value: "control", Path: "/",
+		Name: controlCookieName, Value: "control", Path: "/",
 		HttpOnly: false, Secure: false, SameSite: http.SameSiteLaxMode,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, defaultCookie)
-		http.SetCookie(w, renamedCookie)
+		http.SetCookie(w, defaultSessionCookie)
+		http.SetCookie(w, renamedSessionCookie)
+		http.SetCookie(w, defaultCSRFCookie)
+		http.SetCookie(w, renamedCSRFCookie)
 		http.SetCookie(w, controlCookie)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, "<!doctype html><title>sulis cookie probe</title><p>ok")
@@ -88,15 +107,23 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("%-26s  %-20s  %-12s  %s\n", "origin", defaultCookie.Name, renamedCookie.Name, "control (no Secure)")
+	fmt.Printf("Safari: %s; macOS: %s; runner: %s\n", safariVersion(), macOSVersion(), runnerContext())
+	fmt.Println("Informational probe: stored means Safari kept the cookie; dropped means it did not.")
+	fmt.Printf("Cookie columns: default session=%q; renamed session=%q; default CSRF=%q; renamed CSRF=%q; control=%q\n",
+		defaultSessionCookie.Name, renamedSessionCookie.Name,
+		defaultCSRFCookie.Name, renamedCSRFCookie.Name, controlCookie.Name)
+	fmt.Printf("%-26s  %-16s  %-16s  %-16s  %-16s  %s\n", "origin",
+		"default session", "renamed session", "default CSRF", "renamed CSRF", "control (no Secure)")
 	for _, host := range []string{"localhost", "127.0.0.1"} {
 		origin := "http://" + host + ":" + serverPort
 		stored, err := storedCookies(origin + "/")
 		if err != nil {
 			return fmt.Errorf("%s: %w", origin, err)
 		}
-		fmt.Printf("%-26s  %-20s  %-12s  %s\n", origin,
-			kept(stored[defaultCookie.Name]), kept(stored[renamedCookie.Name]), kept(stored[control]))
+		fmt.Printf("%-26s  %-16s  %-16s  %-16s  %-16s  %s\n", origin,
+			kept(stored[defaultSessionCookie.Name]), kept(stored[renamedSessionCookie.Name]),
+			kept(stored[defaultCSRFCookie.Name]), kept(stored[renamedCSRFCookie.Name]),
+			kept(stored[controlCookie.Name]))
 	}
 	return nil
 }
@@ -109,7 +136,8 @@ func kept(ok bool) string {
 }
 
 // storedCookies loads url in a fresh Safari session and reports which cookie
-// names the browser actually kept.
+// names the browser actually kept. A fresh session is intentional: each host
+// is measured independently, with no cookies carried over from the other.
 func storedCookies(url string) (map[string]bool, error) {
 	var session struct {
 		Value struct {
@@ -159,6 +187,52 @@ func waitForDriver() error {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+func macOSVersion() string {
+	out, err := exec.Command("sw_vers", "-productVersion").Output()
+	if err != nil {
+		return "unknown"
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "unknown"
+	}
+	return version
+}
+
+func safariVersion() string {
+	out, err := exec.Command("safaridriver", "--version").CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "unknown"
+	}
+	return version
+}
+
+func runnerContext() string {
+	if os.Getenv("GITHUB_ACTIONS") != "true" {
+		return "local"
+	}
+	osName := os.Getenv("RUNNER_OS")
+	image := os.Getenv("ImageOS")
+	imageVersion := os.Getenv("ImageVersion")
+	parts := []string{osName}
+	if image != "" {
+		parts = append(parts, image)
+	}
+	if imageVersion != "" {
+		parts = append(parts, imageVersion)
+	}
+	for i, part := range parts {
+		if part == "" {
+			parts[i] = "unknown"
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 func call(method, path string, in, out any) error {
