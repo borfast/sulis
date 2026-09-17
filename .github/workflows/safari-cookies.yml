@@ -1,0 +1,39 @@
+name: safari cookies
+
+# Manual only. It reports a measurement rather than asserting one, because
+# what Safari does with a Secure cookie over plain HTTP is the open question
+# behind WithCSRFCookieName's caveat. Once the answer is known and written
+# down, turn the probe into an assertion and add a schedule here so a change
+# in Safari is caught.
+on:
+  workflow_dispatch:
+
+# Least privilege: nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  safari:
+    name: safari cookie acceptance
+    # The only GitHub-hosted runner with Safari on it. Free for this repo
+    # because the repo is public.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+
+      # Remote automation is off in a stock Safari and enabling it needs
+      # root. The runner user has passwordless sudo.
+      - name: enable safaridriver
+        run: sudo safaridriver --enable
+
+      - name: start safaridriver
+        run: safaridriver --port 4444 &
+
+      # Prints a two-row table: __Host-csrf_token and csrf_token, each
+      # "stored" or "dropped", for http://localhost and http://127.0.0.1.
+      - name: probe
+        run: go run .github/safari/main.go
