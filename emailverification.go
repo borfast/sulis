@@ -78,6 +78,11 @@ func (s *Sulis) stampEmailVerified(ctx context.Context, user *User) error {
 	})
 	if err != nil {
 		if errors.Is(err, errAlreadyVerified) {
+			updated, err = s.users.GetUserByID(ctx, user.ID)
+			if err != nil {
+				return err
+			}
+			*user = *updated
 			return nil
 		}
 		return err

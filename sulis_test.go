@@ -3177,7 +3177,8 @@ func TestVerifyEmailIsANoOpWhenAnotherRequestVerifiesFirst(t *testing.T) {
 		t.Fatalf("GetUserByID: %v", err)
 	}
 
-	if _, err := s.VerifyEmail(ctx, firstToken); err != nil {
+	verified, err := s.VerifyEmail(ctx, firstToken)
+	if err != nil {
 		t.Fatalf("VerifyEmail: %v, want nil — losing the race to another verification of the same address is not a failure", err)
 	}
 
@@ -3187,6 +3188,15 @@ func TestVerifyEmailIsANoOpWhenAnotherRequestVerifiesFirst(t *testing.T) {
 	}
 	if stored.EmailVerifiedAt == nil {
 		t.Fatal("EmailVerifiedAt is nil, want the timestamp written by the racing verification")
+	}
+	if verified.EmailVerifiedAt == nil {
+		t.Fatal("returned EmailVerifiedAt is nil, want the timestamp written by the racing verification")
+	}
+	if !verified.EmailVerifiedAt.Equal(*stored.EmailVerifiedAt) {
+		t.Fatalf("returned EmailVerifiedAt = %v, want persisted timestamp %v", verified.EmailVerifiedAt, stored.EmailVerifiedAt)
+	}
+	if verified.Version != stored.Version {
+		t.Fatalf("returned Version = %d, want persisted version %d", verified.Version, stored.Version)
 	}
 	if beforeSecondVerification.EmailVerifiedAt != nil {
 		t.Fatal("the user was already verified before the race was set up; the test proves nothing")

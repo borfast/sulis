@@ -54,6 +54,10 @@ does and does not promise.
 
 ### Changed
 
+- `VerifyEmail` now returns the current persisted user when another request
+  wins a concurrent verification, including the verification timestamp and
+  optimistic-concurrency version.
+
 - The minimum supported Go version is now 1.27.0 (both modules' `go`
   directives, the CI floor, and the README requirement moved together from
   1.26.6). CI already built and tested against 1.27 through setup-go's
