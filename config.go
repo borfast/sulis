@@ -491,7 +491,8 @@ func WithCookieName(name string) Option {
 // therefore be treated as giving up this check's protection against cookie
 // injection, not as a relaxation repaired by the other helpers.
 //
-// Use this for local development or a concrete integration requirement,
+// Use this only for a concrete integration requirement, such as avoiding a
+// name collision between multiple applications on one local HTTPS host, and
 // never as a production relaxation. Secure, Path=/, no Domain, and
 // HttpOnly=false remain fixed on every CSRF cookie. Renaming does not make a
 // Secure cookie acceptable over plain HTTP, so use local TLS where the

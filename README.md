@@ -4,6 +4,54 @@
 
 Requires Go 1.27.0+ (matching `go.mod`).
 
+## Local development
+
+Safari drops sulis's `Secure` session and CSRF cookies when they are set over
+plain HTTP, including on `localhost` and `127.0.0.1` (see
+[WebKit bug 232088](https://bugs.webkit.org/show_bug.cgi?id=232088)). The
+unchanged production cookie flow therefore needs HTTPS at the browser boundary.
+This is a cookie-processing rule; changing `__Host-` cookie names with
+`WithCookieName` or `WithCSRFCookieName` does not remove `Secure` and does not
+make plain HTTP work. Those options remain useful for legitimate cookie naming
+and integration requirements.
+
+A small local TLS terminator is usually enough. For example, use `mkcert` to
+issue a locally trusted certificate for `localhost` and `127.0.0.1`, configure
+an existing reverse proxy to serve HTTPS with that certificate, and proxy to
+the Go server on `http://127.0.0.1:8080`. The Go server can stay plain HTTP;
+Safari only needs to see HTTPS. Use whatever proxy is already part of the
+application's development setup rather than adding a Sulis-specific
+dependency.
+
+One concrete setup is:
+
+```sh
+mkcert -install
+mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1
+```
+
+For example, an already-installed Caddy can then terminate TLS with:
+
+```caddyfile
+https://localhost:8443 {
+    tls ./localhost.pem ./localhost-key.pem
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Keep the generated private key out of version control.
+
+For endpoint work that does not need browser cookies, a development client can
+use a bearer header with `WithTokenSource(TokenSourceBearerOnly)`. Do not wrap
+those bearer-only endpoints in `RequireCSRFToken`: their protection is that the
+credential is sent explicitly in `Authorization`, not ambiently by the browser.
+This is a limited alternative that does not test the production cookie flow or
+its CSRF defenses. Do not add a general `WithSecureCookies(false)` setting; a
+switch that disables `Secure` is too easy to carry into production.
+Applications can technically construct or mutate the returned `*http.Cookie`
+values themselves, but that is an application-owned development variant and
+must not be mistaken for the library's standard security model.
+
 ## Root Package
 
 Create a service with `sulis.New(userStore, sessionStore, tokenStore, secondFactorChecker, opts...)`, which returns `(*Sulis, error)`.
