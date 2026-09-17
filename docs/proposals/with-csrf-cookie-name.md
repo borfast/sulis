@@ -76,9 +76,10 @@ only" philosophy, and the same already-established dual package-function/method 
   "valid, explicit opt-out" voice: the `__Host-` prefix is one of the two layers that rescue a
   pure (session-unbound) double-submit token — it is what stops a sibling subdomain or a non-HTTPS
   network attacker from planting a chosen cookie value for this origin (see the layering
-  discussion in csrf.go's package comment). Dropping the prefix removes that layer; the remaining
-  defenses are `RequireSameOrigin` and SameSite. Recommended use is local development over plain
-  HTTP only (the Safari case), never production.
+  discussion in csrf.go's package comment). Dropping the prefix makes the pure double-submit
+  check vulnerable to cookie injection. `RequireSameOrigin` and SameSite still protect their own
+  cases, but neither stops a hostile sibling subdomain because that request is same-site.
+  Recommended use is local development only (the Safari case), never production.
 - Update: csrf.go package comment (name now configurable), README "Cookie sessions and CSRF" +
   "Operational requirements", CHANGELOG.
 

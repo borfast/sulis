@@ -477,16 +477,19 @@ func WithCookieName(name string) Option {
 // token (empty, or containing whitespace/control/separator characters), and
 // rejects a name equal to CookieName.
 //
-// A name without the "__Host-" prefix does not weaken the double-submit
-// check, it defeats it. The token is a bare random value, not bound to the
-// session, so the entire defense rests on an attacker being unable to write
-// this cookie for this origin. Without the prefix, a sibling subdomain (or a
-// network attacker on any plain-HTTP origin under the same registrable
-// domain) can set the same name with Domain=.example.com. The browser then
-// sends both cookies, VerifyCSRFToken reads the attacker's value first, and
-// the attacker echoes that same value back in CSRFHeaderName: every forged
-// state-changing request passes. RequireSameOrigin becomes the only
-// remaining defense and must be wired up.
+// A name without the "__Host-" prefix makes this pure double-submit check
+// vulnerable to cookie injection. The token is a bare random value, not bound
+// to the session, so a sibling subdomain (or a network attacker on a
+// plain-HTTP origin under the same registrable domain) that can plant the same
+// cookie name with Domain=.example.com may be able to make VerifyCSRFToken
+// select its chosen value and echo that value in a form field. Cookie ordering
+// determines which duplicate-name value net/http reads.
+//
+// RequireSameOrigin still blocks cross-site requests, but it deliberately
+// accepts same-site requests and therefore does not stop this sibling-
+// subdomain attack. SameSite does not stop it either. A non-__Host- name must
+// therefore be treated as giving up this check's protection against cookie
+// injection, not as a relaxation repaired by the other helpers.
 //
 // Use this for local development or a concrete integration requirement,
 // never as a production relaxation. Secure, Path=/, no Domain, and

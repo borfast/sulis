@@ -266,8 +266,10 @@ everything that mailbox could still reach.
   trade-off and fixed `Secure`/`Path=/`/no-`Domain` attributes are documented
   in the option's GoDoc and README.
 - **`RequireSameOrigin`** rejects a cross-site, state-changing request
-  using the `Sec-Fetch-Site` header (falling back to `Origin`) —
-  independent of, and layered alongside, the double-submit defense. When
+  using the `Sec-Fetch-Site` header (falling back to `Origin`) — a separate
+  layer alongside the double-submit defense. It deliberately accepts
+  `same-site`, so it does not protect a non-`__Host-` CSRF cookie from a
+  hostile sibling subdomain. When
   both headers are absent, the request is allowed through by design: that
   combination is the signature of a non-browser client (a Bearer-token
   API caller, in particular), which was never CSRF-exploitable to begin
@@ -338,9 +340,11 @@ implementation record rather than invented for this document:
   can read the default `__Host-`-prefixed CSRF cookie for this origin, not
   that they hold any particular session. This is mitigated, but not
   eliminated, by the default `__Host-` prefix (blocking cross-subdomain cookie
-  injection) and by `RequireSameOrigin` as an independent, cookie-content-
-  agnostic layer — but the two mechanisms are genuinely separate defenses
-  stacked together, not one defense reinforcing the other cryptographically.
+  injection) and by `RequireSameOrigin` as a separate, cookie-content-
+  agnostic layer against cross-site requests. The origin middleware accepts
+  same-site requests, so it does not mitigate cookie injection by a hostile
+  sibling subdomain. The two mechanisms are separate defenses, not one
+  defense reinforcing the other cryptographically.
   `WithCSRFCookieName` deliberately removes the prefix layer when configured
   with a name without `__Host-` for a concrete naming requirement; it does not
   disable the other fixed cookie attributes or guarantee Secure-cookie
