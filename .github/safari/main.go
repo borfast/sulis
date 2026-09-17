@@ -82,7 +82,7 @@ func run() error {
 	// Control: same basic attributes as the four above except Secure. If Safari
 	// drops all five, the session is rejecting cookies for some unrelated
 	// reason and the other rows prove nothing.
-	controlCookie := &http.Cookie{
+	controlCookie := &http.Cookie{ // #nosec G124 -- Secure is deliberately false: this cookie is the control
 		Name: controlCookieName, Value: "control", Path: "/",
 		HttpOnly: false, Secure: false, SameSite: http.SameSiteLaxMode,
 	}
@@ -95,7 +95,7 @@ func run() error {
 		http.SetCookie(w, renamedCSRFCookie)
 		http.SetCookie(w, controlCookie)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, "<!doctype html><title>sulis cookie probe</title><p>ok")
+		_, _ = io.WriteString(w, "<!doctype html><title>sulis cookie probe</title><p>ok")
 	})
 	// All interfaces, not 127.0.0.1: on macOS "localhost" may resolve to ::1
 	// first, and both spellings have to reach this server.
