@@ -2176,72 +2176,68 @@ func TestFinishCeremoniesReportBodyReadFailures(t *testing.T) {
 // real user's first ceremony is a deployment-time surprise, so these tests
 // record which ceremony reports it and make it obvious if a future version of
 // the library moves the check.
-func TestBeginCeremoniesRejectIncompleteRelyingPartyConfig(t *testing.T) {
+func TestNewServiceRejectsIncompleteConfiguration(t *testing.T) {
 	t.Parallel()
 
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
-	ctx := context.Background()
+	complete := WebAuthnConfig{
+		RPDisplayName: "Sulis Test",
+		RPID:          "example.com",
+		RPOrigins:     []string{"https://example.com"},
+	}
+	newStore := func() Store { return &fakeStore{credentialsByUser: map[string][]Credential{}} }
 
-	newService := func(t *testing.T, cfg WebAuthnConfig) *Service {
-		t.Helper()
-		store := &fakeStore{credentialsByUser: map[string][]Credential{
-			"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
-		}}
-		svc, err := NewService(store, newFakeChallengeStore(), cfg)
-		if err != nil {
-			t.Fatalf("NewService() error = %v, want nil — this config is only rejected at ceremony time", err)
-		}
-		return svc
+	tests := []struct {
+		name       string
+		store      Store
+		challenges ChallengeStore
+		cfg        WebAuthnConfig
+		wantErr    string
+	}{
+		{"nil store", nil, newFakeChallengeStore(), complete, "store must not be nil"},
+		{"nil challenge store", newStore(), nil, complete, "challenge store must not be nil"},
+		{
+			"empty RPID", newStore(), newFakeChallengeStore(),
+			WebAuthnConfig{RPDisplayName: "Sulis Test", RPOrigins: []string{"https://example.com"}},
+			"RPID must not be empty",
+		},
+		{
+			"empty RPDisplayName", newStore(), newFakeChallengeStore(),
+			WebAuthnConfig{RPID: "example.com", RPOrigins: []string{"https://example.com"}},
+			"RPDisplayName must not be empty",
+		},
+		{
+			"no RPOrigins", newStore(), newFakeChallengeStore(),
+			WebAuthnConfig{RPDisplayName: "Sulis Test", RPID: "example.com"},
+			"RPOrigins must list at least one allowed origin",
+		},
 	}
 
-	t.Run("registration needs a relying party display name", func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, err := NewService(tc.store, tc.challenges, tc.cfg)
+			if err == nil {
+				t.Fatal("NewService() error = nil, want a rejection at construction")
+			}
+			if svc != nil {
+				t.Fatalf("NewService() service = %#v, want nil", svc)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("NewService() error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("complete configuration is accepted", func(t *testing.T) {
 		t.Parallel()
 
-		svc := newService(t, WebAuthnConfig{RPID: "example.com", RPOrigins: []string{"https://example.com"}})
-
-		creation, err := svc.BeginRegistration(ctx, user)
-		if err == nil {
-			t.Fatal("BeginRegistration() error = nil, want a rejection for an empty RPDisplayName")
+		svc, err := NewService(newStore(), newFakeChallengeStore(), complete)
+		if err != nil {
+			t.Fatalf("NewService() error = %v, want nil", err)
 		}
-		if creation != nil {
-			t.Fatalf("BeginRegistration() creation = %#v, want nil", creation)
-		}
-		if !strings.Contains(err.Error(), "begin registration") {
-			t.Errorf("BeginRegistration() error = %q, want it to name the ceremony step", err)
-		}
-	})
-
-	t.Run("login needs a relying party id", func(t *testing.T) {
-		t.Parallel()
-
-		svc := newService(t, WebAuthnConfig{RPDisplayName: "Sulis Test", RPOrigins: []string{"https://example.com"}})
-
-		_, ceremonyID, err := svc.BeginLogin(ctx, user)
-		if err == nil {
-			t.Fatal("BeginLogin() error = nil, want a rejection for an empty RPID")
-		}
-		if ceremonyID != "" {
-			t.Fatalf("BeginLogin() ceremony ID = %q, want empty", ceremonyID)
-		}
-		if !strings.Contains(err.Error(), "begin login") {
-			t.Errorf("BeginLogin() error = %q, want it to name the ceremony step", err)
-		}
-	})
-
-	t.Run("discoverable login needs a relying party id", func(t *testing.T) {
-		t.Parallel()
-
-		svc := newService(t, WebAuthnConfig{RPDisplayName: "Sulis Test", RPOrigins: []string{"https://example.com"}})
-
-		_, ceremonyID, err := svc.BeginDiscoverableLogin(ctx)
-		if err == nil {
-			t.Fatal("BeginDiscoverableLogin() error = nil, want a rejection for an empty RPID")
-		}
-		if ceremonyID != "" {
-			t.Fatalf("BeginDiscoverableLogin() ceremony ID = %q, want empty", ceremonyID)
-		}
-		if !strings.Contains(err.Error(), "begin discoverable login") {
-			t.Errorf("BeginDiscoverableLogin() error = %q, want it to name the ceremony step", err)
+		if svc == nil {
+			t.Fatal("NewService() service = nil, want a service")
 		}
 	})
 }

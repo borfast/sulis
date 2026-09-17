@@ -537,13 +537,18 @@ The package depends on a consumer-owned `totp.Store` for saving and loading TOTP
 
 #### Encrypting stored secrets
 
-**By default, `Credential.Secret` reaches your store as base32 plaintext.** Unlike a password hash, a TOTP secret has no work factor standing between a leak and its use: whoever reads it can generate valid codes for that account indefinitely, silently, with no way to detect or revoke the compromise short of re-enrollment. This is fine for a throwaway store in tests, and not something you should ship to production unencrypted.
+**`totp.NewService` will not build a Service until you say what happens to stored secrets.** Pass `WithEncryptor(e)` to encrypt them, or `WithoutSecretEncryption()` to store them as base32 plaintext deliberately. Passing both is an error. Unlike a password hash, a TOTP secret has no work factor standing between a leak and its use: whoever reads it can generate valid codes for that account indefinitely, silently, with no way to detect or revoke the compromise short of re-enrollment. Plaintext is fine for a throwaway store in tests, and not something you should ship to production. The choice is required because omitting it used to produce the plaintext Service and looked identical to an oversight.
+
+**The same rule applies to rate limiting.** Pass `WithLimiter(l)` or `WithoutRateLimiting()`; again, not both, and not neither.
 
 `totp.WithEncryptor(e Encryptor)` fixes this from inside the package, so the protection does not depend on your store implementation at all:
 
 ```go
 enc, err := totp.NewAESEncryptor(key) // key: 32 bytes, AES-256
-svc, err := totp.NewService(store, "MyApp", totp.WithEncryptor(enc))
+svc, err := totp.NewService(store, "MyApp",
+    totp.WithEncryptor(enc),
+    totp.WithLimiter(limiter), // or totp.WithoutRateLimiting()
+)
 ```
 
 `Service` encrypts a secret before every write (`Enroll`, `ReplaceEnrollment`, `Validate`'s replay-counter bump) and decrypts it immediately after every read (`ConfirmEnrollment`, `Validate`) — entirely inside this package. Your `totp.Store` implementation never receives, persists, or reads back a usable secret; `Credential.Secret` is still just a string either way, so no store contract, schema, or column type needs to know encryption exists. Nothing in [Store Contracts](#store-contracts) changes.
@@ -605,7 +610,7 @@ Challenge/session keys are ceremony-scoped (`"register:<userID>"`, `"login:<cere
 
 ### `recovery`
 
-`recovery` implements one-time recovery codes as a fallback second factor for when a user loses their TOTP device or passkey. `NewService(store, opts...)` defaults to generating 10 codes (`WithCount` to change it); each code is 10 bytes of `crypto/rand`, base32-encoded and displayed as `xxxx-xxxx-xxxx-xxxx`.
+`recovery` implements one-time recovery codes as a fallback second factor for when a user loses their TOTP device or passkey. `NewService(store, opts...) (*Service, error)` defaults to generating 10 codes (`WithCount` to change it); each code is 10 bytes of `crypto/rand`, base32-encoded and displayed as `xxxx-xxxx-xxxx-xxxx`. It returns an error for a nil store or a `WithCount` below 1, so those are refused at construction rather than surfacing later as a panic or an empty code set.
 
 `Generate(ctx, userID)` atomically replaces the user's entire code set and returns the plaintext codes for one-time display — only their SHA-256 hashes are persisted, so the plaintext cannot be recovered later. `Consume(ctx, userID, code) (remaining int, err error)` normalizes the input (case, whitespace, and dash-grouping insensitive) and atomically consumes a single matching code, returning how many unused codes are left afterward, or `ErrCodeInvalid` (`remaining` is always 0 on error) if none matches. `Remaining(ctx, userID)` reports the unused count without consuming anything. `Disable(ctx, userID)` removes all codes for a user — see "Recovery codes and the 2FA lifecycle" below for its second job.
 

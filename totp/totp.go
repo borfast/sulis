@@ -109,6 +109,14 @@ type Config struct {
 	// recovery path is re-enrollment, not a migration step this package
 	// performs for you — see the README's "Encrypting stored secrets".
 	Encryptor Encryptor
+
+	// noEncryption and noRateLimiting record that the caller explicitly
+	// gave up the protection, via WithoutSecretEncryption and
+	// WithoutRateLimiting. NewService refuses to build a Service when
+	// neither the protection nor its matching opt-out was chosen, so an
+	// omission can no longer silently disable either one.
+	noEncryption   bool
+	noRateLimiting bool
 }
 
 // Option is a functional option for configuring the TOTP service.
@@ -141,10 +149,22 @@ func WithSecretSize(n int) Option {
 
 // WithLimiter sets the rate limiter consulted before Validate or
 // ConfirmEnrollment checks a code, keyed by "totp:"+userID — the 10^6 code
-// space (or smaller, for 6-digit codes) is guessable without one. A nil
-// limiter (the default) disables rate limiting.
+// space (or smaller, for 6-digit codes) is guessable without one.
+//
+// Either this or WithoutRateLimiting must be passed; NewService rejects a
+// configuration that passes neither, and rejects one that passes both.
 func WithLimiter(l Limiter) Option {
 	return func(c *Config) { c.Limiter = l }
+}
+
+// WithoutRateLimiting states that this Service runs with no rate limiter,
+// leaving the code space open to guessing. It exists so that choice has to
+// be written down: before it, omitting WithLimiter produced the same
+// unprotected Service and looked like an oversight either way. Reasonable
+// for tests and for a deployment that rate-limits the surrounding HTTP
+// route instead.
+func WithoutRateLimiting() Option {
+	return func(c *Config) { c.noRateLimiting = true }
 }
 
 // WithEncryptor configures the Encryptor Service uses to protect every
@@ -155,11 +175,22 @@ func WithLimiter(l Limiter) Option {
 // store author. See AESEncryptor for the AES-256-GCM implementation this
 // package provides, including key rotation.
 //
-// The default is nil: no encryption, so Credential.Secret reaches Store as
-// plaintext, exactly as before this option existed. Configure a real
-// Encryptor before relying on this package for a production second factor.
+// Either this or WithoutSecretEncryption must be passed; NewService rejects
+// a configuration that passes neither, and rejects one that passes both.
+// Configure a real Encryptor before relying on this package for a
+// production second factor.
 func WithEncryptor(e Encryptor) Option {
 	return func(c *Config) { c.Encryptor = e }
+}
+
+// WithoutSecretEncryption states that secrets reach Store as base32
+// plaintext. A leaked store then yields every enrolled secret, usable
+// indefinitely and silently. It exists so that choice has to be written
+// down: before it, omitting WithEncryptor produced exactly this Service and
+// looked like an oversight either way. Reasonable for tests and for a store
+// that encrypts at rest under its own key.
+func WithoutSecretEncryption() Option {
+	return func(c *Config) { c.noEncryption = true }
 }
 
 // Service manages TOTP enrollment and validation.
@@ -183,6 +214,16 @@ func NewService(store Store, issuer string, opts ...Option) (*Service, error) {
 	}
 
 	switch {
+	case store == nil:
+		return nil, fmt.Errorf("totp: store must not be nil")
+	case cfg.Encryptor == nil && !cfg.noEncryption:
+		return nil, fmt.Errorf("totp: pass WithEncryptor to encrypt stored secrets, or WithoutSecretEncryption to store them as plaintext deliberately")
+	case cfg.Encryptor != nil && cfg.noEncryption:
+		return nil, fmt.Errorf("totp: WithEncryptor and WithoutSecretEncryption are contradictory")
+	case cfg.Limiter == nil && !cfg.noRateLimiting:
+		return nil, fmt.Errorf("totp: pass WithLimiter to rate-limit code checks, or WithoutRateLimiting to run without one deliberately")
+	case cfg.Limiter != nil && cfg.noRateLimiting:
+		return nil, fmt.Errorf("totp: WithLimiter and WithoutRateLimiting are contradictory")
 	case cfg.Issuer == "" || strings.Contains(cfg.Issuer, ":"):
 		return nil, fmt.Errorf("totp: issuer must be non-empty and contain no ':'")
 	case cfg.Digits < 6 || cfg.Digits > 8:
