@@ -664,7 +664,7 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 		"SaveTOTP":     func() error { return db.TOTPStore().SaveTOTP(ctx, &totp.Credential{ID: "a", UserID: "u"}) },
 		"DeleteTOTP":   func() error { return db.TOTPStore().DeleteTOTP(ctx, "u") },
 		"ReplaceCodes": func() error { return db.RecoveryStore().ReplaceCodes(ctx, "u", []string{"h"}) },
-		"ConsumeCode":  func() error { return db.RecoveryStore().ConsumeCode(ctx, "u", "h") },
+		"ConsumeCode":  func() error { _, err := db.RecoveryStore().ConsumeCode(ctx, "u", "h"); return err },
 		"CountCodes":   func() error { _, err := db.RecoveryStore().CountCodes(ctx, "u"); return err },
 		"DeleteCodes":  func() error { return db.RecoveryStore().DeleteCodes(ctx, "u") },
 	}

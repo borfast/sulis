@@ -180,16 +180,11 @@ func (s *Service) Consume(ctx context.Context, userID, code string) (remaining i
 		return 0, err
 	}
 
-	err = s.store.ConsumeCode(ctx, userID, hashCode(code))
+	remaining, err = s.store.ConsumeCode(ctx, userID, hashCode(code))
 	if errors.Is(err, ErrCodeNotFound) {
 		s.emit(ctx, Event{Kind: EventCodeRejected, UserID: userID})
 		return 0, ErrCodeInvalid
 	}
-	if err != nil {
-		return 0, err
-	}
-
-	remaining, err = s.store.CountCodes(ctx, userID)
 	if err != nil {
 		return 0, err
 	}

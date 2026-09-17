@@ -23,6 +23,20 @@ does and does not promise.
   way. Migration: existing callers that relied on the defaults should add
   `WithoutSecretEncryption()` and `WithoutRateLimiting()` to keep today's
   behavior, then plan the real ones.
+- `recovery.Store.ConsumeCode` now returns `(remaining int, err error)` (was
+  `error`), and `recovery.Service.Consume` reports that value instead of
+  making a second `CountCodes` call. A count taken after the consumption
+  reflects whatever the store holds by then, so under concurrent use it can
+  include another caller's deletion and miss this one. Migration: every
+  `recovery.Store` implementation must return the remaining count from the
+  same atomic operation that consumes the code. `storetest` now races eight
+  consumptions of an eight-code set and requires the returned counts to be
+  7, 6 ... 0, each exactly once, so a store that counts separately fails the
+  conformance suite rather than failing in production. The bundled
+  implementations were updated: `memstore` counts under the same mutex, the
+  SQLite store wraps both statements in one transaction, and the PostgreSQL
+  store takes the user's advisory lock first, since a count asks about absent
+  rows and READ COMMITTED answers that from a snapshot taken too early.
 - `totp.NewService` and `passkey.NewService` reject a nil store.
   `passkey.NewService` also rejects a nil challenge store, an empty `RPID`,
   an empty `RPDisplayName`, and an empty `RPOrigins`. go-webauthn accepts the

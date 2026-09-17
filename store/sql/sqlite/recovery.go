@@ -52,24 +52,43 @@ func (s *RecoveryStore) ReplaceCodes(ctx context.Context, userID string, hashes 
 	return nil
 }
 
-// ConsumeCode deletes the code matching userID and hash, in one statement.
-// Zero rows affected — spent, never issued, or issued to somebody else — is
-// recovery.ErrCodeNotFound.
-func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) error {
-	const q = `DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?`
-
-	res, err := s.db.ExecContext(ctx, q, userID, hash)
+// ConsumeCode deletes the code matching userID and hash and reports how many
+// of the user's codes are left afterwards. Zero rows affected — spent, never
+// issued, or issued to somebody else — is recovery.ErrCodeNotFound.
+//
+// The delete and the count share one transaction, which on this package's
+// single-writer pool is all the serialization the contract's count needs: no
+// other consumption can commit between them.
+func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("sulis/sqlite: consuming a recovery code: %w", err)
+		return 0, fmt.Errorf("sulis/sqlite: consuming a recovery code: %w", err)
+	}
+	defer rollback(tx)
+
+	const del = `DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?`
+	res, err := tx.ExecContext(ctx, del, userID, hash)
+	if err != nil {
+		return 0, fmt.Errorf("sulis/sqlite: consuming a recovery code: %w", err)
 	}
 	n, err := affected(res, "consuming a recovery code")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if n == 0 {
-		return recovery.ErrCodeNotFound
+		return 0, recovery.ErrCodeNotFound
 	}
-	return nil
+
+	const count = `SELECT COUNT(*) FROM recovery_codes WHERE user_id = ?`
+	var remaining int
+	if err := tx.QueryRowContext(ctx, count, userID).Scan(&remaining); err != nil {
+		return 0, fmt.Errorf("sulis/sqlite: counting the remaining recovery codes: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("sulis/sqlite: committing a recovery code consumption: %w", err)
+	}
+	return remaining, nil
 }
 
 // CountCodes returns how many unused codes the user has left. A user with

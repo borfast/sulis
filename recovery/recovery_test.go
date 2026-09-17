@@ -35,18 +35,18 @@ func (m *memStore) ReplaceCodes(_ context.Context, userID string, hashes []strin
 	return nil
 }
 
-func (m *memStore) ConsumeCode(_ context.Context, userID, hash string) error {
+func (m *memStore) ConsumeCode(_ context.Context, userID, hash string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set, ok := m.codes[userID]
 	if !ok {
-		return ErrCodeNotFound
+		return 0, ErrCodeNotFound
 	}
 	if _, ok := set[hash]; !ok {
-		return ErrCodeNotFound
+		return 0, ErrCodeNotFound
 	}
 	delete(set, hash)
-	return nil
+	return len(set), nil
 }
 
 func (m *memStore) CountCodes(_ context.Context, userID string) (int, error) {
@@ -382,27 +382,19 @@ func TestConsumeReturnsZeroRemainingOnRejection(t *testing.T) {
 }
 
 // failingConsumeStore wraps memStore and, on demand, fails ConsumeCode or
-// CountCodes with a generic store error — distinct from ErrCodeNotFound,
+// ConsumeCode with a generic store error — distinct from ErrCodeNotFound,
 // the store's normal "no such code" signal — used to exercise Consume's
 // fail-closed propagation when the store itself misbehaves.
 type failingConsumeStore struct {
 	*memStore
 	failConsume bool
-	failCount   bool
 }
 
-func (f *failingConsumeStore) ConsumeCode(ctx context.Context, userID, hash string) error {
+func (f *failingConsumeStore) ConsumeCode(ctx context.Context, userID, hash string) (int, error) {
 	if f.failConsume {
-		return errors.New("simulated store failure")
-	}
-	return f.memStore.ConsumeCode(ctx, userID, hash)
-}
-
-func (f *failingConsumeStore) CountCodes(ctx context.Context, userID string) (int, error) {
-	if f.failCount {
 		return 0, errors.New("simulated store failure")
 	}
-	return f.memStore.CountCodes(ctx, userID)
+	return f.memStore.ConsumeCode(ctx, userID, hash)
 }
 
 // TestConsumePropagatesConsumeCodeStoreError pins that a generic
@@ -427,12 +419,12 @@ func TestConsumePropagatesConsumeCodeStoreError(t *testing.T) {
 	}
 }
 
-// TestConsumePropagatesCountCodesStoreError pins that Consume fails closed
-// — propagating the error rather than guessing a remaining count or
-// pretending the consumption never happened — if the code was
-// successfully consumed but the follow-up CountCodes call fails.
-func TestConsumePropagatesCountCodesStoreError(t *testing.T) {
-	store := &failingConsumeStore{memStore: newMemStore(), failCount: true}
+// TestConsumeReturnsTheCountFromTheSameOperation pins that Consume reports
+// the store's own remaining count rather than re-reading it. A store whose
+// CountCodes lies proves the difference: only the value ConsumeCode returned
+// may reach the caller.
+func TestConsumeReturnsTheCountFromTheSameOperation(t *testing.T) {
+	store := &lyingCountStore{memStore: newMemStore()}
 	svc := mustService(t, store)
 	ctx := context.Background()
 
@@ -442,12 +434,22 @@ func TestConsumePropagatesCountCodesStoreError(t *testing.T) {
 	}
 
 	remaining, err := svc.Consume(ctx, "user1", codes[0])
-	if err == nil {
-		t.Fatal("Consume error = nil, want the CountCodes store error propagated")
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
 	}
-	if remaining != 0 {
-		t.Fatalf("Consume remaining = %d, want 0", remaining)
+	if remaining != len(codes)-1 {
+		t.Fatalf("Consume remaining = %d, want %d from ConsumeCode itself", remaining, len(codes)-1)
 	}
+}
+
+// lyingCountStore returns a deliberately wrong CountCodes, so any code path
+// that still consults it after consuming fails loudly.
+type lyingCountStore struct {
+	*memStore
+}
+
+func (l *lyingCountStore) CountCodes(context.Context, string) (int, error) {
+	return -42, nil
 }
 
 // --- The purge hook (Disable) -------------------------------------------
