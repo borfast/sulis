@@ -1,7 +1,16 @@
 version: 2
 updates:
+  # Both modules. store/sql versions independently and carries the only
+  # references to the PostgreSQL and SQLite drivers, so watching the root
+  # alone left those two unwatched entirely.
+  #
+  # A bump in either module still needs a manual `go mod tidy` in store/sql,
+  # because it replaces the root module with ../.. and Dependabot updates one
+  # manifest at a time.
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /store/sql
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

@@ -31,6 +31,23 @@ jobs:
           # licenses already accepted by the project; any other known license
           # needs an explicit policy change in the same pull request.
           allow-licenses: Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT
+          # The golang.org/x modules are BSD-3-Clause plus Google's additional
+          # PATENTS grant, which the scanner reports as the compound string
+          # "BSD-3-Clause AND LicenseRef-scancode-google-patent-license-golang".
+          # That does not string-match the allow-list, so without this the gate
+          # blocks every Go first-party module. The extra grant is more
+          # permissive than plain BSD-3-Clause, not less. Exempting the family
+          # by name keeps the allow-list strict for everything else; a new
+          # dependency outside this list still has to be reviewed.
+          allow-dependencies-licenses: >-
+            pkg:golang/golang.org/x/crypto,
+            pkg:golang/golang.org/x/mod,
+            pkg:golang/golang.org/x/net,
+            pkg:golang/golang.org/x/sync,
+            pkg:golang/golang.org/x/sys,
+            pkg:golang/golang.org/x/term,
+            pkg:golang/golang.org/x/text,
+            pkg:golang/golang.org/x/tools
 
   test:
     name: test (go ${{ matrix.go }})
