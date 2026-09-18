@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/borfast/sulis v0.1.0
 	github.com/go-webauthn/webauthn v0.18.1
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	modernc.org/sqlite v1.59.0
 )
 
