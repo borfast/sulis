@@ -875,9 +875,8 @@ func TestBeginRegistrationRequestsCredPropsExtension(t *testing.T) {
 		t.Fatalf("BeginRegistration() error = %v", err)
 	}
 
-	rk, ok := creation.Response.Extensions["credProps"].(bool)
-	if !ok || !rk {
-		t.Fatalf("Extensions[%q] = %#v, want true", "credProps", creation.Response.Extensions["credProps"])
+	if !creation.Response.Extensions.CredProps {
+		t.Fatalf("Extensions.CredProps = %v, want true", creation.Response.Extensions.CredProps)
 	}
 }
 
@@ -1220,6 +1219,10 @@ func seedRegistrationChallenge(t *testing.T, challenges *fakeChallengeStore, use
 		UserID:           user.ID,
 		UserVerification: protocol.VerificationDiscouraged, // the spec vector's authenticator data has no UV flag set
 		CredParams:       webauthn.CredentialParametersDefault(),
+		// BeginRegistration records what it asked for, and go-webauthn v0.18
+		// rejects an extension output whose identifier is not on that list.
+		// This helper writes the session directly, so it has to say so too.
+		Extensions: protocol.SessionExtensions{Requested: []string{"credProps"}},
 	}
 	data, err := json.Marshal(sessionData)
 	if err != nil {
@@ -1358,7 +1361,13 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKFalse(t *testing
 // pins that the OR of "absent" and "wrong type" both land on the same
 // fallback, which is why the two cases were previously carried together with
 // only one covered.
-func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKIsNotBool(t *testing.T) {
+// go-webauthn v0.18 types credProps.rk as *bool and parses the client
+// extension outputs into a struct, so a non-bool rk now fails the whole
+// registration at parse time. Before v0.18 it was tolerated and the
+// credential was recorded as not discoverable. The stricter behavior is the
+// library's, not this package's; this test pins which one is in force, since
+// a client that sends the wrong type can no longer register at all.
+func TestFinishRegistrationRejectsNonBoolCredPropsRK(t *testing.T) {
 	t.Parallel()
 
 	placeholder := true
@@ -1402,11 +1411,11 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKIsNotBool(t *tes
 	}
 
 	cred, err := service.FinishRegistration(context.Background(), user, req)
-	if err != nil {
-		t.Fatalf("FinishRegistration() error = %v", err)
+	if err == nil {
+		t.Fatal("FinishRegistration() error = nil, want a rejection for a non-bool credProps.rk")
 	}
-	if cred.Discoverable {
-		t.Error("Discoverable = true, want false when the client's credProps.rk is not a bool")
+	if cred != nil {
+		t.Errorf("FinishRegistration() credential = %#v, want nil", cred)
 	}
 }
 

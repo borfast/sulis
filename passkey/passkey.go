@@ -239,7 +239,7 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 	// which is worth knowing even under "preferred" or "discouraged".
 	creation, sessionData, err := s.wa.BeginRegistration(waUser,
 		webauthn.WithExclusions(exclude),
-		webauthn.WithExtensions(protocol.AuthenticationExtensions{"credProps": true}),
+		webauthn.WithExtensions(webauthn.WithExtensionCredProps()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: begin registration: %w", err)
@@ -562,13 +562,15 @@ func (s *Service) checkCeremonyBodySize(body []byte) error {
 // (credProps.rk). See Credential.Discoverable for why this — rather than
 // anything on the finished waCredential itself — is the signal used, and
 // for its reliability caveats.
+// go-webauthn v0.18 models the outputs as a struct rather than a map, and
+// both pointers are meaningful: a nil CredProps means the client said
+// nothing, while a non-nil RK of false means it said the credential is not
+// discoverable. Both answer this question with false.
 func credPropsResidentKey(ext protocol.AuthenticationExtensionsClientOutputs) bool {
-	credProps, ok := ext["credProps"].(map[string]any)
-	if !ok {
+	if ext.CredProps == nil || ext.CredProps.RK == nil {
 		return false
 	}
-	rk, _ := credProps["rk"].(bool)
-	return rk
+	return *ext.CredProps.RK
 }
 
 // toWebAuthnCreds converts our Credential type to the webauthn library's
