@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/totp"
@@ -14,11 +15,23 @@ type securityPageData struct {
 	CSRFToken         string
 	TOTPActive        bool
 	RecoveryRemaining int
+	Passkeys          []passkeyView
+}
+
+// passkeyView adapts a passkey.Credential for display on security.html: a
+// label (falling back to a generic one when the credential was never named,
+// since passkey itself never generates or validates Name) plus when it was
+// created and last used.
+type passkeyView struct {
+	ID         string
+	Label      string
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
 }
 
 // handleSecurity shows the current state of a user's second factors: whether
-// an authenticator app is active, and how many recovery codes are left. Task
-// 5 extends this page with the passkey list.
+// an authenticator app is active, how many recovery codes are left, and
+// which passkeys are registered.
 func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
@@ -42,6 +55,23 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(ctx, user.ID)
+	if err != nil {
+		a.log.Error("listing passkeys", "user_id", user.ID, "error", err)
+		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
+		return
+	}
+	passkeys := make([]passkeyView, 0, len(creds))
+	for _, cred := range creds {
+		label := cred.Name
+		if label == "" {
+			label = "Unnamed passkey"
+		}
+		passkeys = append(passkeys, passkeyView{
+			ID: cred.ID, Label: label, CreatedAt: cred.CreatedAt, LastUsedAt: cred.LastUsedAt,
+		})
+	}
+
 	token, cookie, err := a.auth.IssueCSRFToken()
 	if err != nil {
 		a.log.Error("issuing csrf token", "error", err)
@@ -51,7 +81,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, cookie)
 
 	a.render(w, http.StatusOK, "security", securityPageData{
-		CSRFToken: token, TOTPActive: totpActive, RecoveryRemaining: remaining,
+		CSRFToken: token, TOTPActive: totpActive, RecoveryRemaining: remaining, Passkeys: passkeys,
 	})
 }
 
@@ -286,6 +316,9 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 func (a *app) clearPendingCookies(w http.ResponseWriter) {
 	secure := strings.HasPrefix(a.baseURL, "https://")
 	for _, name := range []string{pendingUserCookie, pendingTokenCookie} {
+		// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed
+		// from the -tls flag rather than a literal, which this rule's
+		// static check for `Secure: true` does not recognize.
 		http.SetCookie(w, &http.Cookie{
 			Name: name, Value: "", Path: "/", MaxAge: -1,
 			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,

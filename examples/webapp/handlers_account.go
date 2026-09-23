@@ -15,7 +15,7 @@ import (
 // second-factor step. Task 4 reads them; this task only sets them.
 const (
 	pendingUserCookie  = "pending_2fa_user"
-	pendingTokenCookie = "pending_2fa_token"
+	pendingTokenCookie = "pending_2fa_token" // #nosec G101 -- a cookie name, not a credential
 )
 
 // pendingCookieTTL is how long the pending-2FA cookies live: long enough to
@@ -71,10 +71,15 @@ func (a *app) handleLoginResult(w http.ResponseWriter, r *http.Request, res *sul
 	if res.NeedsSecondFactor {
 		secure := strings.HasPrefix(a.baseURL, "https://")
 		expires := time.Now().Add(pendingCookieTTL)
+		// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed
+		// from the -tls flag (via a.baseURL's scheme) rather than a literal
+		// so the demo still works with -tls=false, which this rule's static
+		// check for a literal `Secure: true` does not recognize.
 		http.SetCookie(w, &http.Cookie{
 			Name: pendingUserCookie, Value: res.User.ID, Path: "/",
 			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode, Expires: expires,
 		})
+		// #nosec G124 -- see the identical cookie set two lines above.
 		http.SetCookie(w, &http.Cookie{
 			Name: pendingTokenCookie, Value: res.PendingToken, Path: "/",
 			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode, Expires: expires,
@@ -531,6 +536,9 @@ func (a *app) handleMagicRequest(w http.ResponseWriter, r *http.Request) {
 		a.mail.Send(email, "Log in with a magic link", body)
 		if nonce != "" {
 			secure := strings.HasPrefix(a.baseURL, "https://")
+			// #nosec G124 -- HttpOnly and SameSite are set; Secure is
+			// computed from the -tls flag rather than a literal, which this
+			// rule's static check for `Secure: true` does not recognize.
 			http.SetCookie(w, &http.Cookie{
 				Name: magicNonceCookie, Value: nonce, Path: "/",
 				HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
@@ -574,10 +582,14 @@ func (a *app) handleMagicRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The nonce has done its job; clear it so it isn't left behind.
+	// The nonce has done its job; clear it so it isn't left behind, with the
+	// same HttpOnly/SameSite attributes it was set with.
+	// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed from
+	// the -tls flag rather than a literal, which this rule's static check
+	// for `Secure: true` does not recognize.
 	http.SetCookie(w, &http.Cookie{
 		Name: magicNonceCookie, Value: "", Path: "/", MaxAge: -1,
-		Secure: strings.HasPrefix(a.baseURL, "https://"),
+		HttpOnly: true, Secure: strings.HasPrefix(a.baseURL, "https://"), SameSite: http.SameSiteLaxMode,
 	})
 
 	a.handleLoginResult(w, r, result)
@@ -625,6 +637,10 @@ func (a *app) handleChangeEmail(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	session, _ := sulis.SessionFromContext(r.Context())
+	if !a.requireRecentAuth(w, r, session) {
 		return
 	}
 

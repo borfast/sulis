@@ -21,6 +21,7 @@ address stays active until you follow that link.</p>
 {{end}}
 
 {{define "footer"}}
-<p>Library calls used on this page: sulis.ChangeEmail,
+<p>Library calls used on this page: sulis.RequireRecentAuth (redirects to
+/reauth if your last login was more than 5 minutes ago), sulis.ChangeEmail,
 sulis.ConfirmEmailChange (on the link it emails to the new address).</p>
 {{end}}

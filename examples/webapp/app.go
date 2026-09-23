@@ -183,6 +183,7 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /account/email", a.requireAuth(a.handleChangeEmailForm))
 	mux.Handle("GET /security", a.requireAuth(a.handleSecurity))
 	mux.HandleFunc("GET /login/second-factor", a.handleSecondFactorForm)
+	mux.Handle("GET /reauth", a.requireAuth(a.handleReauthForm))
 
 	// postMux carries every state-changing route. RequireSameOrigin and
 	// RequireCSRFToken both only act on unsafe methods (POST here), so
@@ -203,6 +204,19 @@ func (a *app) routes() http.Handler {
 	postMux.Handle("POST /security/totp/disable", a.requireAuth(a.handleTOTPDisable))
 	postMux.Handle("POST /security/recovery/generate", a.requireAuth(a.handleRecoveryGenerate))
 	postMux.HandleFunc("POST /login/second-factor", a.handleSecondFactor)
+	postMux.Handle("POST /reauth", a.requireAuth(a.handleReauth))
+	postMux.Handle("POST /security/passkeys/delete", a.requireAuth(a.handlePasskeyDelete))
+	// The four passkey ceremony endpoints below are JSON, not form posts,
+	// but they are still cookie-authenticated state changes, so they route
+	// through this same CSRF-wrapped mux like every other POST: passkeys.js
+	// sends the token in the X-CSRF-Token header, which VerifyCSRFToken
+	// checks before falling back to the form field.
+	postMux.Handle("POST /api/passkeys/register/begin", a.requireAuthJSON(a.handlePasskeyRegisterBegin))
+	postMux.Handle("POST /api/passkeys/register/finish", a.requireAuthJSON(a.handlePasskeyRegisterFinish))
+	postMux.HandleFunc("POST /api/passkeys/login/begin", a.handlePasskeyLoginBegin)
+	postMux.HandleFunc("POST /api/passkeys/login/finish", a.handlePasskeyLoginFinish)
+	postMux.HandleFunc("POST /api/passkeys/discoverable/begin", a.handlePasskeyDiscoverableBegin)
+	postMux.HandleFunc("POST /api/passkeys/discoverable/finish", a.handlePasskeyDiscoverableFinish)
 	mux.Handle("POST /", a.auth.RequireSameOrigin([]string{a.baseURL})(a.auth.RequireCSRFToken(postMux)))
 
 	return mux

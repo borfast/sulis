@@ -51,6 +51,9 @@ func main() {
 	server := &http.Server{
 		Addr:    *addr,
 		Handler: a.routes(),
+		// ReadHeaderTimeout bounds how long a client can take sending
+		// request headers, closing off a Slowloris-style resource hold.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
