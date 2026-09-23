@@ -1,0 +1,26 @@
+{{define "title"}}Change your email{{end}}
+
+{{define "content"}}
+{{if .Confirmed}}
+<p>Your email address is now {{.NewEmail}}. Every session on this
+account has been signed out; <a href="/login">log in</a> again with the
+new address.</p>
+{{else if .Sent}}
+<p>We sent a confirmation link to your new address. Open
+<a href="/dev/mailbox">the dev mailbox</a> to find it. Your current
+address stays active until you follow that link.</p>
+{{else}}
+<p>Currently: {{.CurrentEmail}}.</p>
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/account/email">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>New email<br><input type="email" name="email" required></label><br>
+<button type="submit">Change email</button>
+</form>
+{{end}}
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.ChangeEmail,
+sulis.ConfirmEmailChange (on the link it emails to the new address).</p>
+{{end}}

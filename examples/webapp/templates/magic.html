@@ -1,0 +1,22 @@
+{{define "title"}}Log in with a magic link{{end}}
+
+{{define "content"}}
+{{if .Sent}}
+<p>If that address can receive mail, we've sent a login link. Open
+<a href="/dev/mailbox">the dev mailbox</a> to find it. Open the link in
+this same browser: it only works from here.</p>
+{{else}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/magic">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Email<br><input type="email" name="email" required></label><br>
+<button type="submit">Send magic link</button>
+</form>
+{{end}}
+<p><a href="/login">Back to log in</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.CreateMagicLinkToken,
+sulis.RedeemMagicLink (on the link it emails).</p>
+{{end}}
