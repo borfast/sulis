@@ -513,18 +513,16 @@ func TestForgedAuthenticatorCompletesRegistrationAndLogin(t *testing.T) {
 // errAuthDataVerification is the message go-webauthn's authenticator-data
 // verification returns for ALL THREE of its checks — RP ID hash mismatch,
 // missing User Present, missing User Verified. The distinguishing text lives
-// in the error's DevInfo field, which sulis does not surface: both
-// FinishLoginResponse and FinishRegistrationResponse wrap the library error
-// with %v, not %w, so the *protocol.Error (and its DevInfo) is not recoverable
-// from the chain either.
+// in the error's DevInfo field. Passkey events retain the protocol error's
+// category without copying DevInfo, and the returned challenge error now also
+// wraps the protocol error so errors.As can recover its structured identity.
 //
-// Tests for those three checks therefore cannot tell them apart by message.
-// They pair the rejection with a control instead: the identical forged bytes
-// are replayed against a Service that should accept them, so a rejection is
-// attributable to the one input that differs. Asserting this message on top
-// still narrows the failure to the authenticator-data step, since the client
-// data checks (challenge, origin, ceremony type) and the signature check
-// each have their own distinct message.
+// Tests for those three checks pair the rejection with a control: the identical
+// forged bytes are replayed against a Service that should accept them, so a
+// rejection is attributable to the one input that differs. Asserting this
+// message on top still narrows the failure to the authenticator-data step,
+// since the client data checks (challenge, origin, ceremony type) and the
+// signature check each have their own distinct message.
 const errAuthDataVerification = "Error validating the authenticator response"
 
 // TestFinishLoginRejectsAssertionWithoutUserVerification discharges the

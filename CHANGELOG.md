@@ -45,6 +45,12 @@ does and does not promise.
 
 ### Added
 
+- Passkey ceremonies can report registration, login, clone-warning,
+  credential-deletion, challenge-expiry, and store-failure events through the
+  new `passkey.WithEventSink` option. Rejected WebAuthn ceremonies retain the
+  underlying protocol error category for operators without exposing request
+  bodies, challenges, credential material, or error text in event payloads.
+
 - Configurable CSRF cookie names via `WithCSRFCookieName` and the
   `(*Sulis).IssueCSRFToken`/`VerifyCSRFToken`/`RequireCSRFToken` methods.
   Package-level helpers retain the default `__Host-csrf_token` name; custom

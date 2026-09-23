@@ -253,6 +253,10 @@ func TestFinishLoginWrapsUnderlyingError(t *testing.T) {
 	if !errors.Is(err, ErrChallengeFailed) {
 		t.Fatalf("FinishLogin() error = %v, want errors.Is(err, ErrChallengeFailed)", err)
 	}
+	var protocolErr *protocol.Error
+	if !errors.As(err, &protocolErr) {
+		t.Fatalf("FinishLogin() error = %v, want protocol.Error to remain discoverable", err)
+	}
 	if cred != nil {
 		t.Fatalf("FinishLogin() credential = %#v, want nil", cred)
 	}
@@ -274,7 +278,7 @@ func TestFinishLoginRejectsClonedAuthenticator(t *testing.T) {
 		},
 	}
 
-	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
 	if !errors.Is(err, ErrCloneWarning) {
 		t.Fatalf("finishLoginCredential() error = %v, want %v", err, ErrCloneWarning)
 	}
@@ -695,13 +699,17 @@ func (f *fakeChallengeStore) peekChallenge(key string) ([]byte, bool) {
 }
 
 func newTestService(t *testing.T, store Store, challenges ChallengeStore) *Service {
+	return newTestServiceWithOptions(t, store, challenges)
+}
+
+func newTestServiceWithOptions(t *testing.T, store Store, challenges ChallengeStore, opts ...Option) *Service {
 	t.Helper()
 
 	service, err := NewService(store, challenges, WebAuthnConfig{
 		RPDisplayName: "Sulis Test",
 		RPID:          "example.com",
 		RPOrigins:     []string{"https://example.com"},
-	})
+	}, opts...)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -1595,7 +1603,7 @@ func TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState(t *testing.T) {
 	}
 
 	before := time.Now()
-	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
 	if err != nil {
 		t.Fatalf("finishLoginCredential() error = %v", err)
 	}
@@ -2007,7 +2015,7 @@ func TestFinishLoginCredentialPropagatesUpdateFailure(t *testing.T) {
 
 	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
 
-	cred, err := service.finishLoginCredential(context.Background(), waCred)
+	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
 	if !errors.Is(err, errStoreFailure) {
 		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
@@ -2031,7 +2039,7 @@ func TestFinishLoginCredentialPropagatesReloadFailure(t *testing.T) {
 
 	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
 
-	if _, err := service.finishLoginCredential(context.Background(), waCred); !errors.Is(err, errStoreFailure) {
+	if _, err := service.finishLoginCredential(context.Background(), "user-1", waCred); !errors.Is(err, errStoreFailure) {
 		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
 }
