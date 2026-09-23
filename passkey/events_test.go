@@ -179,37 +179,103 @@ func TestPasskeyEventsCoverDeletionAndChallengeExpiry(t *testing.T) {
 	}
 }
 
-func TestPasskeyEventPayloadContainsNoCredentialMaterial(t *testing.T) {
+// TestFinishRegistrationRejectionEmitsOpaqueDiagnosticWithoutDevInfo replaces
+// the old TestPasskeyEventPayloadContainsNoCredentialMaterial, which scanned
+// a marshaled event for placeholder strings ("raw-challenge-value",
+// "credential-private-key", ...) that no code path ever produces — it could
+// never fail. This drives a real registration-finish call end to end, with a
+// client payload go-webauthn genuinely rejects, and checks the real leak
+// path: the rejection's *protocol.Error.DevInfo — obtained the same way a
+// caller would, via errors.As, not a placeholder — must not reach either the
+// returned error or the emitted event.
+//
+// A non-bool credProps.rk extension value makes go-webauthn's JSON decode of
+// the client's response fail. The library reports that failure two ways: the
+// opaque, fixed "Parse error for Registration" message that becomes this
+// call's returned error, and a DevInfo field on the wrapped *protocol.Error
+// carrying the real reason (a Go encoding/json type-mismatch message,
+// specific enough to be an internal detail worth withholding). Diagnostic's
+// doc comment promises event sinks never receive DevInfo; this is the
+// scenario named there driven end to end, in the shape the review named:
+// this package's diagnostic taxonomy exercised through a real go-webauthn
+// rejection, not a hand-built error.
+func TestFinishRegistrationRejectionEmitsOpaqueDiagnosticWithoutDevInfo(t *testing.T) {
 	sink := &recordingEventSink{}
-	store := &fakeStore{credentialByID: map[string]*Credential{
-		"credential-public-id": {ID: "credential-row", UserID: "opaque-user", CredentialID: []byte("credential-public-id")},
-	}}
-	service := newTestServiceWithOptions(t, store, newFakeChallengeStore(), WithEventSink(sink))
+	f := newForgingFixture(t, WithEventSink(sink))
+	ctx := t.Context()
 
-	if _, err := service.finishLoginCredential(context.Background(), "opaque-user", &webauthn.Credential{ID: []byte("credential-public-id")}); err != nil {
-		t.Fatalf("finishLoginCredential() error = %v", err)
+	creation, err := f.service.BeginRegistration(ctx, f.user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+	rk := true
+	rq := f.registrationRequest(creation.Response.Challenge.String())
+	rq.credPropsRK = &rk
+	body := f.auth.forgeRegistration(rq)
+
+	// Corrupt the client's reported credProps.rk from a bool to a string:
+	// a malformed-client-payload shape a fuzzer or a broken client
+	// produces, and the one that reaches go-webauthn's JSON decoder rather
+	// than sulis's own validation.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal forged body: %v", err)
+	}
+	ext, ok := raw["clientExtensionResults"].(map[string]any)
+	if !ok {
+		t.Fatalf("forged body has no clientExtensionResults: %s", body)
+	}
+	credProps, ok := ext["credProps"].(map[string]any)
+	if !ok {
+		t.Fatalf("forged body has no credProps: %s", body)
+	}
+	credProps["rk"] = "not-a-bool"
+	mutated, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal mutated body: %v", err)
 	}
 
+	_, err = f.service.FinishRegistrationResponse(ctx, f.user, mutated)
+	if err == nil {
+		t.Fatal("FinishRegistrationResponse() error = nil, want a rejection")
+	}
+
+	var protocolErr *protocol.Error
+	if !errors.As(err, &protocolErr) {
+		t.Fatalf("errors.As() did not recover *protocol.Error from %v", err)
+	}
+	if protocolErr.DevInfo == "" {
+		t.Fatal("protocolErr.DevInfo is empty; the assertions below would be vacuous")
+	}
+
+	// (a) The returned error is opaque: it does not contain the real
+	// reason, even though errors.As can reach it.
+	if strings.Contains(err.Error(), protocolErr.DevInfo) {
+		t.Fatalf("FinishRegistrationResponse() error = %q is not opaque: it contains DevInfo %q", err.Error(), protocolErr.DevInfo)
+	}
+
+	// (b) A failure event was emitted.
 	events := sink.snapshot()
-	if len(events) != 1 {
-		t.Fatalf("events = %+v, want one event", events)
+	var rejection *Event
+	for i := range events {
+		if events[i].Kind == EventRegistrationRejected {
+			rejection = &events[i]
+			break
+		}
 	}
-	encoded, err := json.Marshal(events[0])
+	if rejection == nil {
+		t.Fatalf("events = %+v, want an %s event", events, EventRegistrationRejected)
+	}
+
+	// (c) The marshaled event does not contain DevInfo — the real leaked
+	// string, not a placeholder nothing produces.
+	encoded, err := json.Marshal(rejection)
 	if err != nil {
 		t.Fatalf("marshal event: %v", err)
 	}
-	text := string(encoded) + fmt.Sprintf("%#v", events[0])
-	for _, secret := range []string{
-		"raw-challenge-value",
-		"full-client-data-json",
-		"credential-private-key",
-		"credential-public-key-bytes",
-		"credential-secret",
-		"protocol diagnostic details",
-	} {
-		if strings.Contains(text, secret) {
-			t.Fatalf("event payload contains credential material %q: %s", secret, text)
-		}
+	payload := string(encoded) + fmt.Sprintf("%#v", *rejection)
+	if strings.Contains(payload, protocolErr.DevInfo) {
+		t.Fatalf("event payload contains the real DevInfo %q: %s", protocolErr.DevInfo, payload)
 	}
 }
 
@@ -226,5 +292,60 @@ func TestDiagnosticCategoryRetainsProtocolIdentityWithoutDetails(t *testing.T) {
 	}
 	if strings.Contains(diagnosticCategory(wrapped), underlying.DevInfo) {
 		t.Fatal("diagnostic category contains protocol DevInfo")
+	}
+}
+
+// TestNilSinkPathAllocatesNothing is the empirical half of the guarantee
+// WithEventSink's doc comment makes: with no sink configured, a ceremony
+// failure that would otherwise derive Event.Diagnostic from an error costs
+// one nil check and nothing else.
+//
+// It exists because the obvious way to report a diagnosed failure — call
+// diagnosticCategory(err) at the call site and drop the result straight into
+// an Event{} literal's Diagnostic field — quietly breaks that claim: Go
+// evaluates a composite literal's field expressions before the call that
+// receives it, so the errors.As walk would run whether or not a sink is
+// configured. emitDiag takes err and the diagnostic function separately and
+// applies diagFn only after its own nil-sink check; this test is what stops
+// that from being undone by a well-meaning refactor back to a Diagnostic
+// field computed at the call site.
+func TestNilSinkPathAllocatesNothing(t *testing.T) {
+	service := newTestServiceWithOptions(t, &fakeStore{}, newFakeChallengeStore())
+	if service.cfg.EventSink != nil {
+		t.Fatal("this test needs a Service with no sink configured")
+	}
+	ctx := context.Background()
+
+	underlying := protocol.ErrBadRequest.WithInfo("json: unmarshal clientExtensionResults")
+	failureErr := fmt.Errorf("passkey: parsing registration response: %w", underlying)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: "user-123"}, failureErr, diagnosticCategory)
+	})
+	if allocs != 0 {
+		t.Fatalf("emitting to a nil sink allocated %v objects per call, want 0 — diagnosticCategory's errors.As walk is running before the nil-sink check", allocs)
+	}
+}
+
+// TestNilSinkAllocationTestIsNotVacuous is the control for the test above:
+// the identical call, with a sink configured, must actually deliver the
+// derived Diagnostic. Without this, TestNilSinkPathAllocatesNothing would
+// keep passing if emitDiag stopped deriving Diagnostic at all.
+func TestNilSinkAllocationTestIsNotVacuous(t *testing.T) {
+	sink := &recordingEventSink{}
+	service := newTestServiceWithOptions(t, &fakeStore{}, newFakeChallengeStore(), WithEventSink(sink))
+	ctx := context.Background()
+
+	underlying := protocol.ErrBadRequest.WithInfo("json: unmarshal clientExtensionResults")
+	failureErr := fmt.Errorf("passkey: parsing registration response: %w", underlying)
+
+	service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: "user-123"}, failureErr, diagnosticCategory)
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want exactly one", events)
+	}
+	if events[0].Diagnostic != "invalid_request" {
+		t.Fatalf("Diagnostic = %q, want %q", events[0].Diagnostic, "invalid_request")
 	}
 }

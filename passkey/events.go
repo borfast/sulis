@@ -61,6 +61,12 @@ type EventSink interface {
 // emit delivers e to the configured sink, if any. It is the only way this
 // package emits an event. A nil sink is a no-op and a panicking sink is
 // contained so observability cannot change an authentication decision.
+//
+// The nil-sink check is the first thing this does, on purpose: call sites
+// that already know e.Diagnostic (a fixed label, not derived from an error)
+// call this directly, so with no sink configured they pay nothing beyond
+// the check. Call sites that must derive Diagnostic from an error use
+// emitDiag instead, which defers that work behind the same check.
 func (s *Service) emit(ctx context.Context, e Event) {
 	if s.cfg.EventSink == nil {
 		return
@@ -70,6 +76,22 @@ func (s *Service) emit(ctx context.Context, e Event) {
 	}
 	defer func() { _ = recover() }()
 	s.cfg.EventSink.Emit(ctx, e)
+}
+
+// emitDiag is emit for a failure whose Event.Diagnostic must be derived from
+// err by diagFn (diagnosticCategory or deletionDiagnostic, both walking err's
+// chain with errors.As/errors.Is). diagFn is called only after the nil-sink
+// check, never at the call site: e is built and passed in first, with
+// Diagnostic left zero, so a ceremony failure with no sink configured never
+// runs that walk. See WithEventSink's doc comment for the guarantee this
+// preserves, and TestNilSinkPathAllocatesNothing for the check that holds it
+// to account.
+func (s *Service) emitDiag(ctx context.Context, e Event, err error, diagFn func(error) string) {
+	if s.cfg.EventSink == nil {
+		return
+	}
+	e.Diagnostic = diagFn(err)
+	s.emit(ctx, e)
 }
 
 // diagnosticCategory extracts only go-webauthn's stable error category. The

@@ -110,10 +110,16 @@ func WithMaxCeremonyBody(max int64) Option {
 }
 
 // WithEventSink routes passkey security and operational events to sink. The
-// default is nil: no sink, no events, and no work beyond the nil check. The
-// event taxonomy is intentionally local to this package; applications that
-// want one stream across sulis, recovery, and passkey can adapt each package's
-// Event value at their boundary without coupling the packages together.
+// default is nil: no sink, no events. Every failure event's Diagnostic is
+// derived from the triggering error by diagnosticCategory or
+// deletionDiagnostic — an errors.As or errors.Is walk — and that walk runs
+// only after the nil-sink check inside emitDiag, never at the call site, so
+// an unconfigured Service pays one comparison per decision and nothing else.
+// TestNilSinkPathAllocatesNothing (events_test.go) holds that guarantee to
+// account with testing.AllocsPerRun. The event taxonomy is intentionally
+// local to this package; applications that want one stream across sulis,
+// recovery, and passkey can adapt each package's Event value at their
+// boundary without coupling the packages together.
 func WithEventSink(sink EventSink) Option {
 	return func(c *serviceConfig) { c.EventSink = sink }
 }
@@ -305,14 +311,14 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 	// below to populate Credential.Discoverable.
 	parsedResponse, err := protocol.ParseCredentialCreationResponseBytes(body)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID), Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID)}, err, diagnosticCategory)
 		return nil, fmt.Errorf("passkey: parsing registration response: %w", err)
 	}
 
 	waUser := &webauthnUser{user: user}
 	waCredential, err := s.wa.CreateCredential(waUser, sessionData, parsedResponse)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID), Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID)}, err, diagnosticCategory)
 		return nil, fmt.Errorf("passkey: finish registration: %w", err)
 	}
 
@@ -421,13 +427,13 @@ func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyI
 
 	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID), Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID)}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 
 	waCredential, err := s.wa.ValidateLogin(waUser, sessionData, parsedResponse)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID), Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID)}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 
@@ -509,13 +515,13 @@ func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyI
 
 	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventLoginRejected, Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 
 	waCred, err := s.wa.ValidateDiscoverableLogin(handler, sessionData, parsedResponse)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventLoginRejected, UserID: resolvedUserID, Diagnostic: diagnosticCategory(err)})
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: resolvedUserID}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 	return s.finishLoginCredential(ctx, resolvedUserID, waCred)
@@ -587,7 +593,7 @@ func (s *Service) DeleteCredential(ctx context.Context, userID, id string, opts 
 		return nil
 	}
 	if errors.Is(err, ErrPasskeyNotFound) || errors.Is(err, ErrLastCredential) {
-		s.emit(ctx, Event{Kind: EventCredentialDeletionRejected, UserID: userID, Diagnostic: deletionDiagnostic(err)})
+		s.emitDiag(ctx, Event{Kind: EventCredentialDeletionRejected, UserID: userID}, err, deletionDiagnostic)
 	} else {
 		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: userID, Operation: "delete_credential"})
 	}
