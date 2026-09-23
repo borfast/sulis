@@ -52,6 +52,7 @@ type app struct {
 	recovery *recovery.Service
 	users    *sqlite.UserStore
 	db       *sqlite.DB
+	mail     *outbox
 	tmpl     *template.Template
 	log      *slog.Logger
 	baseURL  string // http(s)://localhost:PORT, from -addr and -tls
@@ -155,6 +156,7 @@ func newApp(ctx context.Context, dsn, baseURL string, logger *slog.Logger) (*app
 		recovery: recoverySvc,
 		users:    db.UserStore(),
 		db:       db,
+		mail:     &outbox{},
 		tmpl:     tmpl,
 		log:      logger,
 		baseURL:  baseURL,
@@ -167,6 +169,25 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleHome)
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFiles)))
+
+	mux.HandleFunc("GET /register", a.handleRegisterForm)
+	mux.HandleFunc("GET /login", a.handleLoginForm)
+	mux.HandleFunc("GET /verify", a.handleVerify)
+	mux.HandleFunc("GET /dev/mailbox", a.handleMailbox)
+	mux.Handle("GET /account", a.requireAuth(a.handleAccount))
+
+	// postMux carries every state-changing route. RequireSameOrigin and
+	// RequireCSRFToken both only act on unsafe methods (POST here), so
+	// mounting them once at "POST /" protects every route below without
+	// repeating the wiring per handler.
+	postMux := http.NewServeMux()
+	postMux.HandleFunc("POST /register", a.handleRegister)
+	postMux.HandleFunc("POST /login", a.handleLogin)
+	postMux.HandleFunc("POST /verify/resend", a.handleResendVerification)
+	postMux.Handle("POST /logout", a.requireAuth(a.handleLogout))
+	postMux.Handle("POST /sessions/revoke", a.requireAuth(a.handleRevokeSession))
+	mux.Handle("POST /", a.auth.RequireSameOrigin([]string{a.baseURL})(a.auth.RequireCSRFToken(postMux)))
+
 	return mux
 }
 
