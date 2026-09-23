@@ -100,6 +100,9 @@ type totpEnrollPageData struct {
 
 // handleTOTPEnroll starts TOTP enrollment and shows the secret and otpauth
 // URI as plain text, once, for the user to add to an authenticator app.
+// Adding a second factor is step-up gated for the same reason changing the
+// email address is: someone who walks up to an unlocked browser must not be
+// able to attach their own authenticator to the account.
 func (a *app) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		a.log.Error("parsing totp-enroll form", "error", err)
@@ -109,6 +112,10 @@ func (a *app) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	session, _ := sulis.SessionFromContext(r.Context())
+	if !a.requireRecentAuth(w, r, session) {
 		return
 	}
 	// Echoed straight back, like handleLogin does: the double-submit cookie
@@ -147,7 +154,7 @@ func (a *app) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 
 	if err := a.totp.ConfirmEnrollment(r.Context(), user.ID, code); err != nil {
 		// ConfirmEnrollment's own doc comment warns against treating
-		// ErrTOTPNotEnrolled here as "you are not enrolled" — but every
+		// ErrTOTPNotEnrolled here as "you are not enrolled", but every
 		// distinct cause (wrong code, rate limited, racing enrollment,
 		// retried confirm) reads identically to the user either way, so one
 		// generic message covers all of them.
@@ -161,8 +168,10 @@ func (a *app) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/security", http.StatusSeeOther)
 }
 
-// handleTOTPDisable removes a user's TOTP enrollment. If no other second
-// factor (a passkey) is left, it also purges any leftover recovery codes:
+// handleTOTPDisable removes a user's TOTP enrollment. It is step-up gated:
+// taking a second factor off an account is exactly what an attacker holding
+// a stolen session would want to do first. If no other second factor (a
+// passkey) is left, it also purges any leftover recovery codes:
 // recovery.Service.Disable's doc comment names exactly this moment as the
 // purge hook, since recovery codes back up a real factor rather than
 // standing on their own.
@@ -175,6 +184,10 @@ func (a *app) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	session, _ := sulis.SessionFromContext(r.Context())
+	if !a.requireRecentAuth(w, r, session) {
 		return
 	}
 
@@ -203,7 +216,9 @@ type recoveryCodesPageData struct {
 
 // handleRecoveryGenerate issues a fresh set of recovery codes, replacing any
 // existing ones, and shows the plaintext codes once: Generate does not
-// return them again afterward.
+// return them again afterward. It is step-up gated because it both shows
+// codes that bypass every other factor and invalidates the set the real
+// owner wrote down.
 func (a *app) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		a.log.Error("parsing recovery-generate form", "error", err)
@@ -213,6 +228,10 @@ func (a *app) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	session, _ := sulis.SessionFromContext(r.Context())
+	if !a.requireRecentAuth(w, r, session) {
 		return
 	}
 
@@ -237,7 +256,7 @@ type secondFactorPageData struct {
 // /login straight away if the pending-login cookie is missing: there is
 // nothing to complete.
 func (a *app) handleSecondFactorForm(w http.ResponseWriter, r *http.Request) {
-	if _, err := r.Cookie(pendingUserCookie); err != nil {
+	if _, err := r.Cookie(pendingTokenCookie); err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
@@ -252,11 +271,14 @@ func (a *app) handleSecondFactorForm(w http.ResponseWriter, r *http.Request) {
 	a.render(w, http.StatusOK, "second_factor", secondFactorPageData{CSRFToken: token})
 }
 
-// handleSecondFactor completes a login that needed a second factor: it
-// verifies the submitted TOTP code or recovery code itself, then hands the
-// pending token to CompleteTwoFactor. Both pending cookies are cleared on
-// every outcome, success or failure, since a pending login is meant to be
-// resolved by exactly one submission.
+// handleSecondFactor completes a login that needed a second factor. The
+// user ID it checks the code against comes from the server-side pending
+// entry the token names, never from the request: a client that can invent a
+// pending token must not be able to pick which account's factor is tested.
+// Once that lookup succeeds it verifies the submitted TOTP or recovery code
+// itself, then hands the pending token to CompleteTwoFactor. The entry and
+// the cookie are both gone on every outcome, success or failure, since a
+// pending login is meant to be resolved by exactly one submission.
 func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		a.log.Error("parsing second-factor form", "error", err)
@@ -268,17 +290,28 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	useRecovery := r.FormValue("use_recovery") != ""
 
-	userCookie, userErr := r.Cookie(pendingUserCookie)
 	tokenCookie, tokenErr := r.Cookie(pendingTokenCookie)
-	a.clearPendingCookies(w)
-	if userErr != nil || tokenErr != nil {
+	a.clearPendingCookie(w)
+
+	var (
+		pendingToken string
+		userID       string
+		known        bool
+	)
+	if tokenErr == nil {
+		pendingToken = tokenCookie.Value
+		userID, known = a.pending2FA.take(pendingToken)
+	}
+	if !known {
+		// A missing, expired, or invented token names no pending login, so
+		// there is no account to check a code against and nothing below
+		// runs. This is also what stops an invented cookie from being used
+		// to test codes against an account of the attacker's choosing.
 		a.render(w, http.StatusUnprocessableEntity, "second_factor", secondFactorPageData{
 			CSRFToken: csrfToken, Error: "Your login attempt expired. Log in again.",
 		})
 		return
 	}
-	userID := userCookie.Value
-	pendingToken := tokenCookie.Value
 
 	var verifyErr error
 	if useRecovery {
@@ -309,19 +342,17 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 	a.handleLoginResult(w, r, result)
 }
 
-// clearPendingCookies removes both pending-2FA cookies, mirroring how
-// handleLoginResult sets them (same Path, HttpOnly, Secure, SameSite) so the
-// browser actually deletes them instead of keeping a stale value under
+// clearPendingCookie removes the pending-2FA cookie, mirroring how
+// handleLoginResult sets it (same Path, HttpOnly, Secure, SameSite) so the
+// browser actually deletes it instead of keeping a stale value under
 // slightly different attributes.
-func (a *app) clearPendingCookies(w http.ResponseWriter) {
-	secure := strings.HasPrefix(a.baseURL, "https://")
-	for _, name := range []string{pendingUserCookie, pendingTokenCookie} {
-		// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed
-		// from the -tls flag rather than a literal, which this rule's
-		// static check for `Secure: true` does not recognize.
-		http.SetCookie(w, &http.Cookie{
-			Name: name, Value: "", Path: "/", MaxAge: -1,
-			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
-		})
-	}
+func (a *app) clearPendingCookie(w http.ResponseWriter) {
+	// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed from
+	// the -tls flag rather than a literal, which this rule's static check
+	// for `Secure: true` does not recognize.
+	http.SetCookie(w, &http.Cookie{
+		Name: pendingTokenCookie, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: strings.HasPrefix(a.baseURL, "https://"),
+		SameSite: http.SameSiteLaxMode,
+	})
 }

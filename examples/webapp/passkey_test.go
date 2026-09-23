@@ -238,6 +238,79 @@ func TestStepUpGuardsChangeEmail(t *testing.T) {
 	}
 }
 
+// TestStepUpGuardsTOTPEnroll checks that the same gate covers adding a
+// second factor, not just changing the email address: a stale session is
+// sent to /reauth, and the enrollment goes through once the password has
+// been proven again.
+func TestStepUpGuardsTOTPEnroll(t *testing.T) {
+	a := newTestApp(t)
+	c := newTestClient(t, a)
+	email := "stepup-totp@example.com"
+
+	rec := registerUser(t, c, email, testPassword)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = verifyEmail(t, a, c, email)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = login(t, c, email, testPassword)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("login: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	backdateSession(t, a, c, 10*time.Minute)
+
+	rec = c.get("/security")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /security: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	csrf := extractCSRFToken(t, rec.Body.String())
+
+	rec = c.post("/security/totp/enroll", url.Values{"csrf_token": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("enroll with stale auth: status = %d, want redirect, body = %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/reauth?next=") {
+		t.Fatalf("Location = %q, want /reauth?next=...", loc)
+	}
+
+	rec = c.get(loc)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s: status = %d, body = %s", loc, rec.Code, rec.Body.String())
+	}
+	reauthCSRF := extractCSRFToken(t, rec.Body.String())
+
+	rec = c.post("/reauth", url.Values{
+		"csrf_token": {reauthCSRF}, "password": {testPassword}, "next": {"/security"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("reauth: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Location"); got != "/security" {
+		t.Fatalf("reauth redirect = %q, want /security", got)
+	}
+
+	// The authentication is fresh again, so the same POST now enrolls. The
+	// CSRF token has to be re-read from /security: GET /reauth issued a new
+	// CSRF cookie, which the one read above no longer matches.
+	rec = c.get("/security")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /security after reauth: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	freshCSRF := extractCSRFToken(t, rec.Body.String())
+
+	rec = c.post("/security/totp/enroll", url.Values{"csrf_token": {freshCSRF}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enroll after reauth: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if extractTOTPSecret(t, rec.Body.String()) == "" {
+		t.Errorf("expected an enrollment secret on the page, body = %s", rec.Body.String())
+	}
+}
+
 // TestReauthWrongPasswordFails checks that submitting the wrong password on
 // /reauth fails with a visible error and leaves the step-up gate closed: a
 // gated action attempted right after still redirects back to /reauth.

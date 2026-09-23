@@ -165,14 +165,14 @@ func TestTOTPEnrollConfirmAndTwoFactorLogin(t *testing.T) {
 		t.Errorf("second-factor redirect = %q, want /account", loc)
 	}
 
-	cleared := map[string]bool{}
+	cleared := false
 	for _, ck := range rec.Result().Cookies() {
-		if (ck.Name == pendingUserCookie || ck.Name == pendingTokenCookie) && ck.MaxAge < 0 {
-			cleared[ck.Name] = true
+		if ck.Name == pendingTokenCookie && ck.MaxAge < 0 {
+			cleared = true
 		}
 	}
-	if !cleared[pendingUserCookie] || !cleared[pendingTokenCookie] {
-		t.Errorf("expected both pending cookies cleared, got cookies: %v", rec.Result().Cookies())
+	if !cleared {
+		t.Errorf("expected the pending token cookie cleared, got cookies: %v", rec.Result().Cookies())
 	}
 
 	rec = c.get("/account")
@@ -317,8 +317,10 @@ func TestSecondFactorReplayRejected(t *testing.T) {
 	}
 }
 
-// TestTamperedPendingCookieFailsGenerically checks that altering the pending
-// token cookie fails the second-factor login generically, without a session.
+// TestTamperedPendingCookieFailsGenerically checks that altering the
+// pending token cookie fails the second-factor login generically, without a
+// session. The token is now the only pending state the browser holds, so
+// tampering with it leaves the server with no pending login to resolve.
 func TestTamperedPendingCookieFailsGenerically(t *testing.T) {
 	a := newTestApp(t)
 	c := newTestClient(t, a)
@@ -347,7 +349,7 @@ func TestTamperedPendingCookieFailsGenerically(t *testing.T) {
 
 	// Tamper with the pending token cookie the browser is holding. The code
 	// submitted below is genuinely valid for this user, so only the
-	// tampered token can make CompleteTwoFactor fail.
+	// tampered token can make the attempt fail.
 	c.jar.SetCookies(c.base, []*http.Cookie{{Name: pendingTokenCookie, Value: "not-a-real-token", Path: "/"}})
 
 	rec = c.get("/login/second-factor")
@@ -379,6 +381,101 @@ func TestTamperedPendingCookieFailsGenerically(t *testing.T) {
 	rec = c.get("/account")
 	if rec.Code != http.StatusSeeOther {
 		t.Errorf("account after tampered second-factor attempt: status = %d, want redirect", rec.Code)
+	}
+}
+
+// TestFabricatedPendingCookieCannotProbeFactors is the reason the pending
+// user ID lives on the server. An attacker who holds one of a victim's
+// recovery codes, but no pending login of their own, invents a pending
+// token cookie and submits that code. The server has no pending entry for
+// the invented token, so it has no account to test the code against: the
+// attempt fails generically and the victim's code is still unspent.
+func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
+	a := newTestApp(t)
+	victim := newTestClient(t, a)
+	email := "probe-victim@example.com"
+
+	rec := registerUser(t, victim, email, testPassword)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = verifyEmail(t, a, victim, email)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = login(t, victim, email, testPassword)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("login: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	enrollTOTP(t, a, victim)
+
+	rec = victim.get("/security")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /security: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	csrf := extractCSRFToken(t, rec.Body.String())
+	rec = victim.post("/security/recovery/generate", url.Values{"csrf_token": {csrf}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /security/recovery/generate: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	codes := extractRecoveryCodes(t, rec.Body.String())
+	if len(codes) == 0 {
+		t.Fatalf("expected at least one recovery code, body = %s", rec.Body.String())
+	}
+
+	user, err := a.users.GetUserByEmail(t.Context(), email)
+	if err != nil {
+		t.Fatalf("looking up the victim: %v", err)
+	}
+	before, err := a.recovery.Remaining(t.Context(), user.ID)
+	if err != nil {
+		t.Fatalf("reading remaining recovery codes: %v", err)
+	}
+
+	// A different browser entirely: it never logged in, so the only pending
+	// state it has is what it just made up. It sends the victim's user ID
+	// in the cookie an earlier version of this app read that value from,
+	// alongside an invented token: if anything still believed a
+	// client-supplied user ID, this is the request that would consume the
+	// victim's recovery code.
+	attacker := newTestClient(t, a)
+	attacker.jar.SetCookies(attacker.base, []*http.Cookie{
+		{Name: pendingTokenCookie, Value: "fabricated-pending-token", Path: "/"},
+		{Name: "pending_2fa_user", Value: user.ID, Path: "/"},
+	})
+
+	rec = attacker.get("/login/second-factor")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /login/second-factor: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	sfCSRF := extractCSRFToken(t, rec.Body.String())
+
+	rec = attacker.post("/login/second-factor", url.Values{
+		"csrf_token": {sfCSRF}, "code": {codes[0]}, "use_recovery": {"1"},
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("fabricated pending cookie: status = %d, want %d, body = %s",
+			rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if msg := extractError(rec.Body.String()); msg == "" {
+		t.Errorf("expected a generic error message, body = %s", rec.Body.String())
+	}
+	sessionCookieName := a.auth.ClearSessionCookie().Name
+	for _, ck := range rec.Result().Cookies() {
+		if ck.Name == sessionCookieName {
+			t.Errorf("session cookie set for a fabricated pending cookie")
+		}
+	}
+
+	// The factor check never ran, so the victim's code was never consumed.
+	after, err := a.recovery.Remaining(t.Context(), user.ID)
+	if err != nil {
+		t.Fatalf("reading remaining recovery codes after the attempt: %v", err)
+	}
+	if after != before {
+		t.Errorf("remaining recovery codes = %d, want %d: the submitted code was checked against an account",
+			after, before)
 	}
 }
 
@@ -414,19 +511,21 @@ func TestNoSessionCookieBeforeSecondFactor(t *testing.T) {
 	}
 
 	sessionCookieName := a.auth.ClearSessionCookie().Name
-	sawPendingUser, sawPendingToken := false, false
+	sawPendingToken := false
 	for _, ck := range rec.Result().Cookies() {
 		if ck.Name == sessionCookieName {
 			t.Errorf("a session cookie must not be set before the second factor is completed, got: %v", ck)
 		}
-		if ck.Name == pendingUserCookie {
-			sawPendingUser = true
-		}
 		if ck.Name == pendingTokenCookie {
 			sawPendingToken = true
 		}
+		// The user ID must not travel to the client at all: the pending
+		// entry on the server holds it, keyed by this token.
+		if ck.Name == "pending_2fa_user" {
+			t.Errorf("the second-factor user ID must not be sent to the client, got: %v", ck)
+		}
 	}
-	if !sawPendingUser || !sawPendingToken {
-		t.Errorf("expected both pending cookies to be set, got cookies: %v", rec.Result().Cookies())
+	if !sawPendingToken {
+		t.Errorf("expected the pending token cookie to be set, got cookies: %v", rec.Result().Cookies())
 	}
 }

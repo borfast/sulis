@@ -114,12 +114,31 @@ func (a *app) clearPasskeyCookie(w http.ResponseWriter, name string) {
 	})
 }
 
+// recentAuthRequiredMessage is what the passkey register endpoint answers
+// with when the session's authentication is too old. It is a JSON 403
+// rather than the redirect the form posts get, because this endpoint is
+// called by fetch(): passkeys.js turns it into a message naming /reauth.
+const recentAuthRequiredMessage = "recent authentication required"
+
 // handlePasskeyRegisterBegin starts WebAuthn registration for the
 // authenticated user and returns the credential creation options as JSON.
+// Adding a passkey is step-up gated like every other change to a second
+// factor: it is the one that would let an attacker back in later without
+// the password at all.
 func (a *app) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	user, ok := sulis.UserFromContext(r.Context())
 	if !ok {
 		writeJSONError(w, http.StatusUnauthorized, "You must be logged in.")
+		return
+	}
+	session, ok := sulis.SessionFromContext(r.Context())
+	if !ok || session == nil {
+		writeJSONError(w, http.StatusUnauthorized, "You must be logged in.")
+		return
+	}
+	if err := a.auth.RequireRecentAuth(r.Context(), session, stepUpMaxAge); err != nil {
+		a.log.Error("passkey registration needs recent auth", "user_id", user.ID, "error", err)
+		writeJSONError(w, http.StatusForbidden, recentAuthRequiredMessage)
 		return
 	}
 
@@ -354,12 +373,15 @@ func sanitizeNext(next string) string {
 
 // stepUpReturnPath maps a step-up-gated POST path to the page a user should
 // land back on after proving their password again: the page holding the
-// form they were submitting, not the POST-only path itself.
+// form they were submitting, not the POST-only path itself. Every gated
+// POST under /security (enrolling or disabling TOTP, generating recovery
+// codes, removing a passkey) is submitted from the one /security page, so
+// they share a return path.
 func stepUpReturnPath(postPath string) string {
-	switch postPath {
-	case "/account/email":
+	switch {
+	case postPath == "/account/email":
 		return "/account/email"
-	case "/security/passkeys/delete":
+	case strings.HasPrefix(postPath, "/security/"):
 		return "/security"
 	default:
 		return "/account"

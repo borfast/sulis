@@ -115,7 +115,12 @@ async function postJSON(path, csrfToken, body) {
 		// A non-JSON response is itself the failure signal below.
 	}
 	if (!res.ok) {
-		throw new Error(data.error || "Something went wrong.");
+		const err = new Error(data.error || "Something went wrong.");
+		// The status travels with the error so a caller can tell the one
+		// failure it has a specific answer for (403, step-up required)
+		// from every other failure.
+		err.status = res.status;
+		throw err;
 	}
 	return data;
 }
@@ -140,6 +145,16 @@ async function registerPasskey(button, statusEl) {
 		);
 		window.location.href = result.redirect || "/security";
 	} catch (err) {
+		if (err.status === 403) {
+			// The server answered "recent authentication required". A real
+			// app would open an inline re-auth prompt here and retry the
+			// ceremony; this example just points at the page that does it.
+			setStatus(
+				statusEl,
+				"Recent authentication required: confirm your password at /reauth, then try again.",
+			);
+			return;
+		}
 		setStatus(statusEl, err.message || "Could not register that passkey.");
 	}
 }

@@ -320,6 +320,21 @@ func TestChangeEmailRoundtrip(t *testing.T) {
 		t.Errorf("confirmation page does not mention the new address:\n%s", rec.Body.String())
 	}
 
+	// The address that just lost the account is told the change went
+	// through, on top of the warning it got when the change was requested.
+	notices := 0
+	for _, m := range a.mail.Messages() {
+		if m.To == oldEmail && m.Subject == "Your email address was changed" {
+			notices++
+			if !strings.Contains(m.Body, newEmail) {
+				t.Errorf("the notice to the old address does not name the new one: %q", m.Body)
+			}
+		}
+	}
+	if notices != 1 {
+		t.Errorf("old address received %d change-confirmed notices, want 1", notices)
+	}
+
 	if _, err := a.users.GetUserByEmail(t.Context(), oldEmail); err == nil {
 		t.Errorf("old address should no longer resolve to a user after confirmation")
 	}

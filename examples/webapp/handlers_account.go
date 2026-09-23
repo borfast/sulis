@@ -5,23 +5,90 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/borfast/sulis"
 )
 
-// pendingUserCookie and pendingTokenCookie hold the user ID and pending
-// two-factor token between the first-factor Login call and the
-// second-factor step. Task 4 reads them; this task only sets them.
+// registerLimitPrefix and resendLimitPrefix are the rate-limiter key
+// prefixes this app adds on top of the ones sulis uses for its own flows.
+// newApp gives both an explicit budget; without one they would fall back to
+// the limiter's default budget, which is tuned for something else.
 const (
-	pendingUserCookie  = "pending_2fa_user"
-	pendingTokenCookie = "pending_2fa_token" // #nosec G101 -- a cookie name, not a credential
+	registerLimitPrefix = "register:"
+	resendLimitPrefix   = "resend:"
 )
 
-// pendingCookieTTL is how long the pending-2FA cookies live: long enough to
-// enter a code, short enough that an abandoned login attempt cannot be
-// resumed much later.
+// tooManyAttemptsMessage is what a throttled caller sees. It names no
+// budget and no remaining count: the same thing every throttled request
+// gets, whether or not the address involved exists.
+const tooManyAttemptsMessage = "Too many attempts. Try again in a moment."
+
+// pendingTokenCookie carries the pending two-factor token between the
+// first-factor Login call and the second-factor step. It is the only thing
+// the browser holds between the two: the user ID that goes with it stays on
+// the server, in app.pending2FA, because sulis.CompleteTwoFactor's doc
+// comment requires the user ID to come from the app's own state keyed by
+// this token, never from a value the client sends.
+const pendingTokenCookie = "pending_2fa_token" // #nosec G101 -- a cookie name, not a credential
+
+// pendingCookieTTL is how long the pending-2FA cookie and its server-side
+// entry live: long enough to enter a code, short enough that an abandoned
+// login attempt cannot be resumed much later. It matches sulis's own
+// TwoFactorTokenDuration default, so neither half outlives the other.
 const pendingCookieTTL = 5 * time.Minute
+
+// pendingLogin is the server-side half of one login waiting on a second
+// factor: which account passed the first factor, and until when.
+type pendingLogin struct {
+	userID  string
+	expires time.Time
+}
+
+// pendingLogins holds those halves, keyed by tokenKey of the raw pending
+// token. A real deployment would put this in a shared store (the same place
+// its sessions live) rather than in one process's memory, but the shape is
+// the same: the client carries only the token, and the user ID is looked up
+// from it on the server.
+type pendingLogins struct {
+	mu sync.Mutex
+	m  map[string]pendingLogin
+}
+
+func newPendingLogins() *pendingLogins {
+	return &pendingLogins{m: make(map[string]pendingLogin)}
+}
+
+// add records userID against rawToken for pendingCookieTTL. Expired entries
+// are swept first, so abandoned login attempts cannot pile up.
+func (p *pendingLogins) add(rawToken, userID string) {
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key, entry := range p.m {
+		if now.After(entry.expires) {
+			delete(p.m, key)
+		}
+	}
+	p.m[tokenKey(rawToken)] = pendingLogin{userID: userID, expires: now.Add(pendingCookieTTL)}
+}
+
+// take returns the user ID recorded for rawToken and removes the entry, so
+// one pending login is resolved by exactly one submission. An unknown,
+// fabricated, or expired token reports false and no user ID: there is then
+// no account for the caller to check a code against.
+func (p *pendingLogins) take(rawToken string) (string, bool) {
+	key := tokenKey(rawToken)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry, ok := p.m[key]
+	delete(p.m, key)
+	if !ok || time.Now().After(entry.expires) {
+		return "", false
+	}
+	return entry.userID, true
+}
 
 // magicNonceCookie holds the raw magic-link binding nonce, built by hand
 // like the pending-2FA cookies above: it is not a session cookie.
@@ -64,25 +131,20 @@ func (a *app) startSession(w http.ResponseWriter, token string, s *sulis.Session
 
 // handleLoginResult finishes a successful first factor. Callers must branch
 // on NeedsSecondFactor rather than assuming a session exists: when a second
-// factor is required, no session is issued yet, so this sets short-lived
-// pending cookies instead and sends the browser on to the (not yet built)
-// second-factor page.
+// factor is required, no session is issued yet, so this records the pending
+// login server-side, gives the browser only the pending token, and sends it
+// on to the second-factor page.
 func (a *app) handleLoginResult(w http.ResponseWriter, r *http.Request, res *sulis.LoginResult) {
 	if res.NeedsSecondFactor {
-		secure := strings.HasPrefix(a.baseURL, "https://")
-		expires := time.Now().Add(pendingCookieTTL)
+		a.pending2FA.add(res.PendingToken, res.User.ID)
 		// #nosec G124 -- HttpOnly and SameSite are set; Secure is computed
 		// from the -tls flag (via a.baseURL's scheme) rather than a literal
 		// so the demo still works with -tls=false, which this rule's static
 		// check for a literal `Secure: true` does not recognize.
 		http.SetCookie(w, &http.Cookie{
-			Name: pendingUserCookie, Value: res.User.ID, Path: "/",
-			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode, Expires: expires,
-		})
-		// #nosec G124 -- see the identical cookie set two lines above.
-		http.SetCookie(w, &http.Cookie{
 			Name: pendingTokenCookie, Value: res.PendingToken, Path: "/",
-			HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode, Expires: expires,
+			HttpOnly: true, Secure: strings.HasPrefix(a.baseURL, "https://"),
+			SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(pendingCookieTTL),
 		})
 		http.Redirect(w, r, "/login/second-factor", http.StatusSeeOther)
 		return
@@ -119,10 +181,23 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	email := r.FormValue("email")
 	password := r.FormValue("password")
-	user, session, token, err := a.auth.Register(r.Context(), email, password, requestInfo(r))
+
+	// sulis rate-limits the flows it owns (login, reset, magic link), but
+	// Register is not one of them: it is an unauthenticated endpoint that
+	// creates rows and hashes a password on every call, so this app has to
+	// throttle it itself. Keyed by IP, checked before any of that work
+	// happens.
+	ri := requestInfo(r)
+	if err := a.limiter.Allow(r.Context(), registerLimitPrefix+ri.IP); err != nil {
+		a.log.Error("register rate limited", "ip", ri.IP, "error", err)
+		a.rerenderRegister(w, http.StatusTooManyRequests, email, tooManyAttemptsMessage)
+		return
+	}
+
+	user, session, token, err := a.auth.Register(r.Context(), email, password, ri)
 	if err != nil {
 		a.log.Error("registering user", "email", email, "error", err)
-		a.rerenderRegister(w, r, email, registerErrorMessage(err))
+		a.rerenderRegister(w, http.StatusUnprocessableEntity, email, registerErrorMessage(err))
 		return
 	}
 
@@ -131,10 +206,10 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	a.render(w, http.StatusOK, "verify_sent", verifySentData{Email: user.Email})
 }
 
-// rerenderRegister re-shows the registration form with an error, issuing a
-// fresh CSRF token since the failed submission consumed the one the client
-// had.
-func (a *app) rerenderRegister(w http.ResponseWriter, r *http.Request, email, message string) {
+// rerenderRegister re-shows the registration form with an error under the
+// given status code, issuing a fresh CSRF token since the failed submission
+// consumed the one the client had.
+func (a *app) rerenderRegister(w http.ResponseWriter, status int, email, message string) {
 	token, cookie, err := a.auth.IssueCSRFToken()
 	if err != nil {
 		a.log.Error("issuing csrf token", "error", err)
@@ -142,7 +217,7 @@ func (a *app) rerenderRegister(w http.ResponseWriter, r *http.Request, email, me
 		return
 	}
 	http.SetCookie(w, cookie)
-	a.render(w, http.StatusUnprocessableEntity, "register", registerPageData{
+	a.render(w, status, "register", registerPageData{
 		CSRFToken: token, Error: message, Email: email,
 	})
 }
@@ -263,6 +338,19 @@ func (a *app) handleResendVerification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := r.FormValue("email")
+	csrfToken := r.FormValue(sulis.CSRFFormField)
+
+	// Resending is unauthenticated and sends mail, so it is throttled by IP
+	// before it looks anything up, for the same reason handleRegister is.
+	ri := requestInfo(r)
+	if err := a.limiter.Allow(r.Context(), resendLimitPrefix+ri.IP); err != nil {
+		a.log.Error("verification resend rate limited", "ip", ri.IP, "error", err)
+		a.render(w, http.StatusTooManyRequests, "login", loginPageData{
+			CSRFToken: csrfToken, Email: email, Error: tooManyAttemptsMessage, ShowResend: true,
+		})
+		return
+	}
+
 	user, err := a.users.GetUserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(email)))
 	if err != nil {
 		// Say the same thing whether or not the address is registered, so
@@ -663,6 +751,11 @@ func (a *app) handleChangeEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remember the current address against this token, so the confirmation
+	// step can tell it the change went through. By then ConfirmEmailChange
+	// has already replaced it in the database.
+	a.emailChanges.add(tok, user.Email)
+
 	link := a.baseURL + "/email/confirm?token=" + tok
 	body := "Click the link below to confirm your new email address:\n\n" + link + "\n"
 	a.mail.Send(newEmail, "Confirm your new email address", body)
@@ -678,12 +771,27 @@ func (a *app) handleChangeEmail(w http.ResponseWriter, r *http.Request) {
 // from the confirmation email can call it, exactly like /verify.
 func (a *app) handleEmailConfirm(w http.ResponseWriter, r *http.Request) {
 	tok := r.URL.Query().Get("token")
+	// Taken before the call below, and taken either way: this token is
+	// single-use, so whatever happens next, the entry has served its
+	// purpose and should not be left behind.
+	oldAddr, hadOldAddr := a.emailChanges.take(tok)
+
 	user, err := a.auth.ConfirmEmailChange(r.Context(), tok)
 	if err != nil {
 		a.log.Error("confirming email change", "error", err)
 		a.render(w, http.StatusBadRequest, "error",
 			"That confirmation link is invalid, expired, or the address is no longer available.")
 		return
+	}
+
+	// Tell the address that just lost the account. The notice sent when the
+	// change was requested warned it was coming; this one says it happened,
+	// and it is the last message this app can send to an address an
+	// attacker who got this far does not control.
+	if hadOldAddr {
+		a.mail.Send(oldAddr, "Your email address was changed",
+			"This account's email address is now "+user.Email+
+				". If this wasn't you, you no longer control the account: contact support.\n")
 	}
 
 	// ConfirmEmailChange revokes every session, so clear this browser's

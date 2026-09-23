@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -221,6 +222,34 @@ func TestRegisterVerifyLoginRoundtrip(t *testing.T) {
 	rec = c.get("/account")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("account (post-login): status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRegisterIsRateLimitedPerIP hammers /register from one address and
+// checks the app stops doing the work rather than creating an account per
+// request. sulis throttles the flows it owns; registration is not one of
+// them, so this is the app's own limiter answering.
+func TestRegisterIsRateLimitedPerIP(t *testing.T) {
+	a := newTestApp(t)
+	c := newTestClient(t, a)
+
+	// The budget is 5 per minute, so one more attempt than that is enough
+	// to see the limit; a few extra make the test independent of the exact
+	// number, since every request here comes from the same test IP.
+	throttled := false
+	for i := 0; i < 8; i++ {
+		rec := registerUser(t, c, fmt.Sprintf("flood-%d@example.com", i), testPassword)
+		if rec.Code != http.StatusTooManyRequests {
+			continue
+		}
+		throttled = true
+		if msg := extractError(rec.Body.String()); msg != tooManyAttemptsMessage {
+			t.Errorf("throttled message = %q, want %q", msg, tooManyAttemptsMessage)
+		}
+		break
+	}
+	if !throttled {
+		t.Errorf("expected a 429 from /register after repeated attempts from one IP")
 	}
 }
 

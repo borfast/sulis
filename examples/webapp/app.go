@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -10,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/passkey"
@@ -43,8 +46,9 @@ var staticFiles = func() fs.FS {
 
 // app holds every dependency the HTTP handlers need: the sulis service, its
 // three second-factor services, direct access to the user store, the
-// database handle (for cleanup and shutdown), parsed templates, a logger,
-// and the base URL used to build absolute links.
+// database handle (for cleanup and shutdown), the two pieces of server-side
+// state this demo keeps of its own, parsed templates, a logger, and the
+// base URL used to build absolute links.
 type app struct {
 	auth     *sulis.Sulis
 	totp     *totp.Service
@@ -53,9 +57,16 @@ type app struct {
 	users    *sqlite.UserStore
 	db       *sqlite.DB
 	mail     *outbox
-	tmpl     *template.Template
-	log      *slog.Logger
-	baseURL  string // http(s)://localhost:PORT, from -addr and -tls
+	limiter  *sulis.MemoryLimiter
+	// pending2FA maps a pending-login token to the user it belongs to, so
+	// the second-factor step never takes that user ID from the client.
+	pending2FA *pendingLogins
+	// emailChanges remembers which address to notify once a staged email
+	// change is confirmed.
+	emailChanges *pendingEmailChanges
+	tmpl         *template.Template
+	log          *slog.Logger
+	baseURL      string // http(s)://localhost:PORT, from -addr and -tls
 }
 
 // secondFactors answers sulis.SecondFactorChecker by consulting the TOTP and
@@ -111,11 +122,17 @@ func newApp(ctx context.Context, dsn, baseURL string, logger *slog.Logger) (*app
 		return nil, fmt.Errorf("creating sulis service: %w", err)
 	}
 
-	// sulis.MemoryLimiter satisfies totp.Limiter and recovery.Limiter too
-	// (they are structurally identical), so one instance can rate-limit
-	// TOTP code checks the same way sulis.New's own default limiter guards
-	// login.
-	limiter := sulis.NewMemoryLimiter()
+	// One limiter, shared by everything sulis.New's own default limiter
+	// does not already cover. sulis.MemoryLimiter satisfies totp.Limiter
+	// and recovery.Limiter too (all three interfaces are structurally
+	// identical), so this single instance throttles TOTP code checks,
+	// recovery code checks, and the app's own register and resend
+	// endpoints, which call Allow directly with the prefixes budgeted
+	// below.
+	limiter := sulis.NewMemoryLimiter(
+		sulis.WithBudget(registerLimitPrefix, sulis.Budget{Burst: 5, Interval: time.Minute}),
+		sulis.WithBudget(resendLimitPrefix, sulis.Budget{Burst: 5, Interval: time.Minute}),
+	)
 
 	// WithoutSecretEncryption: this demo has no key management story, and
 	// NewService requires an explicit choice either way. A real deployment
@@ -131,13 +148,13 @@ func newApp(ctx context.Context, dsn, baseURL string, logger *slog.Logger) (*app
 		RPDisplayName: "Sulis Example",
 		RPID:          "localhost",
 		RPOrigins:     []string{baseURL},
-	})
+	}, passkey.WithEventSink(newPasskeySlogSink(logger)))
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("creating passkey service: %w", err)
 	}
 
-	recoverySvc, err := recovery.NewService(db.RecoveryStore())
+	recoverySvc, err := recovery.NewService(db.RecoveryStore(), recovery.WithLimiter(limiter))
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("creating recovery service: %w", err)
@@ -150,16 +167,19 @@ func newApp(ctx context.Context, dsn, baseURL string, logger *slog.Logger) (*app
 	}
 
 	return &app{
-		auth:     auth,
-		totp:     totpSvc,
-		passkeys: passkeySvc,
-		recovery: recoverySvc,
-		users:    db.UserStore(),
-		db:       db,
-		mail:     &outbox{},
-		tmpl:     tmpl,
-		log:      logger,
-		baseURL:  baseURL,
+		auth:         auth,
+		totp:         totpSvc,
+		passkeys:     passkeySvc,
+		recovery:     recoverySvc,
+		users:        db.UserStore(),
+		db:           db,
+		mail:         &outbox{},
+		limiter:      limiter,
+		pending2FA:   newPendingLogins(),
+		emailChanges: newPendingEmailChanges(),
+		tmpl:         tmpl,
+		log:          logger,
+		baseURL:      baseURL,
 	}, nil
 }
 
@@ -259,6 +279,15 @@ func (a *app) render(w http.ResponseWriter, status int, page string, data any) {
 	if err := t.ExecuteTemplate(w, "base", data); err != nil {
 		a.log.Error("rendering page", "page", page, "error", err)
 	}
+}
+
+// tokenKey turns a raw token into the key the two server-side maps below
+// store it under: the SHA-256 hex digest, so a memory dump or a stray log
+// of those maps holds no usable token. Both maps are looked up by a value
+// the client sends back, which is exactly the shape a hash is for.
+func tokenKey(rawToken string) string {
+	sum := sha256.Sum256([]byte(rawToken))
+	return hex.EncodeToString(sum[:])
 }
 
 // requestInfo builds a sulis.RequestInfo from the incoming request, for the
