@@ -1,0 +1,22 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{block "title" .}}Sulis Example{{end}}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+<h1>Sulis Example</h1>
+<p>A runnable demo of the sulis authentication library.</p>
+</header>
+<main>
+{{block "content" .}}{{end}}
+</main>
+<footer>
+{{block "footer" .}}{{end}}
+</footer>
+</body>
+</html>
+{{end}}
