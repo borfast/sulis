@@ -337,3 +337,39 @@ func TestChangeEmailRoundtrip(t *testing.T) {
 		t.Errorf("account after email change: status = %d, want redirect", rec.Code)
 	}
 }
+
+// TestInvalidEmailOnForgotAndMagicRendersForm: a malformed or empty email
+// must re-render the form with a message, never a 500.
+func TestInvalidEmailOnForgotAndMagicRendersForm(t *testing.T) {
+	a := newTestApp(t)
+
+	assertFriendlyForm := func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
+		t.Helper()
+		if rec.Code == http.StatusInternalServerError {
+			t.Fatalf("%s: got a 500, want the form re-rendered: %s", label, rec.Body.String())
+		}
+		if msg := extractError(rec.Body.String()); msg == "" {
+			t.Errorf("%s: expected an inline error message, body = %s", label, rec.Body.String())
+		}
+	}
+
+	for _, email := range []string{"not-an-email", ""} {
+		c := newTestClient(t, a)
+
+		rec := c.get("/forgot")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /forgot: status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		csrf := extractCSRFToken(t, rec.Body.String())
+		rec = c.post("/forgot", url.Values{"csrf_token": {csrf}, "email": {email}})
+		assertFriendlyForm(t, rec, "POST /forgot email="+email)
+
+		rec = c.get("/magic")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /magic: status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		csrf = extractCSRFToken(t, rec.Body.String())
+		rec = c.post("/magic", url.Values{"csrf_token": {csrf}, "email": {email}})
+		assertFriendlyForm(t, rec, "POST /magic email="+email)
+	}
+}

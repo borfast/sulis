@@ -404,6 +404,10 @@ func (a *app) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := r.FormValue("email")
+	// Echoed straight back, like handleResetPassword does: the double-submit
+	// cookie this token pairs with is still on the browser and still valid.
+	csrfToken := r.FormValue(sulis.CSRFFormField)
+
 	tok, err := a.auth.CreatePasswordResetToken(r.Context(), email, requestInfo(r))
 	switch {
 	case err == nil:
@@ -414,6 +418,11 @@ func (a *app) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		}
 	case errors.Is(err, sulis.ErrUserNotFound), errors.Is(err, sulis.ErrRateLimited):
 		// Same response as success: see the doc comment above.
+	case errors.Is(err, sulis.ErrInvalidEmail):
+		a.render(w, http.StatusUnprocessableEntity, "forgot", forgotPageData{
+			CSRFToken: csrfToken, Error: "Enter a valid email address.",
+		})
+		return
 	default:
 		a.log.Error("creating password reset token", "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Something went wrong. Try again.")
@@ -510,6 +519,10 @@ func (a *app) handleMagicRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := r.FormValue("email")
+	// Echoed straight back, like handleResetPassword does: the double-submit
+	// cookie this token pairs with is still on the browser and still valid.
+	csrfToken := r.FormValue(sulis.CSRFFormField)
+
 	tok, nonce, err := a.auth.CreateMagicLinkToken(r.Context(), email, requestInfo(r))
 	switch {
 	case err == nil:
@@ -527,6 +540,11 @@ func (a *app) handleMagicRequest(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, sulis.ErrRateLimited):
 		// Same response as success: don't reveal that this address is
 		// being throttled.
+	case errors.Is(err, sulis.ErrInvalidEmail):
+		a.render(w, http.StatusUnprocessableEntity, "magic", magicPageData{
+			CSRFToken: csrfToken, Error: "Enter a valid email address.",
+		})
+		return
 	default:
 		a.log.Error("creating magic link token", "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Something went wrong. Try again.")
