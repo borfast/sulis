@@ -181,6 +181,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /dev/mailbox", a.handleMailbox)
 	mux.Handle("GET /account", a.requireAuth(a.handleAccount))
 	mux.Handle("GET /account/email", a.requireAuth(a.handleChangeEmailForm))
+	mux.Handle("GET /security", a.requireAuth(a.handleSecurity))
+	mux.HandleFunc("GET /login/second-factor", a.handleSecondFactorForm)
 
 	// postMux carries every state-changing route. RequireSameOrigin and
 	// RequireCSRFToken both only act on unsafe methods (POST here), so
@@ -196,6 +198,11 @@ func (a *app) routes() http.Handler {
 	postMux.Handle("POST /logout", a.requireAuth(a.handleLogout))
 	postMux.Handle("POST /sessions/revoke", a.requireAuth(a.handleRevokeSession))
 	postMux.Handle("POST /account/email", a.requireAuth(a.handleChangeEmail))
+	postMux.Handle("POST /security/totp/enroll", a.requireAuth(a.handleTOTPEnroll))
+	postMux.Handle("POST /security/totp/confirm", a.requireAuth(a.handleTOTPConfirm))
+	postMux.Handle("POST /security/totp/disable", a.requireAuth(a.handleTOTPDisable))
+	postMux.Handle("POST /security/recovery/generate", a.requireAuth(a.handleRecoveryGenerate))
+	postMux.HandleFunc("POST /login/second-factor", a.handleSecondFactor)
 	mux.Handle("POST /", a.auth.RequireSameOrigin([]string{a.baseURL})(a.auth.RequireCSRFToken(postMux)))
 
 	return mux

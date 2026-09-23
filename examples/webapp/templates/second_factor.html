@@ -1,0 +1,17 @@
+{{define "title"}}Verify your identity{{end}}
+
+{{define "content"}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/login/second-factor">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Code<br><input type="text" name="code" required autofocus></label><br>
+<label><input type="checkbox" name="use_recovery" value="1" {{if .UseRecovery}}checked{{end}}>
+Use a recovery code instead</label><br>
+<button type="submit">Verify</button>
+</form>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: totp.Service.Validate, recovery.Service.Consume,
+sulis.CompleteTwoFactor.</p>
+{{end}}

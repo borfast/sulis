@@ -1,0 +1,33 @@
+{{define "title"}}Two-factor security{{end}}
+
+{{define "content"}}
+<h2>Authenticator app</h2>
+{{if .TOTPActive}}
+<p>An authenticator app is enrolled as your second factor.</p>
+<form method="post" action="/security/totp/disable">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<button type="submit">Disable authenticator app</button>
+</form>
+{{else}}
+<p>No authenticator app is enrolled.</p>
+<form method="post" action="/security/totp/enroll">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<button type="submit">Enable authenticator app</button>
+</form>
+{{end}}
+
+<h2>Recovery codes</h2>
+<p>{{.RecoveryRemaining}} recovery codes remaining.</p>
+<form method="post" action="/security/recovery/generate">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<button type="submit">Generate new recovery codes</button>
+</form>
+
+<p><a href="/account">Back to account</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: totp.Service.Enroll, totp.Service.Unenroll,
+recovery.Service.Generate, recovery.Service.Remaining, recovery.Service.Disable,
+sulis.IssueCSRFToken.</p>
+{{end}}

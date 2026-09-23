@@ -1,0 +1,23 @@
+{{define "title"}}Enable authenticator app{{end}}
+
+{{define "content"}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+{{if .Secret}}
+<p>Add this secret to your authenticator app (or use the otpauth URI below),
+then enter the 6-digit code it shows to confirm.</p>
+<p>Secret: <code>{{.Secret}}</code></p>
+<p>otpauth URI: <code>{{.URI}}</code></p>
+{{else}}
+<p>Enter the code your authenticator app is showing now.</p>
+{{end}}
+<form method="post" action="/security/totp/confirm">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Code<br><input type="text" name="code" required></label><br>
+<button type="submit">Confirm</button>
+</form>
+<p><a href="/security">Back to security</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: totp.Service.Enroll, totp.Service.ConfirmEnrollment.</p>
+{{end}}
