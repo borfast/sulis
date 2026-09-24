@@ -1,0 +1,36 @@
+{{define "title"}}Log in{{end}}
+
+{{define "content"}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/login">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Email<br><input type="email" id="login-email" name="email" value="{{.Email}}" required></label><br>
+<label>Password<br><input type="password" name="password" required></label><br>
+<button type="submit">Log in</button>
+</form>
+{{if .ShowResend}}
+<form method="post" action="/verify/resend">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<input type="hidden" name="email" value="{{.Email}}">
+<button type="submit">Resend verification email</button>
+</form>
+{{end}}
+
+<h2>Sign in with a passkey</h2>
+<p>Uses the email address above.
+<button id="passkey-login-btn" type="button" data-csrf="{{.CSRFToken}}">Sign in with a passkey</button></p>
+<p>Or skip the email address entirely:
+<button id="passkey-discoverable-btn" type="button" data-csrf="{{.CSRFToken}}">Sign in without a username</button></p>
+<p id="passkey-login-status" role="status"></p>
+
+<p>Need an account? <a href="/register">Register</a>.</p>
+<script src="/static/passkeys.js"></script>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.Login, sulis.IssueCSRFToken,
+sulis.MemoryLimiter.Allow and sulis.CreateEmailVerificationToken (when
+resending), passkey.Service.BeginLogin,
+passkey.Service.FinishLoginResponse, passkey.Service.BeginDiscoverableLogin,
+passkey.Service.FinishDiscoverableLoginResponse, sulis.IssueSessionUnchecked.</p>
+{{end}}

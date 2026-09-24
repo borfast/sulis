@@ -104,6 +104,20 @@ jobs:
         working-directory: store/sql
         run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
 
+      # examples/webapp is a separate module too, for the same reason:
+      # go-webauthn and the pure-Go SQLite driver it pulls in have no
+      # business in the root module's dependency graph just because the
+      # runnable example uses them.
+      - name: build examples/webapp
+        working-directory: examples/webapp
+        run: go build ./...
+      - name: vet examples/webapp
+        working-directory: examples/webapp
+        run: go vet ./...
+      - name: test examples/webapp
+        working-directory: examples/webapp
+        run: go test -race -covermode=atomic -coverprofile=coverage.out -count=1 ./...
+
   postgres:
     name: store/sql conformance (postgres)
     runs-on: ubuntu-latest
@@ -215,6 +229,19 @@ jobs:
 
       - name: govulncheck (store/sql)
         working-directory: store/sql
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      # Same three tools, same pins, against the examples/webapp module.
+      - name: staticcheck (examples/webapp)
+        working-directory: examples/webapp
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2 ./...
+
+      - name: gosec (examples/webapp)
+        working-directory: examples/webapp
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
+
+      - name: govulncheck (examples/webapp)
+        working-directory: examples/webapp
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   fuzz:

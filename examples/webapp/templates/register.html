@@ -1,0 +1,18 @@
+{{define "title"}}Register{{end}}
+
+{{define "content"}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/register">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Email<br><input type="email" name="email" value="{{.Email}}" required></label><br>
+<label>Password<br><input type="password" name="password" required></label><br>
+<button type="submit">Register</button>
+</form>
+<p>Already have an account? <a href="/login">Log in</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.MemoryLimiter.Allow (throttles
+this form by IP), sulis.Register, sulis.IssueCSRFToken,
+sulis.CreateEmailVerificationToken.</p>
+{{end}}

@@ -1,0 +1,21 @@
+{{define "title"}}Check your email{{end}}
+
+{{define "content"}}
+{{if .Verified}}
+<p>Your email address {{.Email}} is now verified. You can
+<a href="/login">log in</a>.</p>
+{{else}}
+<p>We sent a verification link to {{.Email}}. Open
+<a href="/dev/mailbox">the dev mailbox</a> to find it.</p>
+{{end}}
+{{end}}
+
+{{define "footer"}}
+{{if .Verified}}
+<p>Library calls used on this page: sulis.VerifyEmail.</p>
+{{else}}
+<p>Library calls used on this page: sulis.Register (or
+sulis.CreateEmailVerificationToken when resending), which sent the link
+shown in the dev mailbox.</p>
+{{end}}
+{{end}}

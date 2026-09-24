@@ -1,0 +1,39 @@
+{{define "title"}}Your account{{end}}
+
+{{define "content"}}
+<p>Signed in as {{.Email}}.</p>
+{{if .Verified}}
+<p>Email verified.</p>
+{{else}}
+<p>Email not verified.</p>
+{{end}}
+
+<form method="post" action="/logout">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<button type="submit">Log out</button>
+</form>
+
+<h2>Sessions</h2>
+<ul>
+{{$root := .}}
+{{range .Sessions}}
+<li>
+{{.Method}} from {{.IP}}, last seen {{.LastSeenAt}}
+{{if eq .ID $root.CurrentSessionID}}
+(this session)
+{{else}}
+<form method="post" action="/sessions/revoke">
+<input type="hidden" name="csrf_token" value="{{$root.CSRFToken}}">
+<input type="hidden" name="session_id" value="{{.ID}}">
+<button type="submit">Revoke</button>
+</form>
+{{end}}
+</li>
+{{end}}
+</ul>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.ListUserSessions, sulis.RevokeSession,
+sulis.IssueCSRFToken.</p>
+{{end}}

@@ -1,0 +1,20 @@
+{{define "title"}}Forgot your password{{end}}
+
+{{define "content"}}
+{{if .Sent}}
+<p>If an account exists for that address, we've sent a password reset
+link. Open <a href="/dev/mailbox">the dev mailbox</a> to find it.</p>
+{{else}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/forgot">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<label>Email<br><input type="email" name="email" required></label><br>
+<button type="submit">Send reset link</button>
+</form>
+{{end}}
+<p><a href="/login">Back to log in</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.CreatePasswordResetToken.</p>
+{{end}}

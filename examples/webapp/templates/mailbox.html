@@ -1,0 +1,23 @@
+{{define "title"}}Dev mailbox{{end}}
+
+{{define "content"}}
+<p>This page lists every message the demo has "sent", in place of a real
+mail transport.</p>
+{{if not .Messages}}
+<p>No messages yet.</p>
+{{end}}
+<ul>
+{{range .Messages}}
+<li>
+<strong>{{.Subject}}</strong> to {{.To}} at {{.SentAt}}<br>
+<pre>{{.Body}}</pre>
+{{if .Link}}<p><a href="{{.Link}}">{{.Link}}</a></p>{{end}}
+</li>
+{{end}}
+</ul>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: none. It only reads the demo's own
+outbox, not sulis.</p>
+{{end}}

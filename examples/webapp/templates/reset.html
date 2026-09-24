@@ -1,0 +1,21 @@
+{{define "title"}}Reset your password{{end}}
+
+{{define "content"}}
+{{if .Done}}
+<p>Your password has been changed. Every other session on this account
+has been signed out. <a href="/login">Log in</a> with your new
+password.</p>
+{{else}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/reset">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<label>New password<br><input type="password" name="password" required></label><br>
+<button type="submit">Reset password</button>
+</form>
+{{end}}
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.ResetPassword.</p>
+{{end}}

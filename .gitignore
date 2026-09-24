@@ -11,6 +11,10 @@
 # Test binary, built with `go test -c`
 *.test
 
+# The example app's own build output and its local database
+examples/webapp/webapp
+examples/webapp/*.db
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*

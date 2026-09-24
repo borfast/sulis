@@ -1,0 +1,17 @@
+{{define "title"}}Your recovery codes{{end}}
+
+{{define "content"}}
+<p>Save these recovery codes somewhere safe. Each one can be used once to
+sign in if you lose access to your authenticator app. They will not be shown
+again.</p>
+<ul>
+{{range .Codes}}
+<li><code>{{.}}</code></li>
+{{end}}
+</ul>
+<p><a href="/security">Back to security</a>.</p>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: recovery.Service.Generate.</p>
+{{end}}

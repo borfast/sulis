@@ -1,0 +1,16 @@
+{{define "title"}}Confirm your password{{end}}
+
+{{define "content"}}
+<p>For your security, confirm your password before continuing.</p>
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+<form method="post" action="/reauth">
+<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+<input type="hidden" name="next" value="{{.Next}}">
+<label>Password<br><input type="password" name="password" required autofocus></label><br>
+<button type="submit">Confirm</button>
+</form>
+{{end}}
+
+{{define "footer"}}
+<p>Library calls used on this page: sulis.RequireRecentAuth, sulis.ReAuthenticate.</p>
+{{end}}
