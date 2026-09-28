@@ -7,6 +7,8 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-28
+
 ### BREAKING CHANGES
 
 - `recovery.NewService` now returns `(*Service, error)` (was `*Service`). It
@@ -83,6 +85,12 @@ does and does not promise.
   1.26.6). CI already built and tested against 1.27 through setup-go's
   `stable`, which resolves to the newest release on the day it runs; this
   makes the requirement explicit rather than incidental.
+
+- `storetest` builds session timestamps truncated to microseconds. It used to
+  compare a stored value against an untruncated `time.Now()`, which no store
+  on a native SQL timestamp column could pass: PostgreSQL `timestamptz` keeps
+  microseconds. No store interface promises finer precision. Stores that keep
+  nanoseconds, such as `store/sql`, still pass unchanged.
 
 ## [0.1.0] - 2026-08-20
 
