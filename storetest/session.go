@@ -517,7 +517,9 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 // newSession builds a live session for userID with a unique ID and token hash.
 func newSession(userID string) *sulis.Session {
-	now := time.Now()
+	// SQL timestamps top out at microsecond precision, so supply a value
+	// every dialect can store and return unchanged.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	return &sulis.Session{
 		ID:              uniqueID("session"),
 		UserID:          userID,
