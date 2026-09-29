@@ -11,6 +11,7 @@ import (
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/passkey"
+	"github.com/borfast/sulis/totp"
 )
 
 // maxCeremonyBodyBytes caps how much of a WebAuthn ceremony response body
@@ -338,7 +339,13 @@ func (a *app) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	credentialID := r.FormValue("credential_id")
-	if err := a.passkeys.DeleteCredential(r.Context(), user.ID, credentialID, passkey.DeleteOptions{}); err != nil {
+	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID)
+	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
+		a.log.Error("checking TOTP before passkey deletion", "user_id", user.ID, "error", totpErr)
+		a.render(w, http.StatusInternalServerError, "error", "Could not remove that passkey.")
+		return
+	}
+	if err := a.passkeys.DeleteCredential(r.Context(), user.ID, credentialID, passkey.DeleteOptions{AllowLast: totpErr == nil}); err != nil {
 		a.log.Error("deleting passkey", "user_id", user.ID, "error", err)
 		message := "Could not remove that passkey."
 		if errors.Is(err, passkey.ErrLastCredential) {

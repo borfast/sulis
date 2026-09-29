@@ -9,15 +9,20 @@ names, in its footer, which library calls it just made.
     cd examples/webapp
     go run .
 
-The server listens on `:8443` over HTTPS with a self-signed certificate
+The server listens on `localhost:8443` over HTTPS with a self-signed certificate
 generated at startup. Your browser will warn about the certificate; accept
 it to continue.
 
 ## Flags
 
-- `-addr`: address to listen on (default `:8443`)
+- `-addr`: address to listen on (default `localhost:8443`)
 - `-db`: path to the SQLite database file (default `webapp.db`)
 - `-tls`: serve over TLS with a self-signed certificate (default `true`)
+
+The browser URL is always `localhost` with the port from `-addr`, matching
+the passkey relying party ID. You can also bind to an explicit IPv4 or
+bracketed IPv6 address. Binding to `:8443` or another non-loopback address
+exposes the unauthenticated dev mailbox to other devices.
 
 ## Why `-tls` defaults to true
 

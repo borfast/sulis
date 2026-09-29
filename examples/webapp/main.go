@@ -10,9 +10,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.com/borfast/sulis/store/sql/sqlite"
@@ -21,20 +23,21 @@ import (
 // cleanupInterval is how often the background loop removes expired sessions
 // and tokens.
 const cleanupInterval = 10 * time.Minute
+const defaultListenAddr = "localhost:8443"
 
 func main() {
-	addr := flag.String("addr", ":8443", "address to listen on")
+	addr := flag.String("addr", defaultListenAddr, "address to listen on")
 	dbPath := flag.String("db", "webapp.db", "path to the SQLite database file")
 	useTLS := flag.Bool("tls", true, "serve over TLS with a self-signed certificate (Safari requires this for secure cookies)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	scheme := "http"
-	if *useTLS {
-		scheme = "https"
+	baseURL, err := browserBaseURL(*addr, *useTLS)
+	if err != nil {
+		logger.Error("invalid listen address", "error", err)
+		os.Exit(1)
 	}
-	baseURL := fmt.Sprintf("%s://localhost%s", scheme, *addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -87,6 +90,22 @@ func main() {
 			logger.Error("shutdown error", "error", err)
 		}
 	}
+}
+
+func browserBaseURL(addr string, useTLS bool) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("-addr %q: %w", addr, err)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return "", fmt.Errorf("-addr %q: port must be an integer from 1 to 65535", addr)
+	}
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://localhost:%d", scheme, portNumber), nil
 }
 
 // cleanupLoop periodically removes expired sessions and tokens. It stops as
