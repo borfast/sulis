@@ -55,9 +55,12 @@ make a follow-up “release metadata” commit after CI passes.
 
 - [ ] Choose the root and SQL versions independently using semantic
   versioning. For the first stable release they are both `v1.0.0`.
-- [ ] Confirm the independent security review is complete, its report is in
-  the repository, and every finding has a recorded disposition. Blocking
-  findings must be fixed and reviewed before continuing.
+- [ ] For `v1.0.0` and later, confirm the independent security review is
+  complete, its report is in the repository, and every finding has a recorded
+  disposition. Blocking findings must be fixed and reviewed before continuing.
+  `docs/security-review-scope.md` scopes that review as a v1 gate, so a `v0.x`
+  release records "not required before v1" as its external-review disposition
+  and links no review.
 - [ ] Rename the relevant `CHANGELOG.md` `[Unreleased]` section to
   `[X.Y.Z] - YYYY-MM-DD`, then open a new empty `[Unreleased]` section above
   it. Confirm every breaking change and migration step is present.
