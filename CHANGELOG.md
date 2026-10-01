@@ -7,6 +7,16 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-01
+
+### Security
+
+- Updated `github.com/go-webauthn/webauthn` to v0.18.2 (and its
+  `github.com/fxamacker/cbor/v2` dependency to v2.9.4). The update validates
+  the session challenge when finishing a ceremony, requires authorization
+  before initializing user verification, and tightens TPM, SafetyNet, and
+  FIDO U2F attestation checks.
+
 ## [0.2.0] - 2026-09-28
 
 ### BREAKING CHANGES

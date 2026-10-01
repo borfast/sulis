@@ -3,8 +3,8 @@ module github.com/borfast/sulis/examples/webapp
 go 1.27.0
 
 require (
-	github.com/borfast/sulis v0.2.0
-	github.com/borfast/sulis/store/sql v0.2.0
+	github.com/borfast/sulis v0.2.1
+	github.com/borfast/sulis/store/sql v0.2.1
 )
 
 require (
