@@ -1,7 +1,8 @@
 # Independent security review scope
 
-This document briefs an independent reviewer before the v1 review of
-`sulis`. It describes the security boundaries the library claims, points to
+This document briefs an independent reviewer of `sulis`, should one be
+engaged. No release requires such a review; this brief is kept ready for when
+one happens. It describes the security boundaries the library claims, points to
 the code and tests that implement those claims, and provides the record for
 findings and their dispositions. The reviewer should test the claims against
 the implementation and against realistic consumer wiring; this is a review

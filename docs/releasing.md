@@ -55,9 +55,6 @@ make a follow-up “release metadata” commit after CI passes.
 
 - [ ] Choose the root and SQL versions independently using semantic
   versioning. For the first stable release they are both `v1.0.0`.
-- [ ] Confirm the independent security review is complete, its report is in
-  the repository, and every finding has a recorded disposition. Blocking
-  findings must be fixed and reviewed before continuing.
 - [ ] Rename the relevant `CHANGELOG.md` `[Unreleased]` section to
   `[X.Y.Z] - YYYY-MM-DD`, then open a new empty `[Unreleased]` section above
   it. Confirm every breaking change and migration step is present.
@@ -107,8 +104,8 @@ make a follow-up “release metadata” commit after CI passes.
   Run the PostgreSQL conformance suite against a real supported PostgreSQL
   instance as CI does; a skipped local PostgreSQL test is not evidence.
 - [ ] Obtain the normal review and required CI approvals on the release pull
-  request. Record the API-diff result, external-review disposition, and local
-  gate in the pull-request description.
+  request. Record the API-diff result and the local gate in the pull-request
+  description.
 
 The API-diff tool and its version must be pinned when the compatibility-check
 backlog item is implemented. Until then, use
@@ -198,7 +195,7 @@ fix it on `main` through a pull request and publish a patch version.
 - [ ] GitHub displays both tag signatures as verified and both tags resolve to
   `$release_commit`.
 - [ ] Create release records for both module tags, using the corresponding
-  changelog text and linking to the external review and CI run. Mark a v1
+  changelog text and linking to the CI run. Mark a v1
   release as a stable release, not a prerelease.
 - [ ] Ask the public Go proxy for both versions from outside the repository:
 
@@ -217,6 +214,6 @@ fix it on `main` through a pull request and publish a patch version.
   changes under the new changelog `[Unreleased]` section.
 
 Keep the release commit, tag names, CI URL, API-diff output, dependency review,
-external-review disposition, and tag-signature verification together in the
+and tag-signature verification together in the
 release record. That evidence is what lets a later audit establish exactly
 what was reviewed, tested, signed, and published.
