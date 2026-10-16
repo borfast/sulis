@@ -7,6 +7,17 @@ does and does not promise.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- `passkey.Store.RenameCredential` now takes the owner's user ID:
+  `RenameCredential(ctx, userID, id, name)` (was `(ctx, id, name)`). It returns
+  `ErrPasskeyNotFound` when `id` does not name a credential owned by `userID`.
+  Before, a rename endpoint that took `id` from the request let any signed-in
+  user rename any other user's passkey. `memstore`, `store/sql/sqlite` and
+  `store/sql/postgres` scope the update to both columns, and `storetest` checks
+  the cross-user case. Migration: pass the signed-in user's ID, and add
+  `AND user_id = ?` to a custom store's update.
+
 ## [0.2.1] - 2026-10-01
 
 ### Security

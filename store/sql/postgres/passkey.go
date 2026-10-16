@@ -217,13 +217,13 @@ func (s *PasskeyStore) DeleteCredentialsByUserID(ctx context.Context, userID str
 	return nil
 }
 
-// RenameCredential sets a credential's display name — caller-supplied metadata
-// passkey itself never generates or validates. Zero rows affected is
-// passkey.ErrPasskeyNotFound.
-func (s *PasskeyStore) RenameCredential(ctx context.Context, id, name string) error {
-	const q = `UPDATE passkey_credentials SET name = $1 WHERE id = $2`
+// RenameCredential sets a credential's display name, caller-supplied metadata
+// passkey itself never generates or validates. user_id is in the predicate, so
+// another user's credential matches no row: zero rows is passkey.ErrPasskeyNotFound.
+func (s *PasskeyStore) RenameCredential(ctx context.Context, userID, id, name string) error {
+	const q = `UPDATE passkey_credentials SET name = $1 WHERE id = $2 AND user_id = $3`
 
-	res, err := s.db.ExecContext(ctx, q, name, id)
+	res, err := s.db.ExecContext(ctx, q, name, id, userID)
 	if err != nil {
 		return fmt.Errorf("sulis/postgres: renaming a passkey credential: %w", err)
 	}

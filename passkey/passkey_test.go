@@ -623,21 +623,18 @@ func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) 
 	return nil
 }
 
-// RenameCredential looks id up across every user's credential list (fakeStore
-// has no separate by-ID index keyed by Credential.ID) and sets Name, or
-// returns ErrPasskeyNotFound if no credential has that ID — matching the
-// contract documented on Store.RenameCredential.
-func (f *fakeStore) RenameCredential(_ context.Context, id, name string) error {
+// RenameCredential looks id up in userID's own credential list only and sets
+// Name, or returns ErrPasskeyNotFound if userID has no credential with that
+// ID, matching the contract documented on Store.RenameCredential.
+func (f *fakeStore) RenameCredential(_ context.Context, userID, id, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	for userID, creds := range f.credentialsByUser {
-		for i := range creds {
-			if creds[i].ID == id {
-				creds[i].Name = name
-				f.credentialsByUser[userID] = creds
-				return nil
-			}
+	creds := f.credentialsByUser[userID]
+	for i := range creds {
+		if creds[i].ID == id {
+			creds[i].Name = name
+			return nil
 		}
 	}
 	return ErrPasskeyNotFound
@@ -1805,8 +1802,9 @@ func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
 
 // TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound
 // exercises the Store.RenameCredential contract documented on the interface:
-// a caller-supplied Name is set on success, and an unknown id is rejected
-// with ErrPasskeyNotFound rather than silently succeeding or panicking.
+// a caller-supplied Name is set on success, and an unknown id or another
+// user's credential is rejected with ErrPasskeyNotFound rather than silently
+// succeeding or panicking.
 func TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -1814,16 +1812,24 @@ func TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound(t *test
 		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
 	}}
 
-	if err := store.RenameCredential(context.Background(), "cred-1", "My YubiKey"); err != nil {
+	if err := store.RenameCredential(context.Background(), "user-1", "cred-1", "My YubiKey"); err != nil {
 		t.Fatalf("RenameCredential() error = %v, want nil", err)
 	}
 	if got := store.credentialsByUser["user-1"][0].Name; got != "My YubiKey" {
 		t.Errorf("Name = %q, want %q", got, "My YubiKey")
 	}
 
-	err := store.RenameCredential(context.Background(), "missing-id", "x")
+	err := store.RenameCredential(context.Background(), "user-1", "missing-id", "x")
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("RenameCredential() error = %v, want %v", err, ErrPasskeyNotFound)
+	}
+
+	err = store.RenameCredential(context.Background(), "user-2", "cred-1", "Owned")
+	if !errors.Is(err, ErrPasskeyNotFound) {
+		t.Fatalf("cross-user RenameCredential() error = %v, want %v", err, ErrPasskeyNotFound)
+	}
+	if got := store.credentialsByUser["user-1"][0].Name; got != "My YubiKey" {
+		t.Errorf("Name = %q after another user's rename, want the unchanged %q", got, "My YubiKey")
 	}
 }
 

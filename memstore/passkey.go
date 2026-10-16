@@ -137,14 +137,14 @@ func (s *PasskeyStore) DeleteCredentialsByUserID(_ context.Context, userID strin
 }
 
 // RenameCredential sets the caller-supplied display name on the credential
-// named by id, or returns passkey.ErrPasskeyNotFound. The name is stored
-// verbatim: passkey never generates, infers, or validates it.
-func (s *PasskeyStore) RenameCredential(_ context.Context, id, name string) error {
+// named by id if it belongs to userID, or returns passkey.ErrPasskeyNotFound.
+// The name is stored verbatim: passkey never generates, infers, or validates it.
+func (s *PasskeyStore) RenameCredential(_ context.Context, userID, id, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	cred, ok := s.creds[id]
-	if !ok {
+	if !ok || cred.UserID != userID {
 		return passkey.ErrPasskeyNotFound
 	}
 	cred.Name = name

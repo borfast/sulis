@@ -288,7 +288,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 			t.Fatalf("SaveCredential: %v", err)
 		}
 
-		if err := store.RenameCredential(ctx, cred.ID, "YubiKey 5C"); err != nil {
+		if err := store.RenameCredential(ctx, cred.UserID, cred.ID, "YubiKey 5C"); err != nil {
 			t.Fatalf("RenameCredential: %v", err)
 		}
 		got, err := store.GetCredentialByID(ctx, cred.CredentialID)
@@ -309,8 +309,30 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("RenameCredentialUnknownIDReturnsErrPasskeyNotFound", func(t *testing.T) {
 		store := factory()
-		if err := store.RenameCredential(ctx, uniqueID("absent"), "Nowhere"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
+		if err := store.RenameCredential(ctx, uniqueID("user"), uniqueID("absent"), "Nowhere"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
 			t.Fatalf("RenameCredential for an unknown id error = %v, want ErrPasskeyNotFound", err)
+		}
+	})
+
+	t.Run("RenameCredentialForAnotherUserReturnsErrPasskeyNotFound", func(t *testing.T) {
+		store := factory()
+		owned := newCredential(uniqueID("owner"))
+		owned.Name = "Work laptop"
+		if err := store.SaveCredential(ctx, owned); err != nil {
+			t.Fatalf("SaveCredential: %v", err)
+		}
+
+		// A store that matches on id alone lets any signed-in user rename
+		// any other user's passkey by guessing or harvesting its id.
+		if err := store.RenameCredential(ctx, uniqueID("attacker"), owned.ID, "Owned"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
+			t.Fatalf("cross-user RenameCredential error = %v, want ErrPasskeyNotFound", err)
+		}
+		got, err := store.GetCredentialByID(ctx, owned.CredentialID)
+		if err != nil {
+			t.Fatalf("GetCredentialByID: %v", err)
+		}
+		if got.Name != "Work laptop" {
+			t.Fatalf("Name = %q after another user's rename, want the unchanged %q", got.Name, "Work laptop")
 		}
 	})
 

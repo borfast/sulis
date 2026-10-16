@@ -434,7 +434,7 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 		"DeleteCredentialsByUserID": func() error {
 			return db.PasskeyStore().DeleteCredentialsByUserID(ctx, "u")
 		},
-		"RenameCredential":        func() error { return db.PasskeyStore().RenameCredential(ctx, "c", "n") },
+		"RenameCredential":        func() error { return db.PasskeyStore().RenameCredential(ctx, "u", "c", "n") },
 		"SaveChallenge":           func() error { return db.ChallengeStore().SaveChallenge(ctx, "k", []byte("d")) },
 		"ConsumeChallenge":        func() error { _, err := db.ChallengeStore().ConsumeChallenge(ctx, "k"); return err },
 		"DeleteExpiredChallenges": func() error { return db.ChallengeStore().DeleteExpiredChallenges(ctx) },

@@ -157,10 +157,17 @@ type Store interface {
 	// surprising here.
 	DeleteCredentialsByUserID(ctx context.Context, userID string) error
 
-	// RenameCredential sets Credential.Name — caller-supplied display
-	// metadata that passkey itself never generates or validates. Returns
-	// ErrPasskeyNotFound if id does not match a stored credential.
-	RenameCredential(ctx context.Context, id, name string) error
+	// RenameCredential sets Credential.Name, caller-supplied display
+	// metadata that passkey itself never generates or validates, on the
+	// credential identified by id if it belongs to userID.
+	//
+	// Returns ErrPasskeyNotFound if id does not name a credential owned by
+	// userID. As with DeleteCredential, userID belongs in the predicate
+	// ("UPDATE ... WHERE id = $1 AND user_id = $2"), so another user's
+	// credential matches no row at all. A rename endpoint takes id from the
+	// request, and without this scoping any signed-in user could rename any
+	// other user's passkey.
+	RenameCredential(ctx context.Context, userID, id, name string) error
 }
 
 // ChallengeStore handles the transient WebAuthn challenge/session data
