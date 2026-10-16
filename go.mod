@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/go-webauthn/webauthn v0.18.2
 	golang.org/x/crypto v0.57.0
-	golang.org/x/text v0.42.0
+	golang.org/x/text v0.43.0
 )
 
 require (
