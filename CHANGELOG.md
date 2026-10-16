@@ -7,6 +7,8 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-16
+
 ### BREAKING CHANGES
 
 - `passkey.Store.RenameCredential` now takes the owner's user ID:
