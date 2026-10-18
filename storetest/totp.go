@@ -53,7 +53,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 		if err != nil {
 			t.Fatalf("GetPendingTOTP: %v", err)
 		}
-		if pending.ID != cred.ID || pending.Secret != cred.Secret {
+		if pending.ID != cred.ID || pending.UserID != cred.UserID || pending.Secret != cred.Secret {
 			t.Fatalf("GetPendingTOTP = %+v, want the enrolled %+v", pending, cred)
 		}
 		if pending.Verified {
@@ -127,7 +127,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 		if err != nil {
 			t.Fatalf("GetActiveTOTP: %v", err)
 		}
-		if active.ID != cred.ID || active.Secret != cred.Secret {
+		if active.ID != cred.ID || active.UserID != userID || active.Secret != cred.Secret {
 			t.Fatalf("GetActiveTOTP = %+v, want the promoted %+v", active, cred)
 		}
 		if !active.Verified {

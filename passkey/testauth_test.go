@@ -1545,4 +1545,12 @@ func TestPasskeyIDsAreVersion7(t *testing.T) {
 	if ceremonyID[6]>>4 != 7 {
 		t.Errorf("ceremony ID %s is not version 7", ceremonyID)
 	}
+
+	_, discoverableID, err := f.service.BeginDiscoverableLogin(ctx)
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin() error = %v", err)
+	}
+	if discoverableID[6]>>4 != 7 {
+		t.Errorf("discoverable ceremony ID %s is not version 7", discoverableID)
+	}
 }
