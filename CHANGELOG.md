@@ -7,6 +7,8 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
 ### BREAKING CHANGES
 
 - Every ID sulis generates (users, sessions, tokens, TOTP and passkey
