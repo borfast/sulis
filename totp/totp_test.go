@@ -1172,11 +1172,11 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 //
 // Given the store's single mutex serializes both critical sections into a
 // strict total order, exactly one of the two must win on every iteration:
-// either the confirm's compare-and-swap runs first (pending-1 gets
+// either the confirm's compare-and-swap runs first (testPendingID1 gets
 // promoted, and the racing EnrollPending then sees an active credential
 // and is refused with ErrTOTPAlreadyEnrolled), or EnrollPending runs first
-// (superseding the pending enrollment with cred-2, so the confirm's
-// compare-and-swap finds pending-1 gone and returns ErrTOTPNotEnrolled).
+// (superseding the pending enrollment with testPendingID2, so the confirm's
+// compare-and-swap finds testPendingID1 gone and returns ErrTOTPNotEnrolled).
 // Both succeeding would mean the guard let a torn state through; both
 // failing would mean the guard incorrectly locked out a legitimate winner.
 func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
@@ -1224,10 +1224,10 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 				t.Fatalf("iteration %d: GetActiveTOTP: %v", i, activeErr)
 			}
 			if active.ID != testPendingID1 || active.Secret != "SECRET1" || !active.Verified {
-				t.Fatalf("iteration %d: expected pending-1 promoted to active, got %+v", i, active)
+				t.Fatalf("iteration %d: expected testPendingID1 promoted to active, got %+v", i, active)
 			}
 			if confirmed == nil || confirmed.ID != testPendingID1 {
-				t.Fatalf("iteration %d: ConfirmEnrollment returned %+v, want the promoted pending-1 credential", i, confirmed)
+				t.Fatalf("iteration %d: ConfirmEnrollment returned %+v, want the promoted testPendingID1 credential", i, confirmed)
 			}
 		} else {
 			if !errors.Is(confirmErr, ErrTOTPNotEnrolled) {
@@ -1241,7 +1241,7 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 				t.Fatalf("iteration %d: GetPendingTOTP: %v", i, err)
 			}
 			if p.ID != testPendingID2 {
-				t.Fatalf("iteration %d: expected pending-2 to remain pending, got %+v", i, p)
+				t.Fatalf("iteration %d: expected testPendingID2 to remain pending, got %+v", i, p)
 			}
 		}
 	}

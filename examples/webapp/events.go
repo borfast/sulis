@@ -33,7 +33,7 @@ func newPasskeySlogSink(logger *slog.Logger) passkey.EventSink {
 }
 
 // Emit logs one passkey event at info level. Everything passkey.Event
-// carries is already an opaque identifier or a closed-category label, so
+// carries is already an account ID or a closed-category label, so
 // there is nothing here to redact before it reaches the log.
 func (s passkeySlogSink) Emit(ctx context.Context, e passkey.Event) {
 	attrs := make([]slog.Attr, 0, 5)

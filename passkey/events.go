@@ -27,9 +27,9 @@ const (
 )
 
 // Event is one passkey security or operational decision, as reported to an
-// EventSink. It deliberately contains only opaque account identifiers and
-// closed-category labels. It has no field for a challenge, response body,
-// credential ID, public key, store error, or protocol diagnostic text.
+// EventSink. It deliberately contains only account IDs and closed-category
+// labels. It has no field for a challenge, response body, credential ID,
+// public key, store error, or protocol diagnostic text.
 type Event struct {
 	Kind EventKind
 

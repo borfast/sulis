@@ -51,7 +51,7 @@
 -- confusable duplicate on write and matching it on lookup is the safer of
 -- the two behaviors.
 CREATE TABLE IF NOT EXISTS users (
-    id                    BLOB    PRIMARY KEY CHECK (length(id) = 16),
+    id                    BLOB    NOT NULL PRIMARY KEY CHECK (length(id) = 16),
     email                 TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     password_hash         TEXT    NOT NULL DEFAULT '',
     created_at            TEXT    NOT NULL,
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS users (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id               BLOB PRIMARY KEY CHECK (length(id) = 16),
+    id               BLOB NOT NULL PRIMARY KEY CHECK (length(id) = 16),
     user_id          BLOB NOT NULL CHECK (length(user_id) = 16),
     -- The SHA-256 hash of the session token. The raw token is never stored;
     -- it exists only in the response that issued it.
@@ -94,7 +94,7 @@ CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS tokens (
-    id         BLOB    PRIMARY KEY CHECK (length(id) = 16),
+    id         BLOB    NOT NULL PRIMARY KEY CHECK (length(id) = 16),
     -- NULL for a magic-link token issued before the account exists.
     user_id    BLOB    CHECK (length(user_id) = 16),
     token_hash TEXT    NOT NULL UNIQUE,
@@ -116,7 +116,7 @@ CREATE INDEX IF NOT EXISTS tokens_expires_at_idx ON tokens (expires_at);
 CREATE TABLE IF NOT EXISTS passkey_credentials (
     -- The store's own opaque ID, which is what DeleteCredential and
     -- RenameCredential address a credential by.
-    id               BLOB    PRIMARY KEY CHECK (length(id) = 16),
+    id               BLOB    NOT NULL PRIMARY KEY CHECK (length(id) = 16),
     user_id          BLOB    NOT NULL CHECK (length(user_id) = 16),
     -- The raw WebAuthn credential ID, which is what GetCredentialByID and
     -- UpdateCredentialAfterLogin address it by.
@@ -157,7 +157,7 @@ CREATE INDEX IF NOT EXISTS passkey_challenges_expires_at_idx ON passkey_challeng
 -- constraint rather than a convention, and ConfirmEnrollment's promotion is
 -- one DELETE ... RETURNING feeding one upsert.
 CREATE TABLE IF NOT EXISTS totp_active (
-    user_id           BLOB    PRIMARY KEY CHECK (length(user_id) = 16),
+    user_id           BLOB    NOT NULL PRIMARY KEY CHECK (length(user_id) = 16),
     id                BLOB    NOT NULL CHECK (length(id) = 16),
     -- Opaque to this package: ciphertext when totp is configured with an
     -- Encryptor, the base32 secret otherwise. A store cannot tell.
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS totp_active (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS totp_pending (
-    user_id    BLOB PRIMARY KEY CHECK (length(user_id) = 16),
+    user_id    BLOB NOT NULL PRIMARY KEY CHECK (length(user_id) = 16),
     id         BLOB NOT NULL CHECK (length(id) = 16),
     secret     TEXT NOT NULL,
     created_at TEXT NOT NULL

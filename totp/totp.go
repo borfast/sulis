@@ -293,9 +293,8 @@ func (s *Service) enroll(ctx context.Context, userID uuid.UUID, accountName stri
 		return "", "", err
 	}
 
-	credID := uuid.NewV7()
 	cred := &Credential{
-		ID:        credID,
+		ID:        uuid.NewV7(),
 		UserID:    userID,
 		Secret:    storedSecret,
 		Verified:  false,

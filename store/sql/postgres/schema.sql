@@ -36,8 +36,8 @@
 -- Everything else is native: bytea for the WebAuthn blobs, boolean for the
 -- flags SQLite had to spell as INTEGER 0/1, jsonb for metadata and transports,
 -- bigint for the counters that carry a Go uint64 or uint32. The ID columns of
--- users, sessions, tokens, TOTP and passkey credentials, and recovery_codes.user_id,
--- are native uuid.
+-- users, sessions, tokens, TOTP and passkey credentials, and
+-- recovery_codes.user_id, are native uuid.
 --
 -- # Case-insensitive e-mail
 --

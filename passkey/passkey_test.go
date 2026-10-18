@@ -135,7 +135,7 @@ func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.
 		t.Fatalf("BeginLogin() assertion = %#v, want nil", assertion)
 	}
 	if ceremonyID != uuid.Nil() {
-		t.Fatalf("BeginLogin() ceremony ID = %q, want empty", ceremonyID)
+		t.Fatalf("BeginLogin() ceremony ID = %v, want uuid.Nil()", ceremonyID)
 	}
 	if len(challenges.saved) != 0 {
 		t.Fatalf("BeginLogin() saved %d challenges, want 0", len(challenges.saved))
@@ -1911,7 +1911,7 @@ func TestBeginLoginPropagatesCredentialLookupFailure(t *testing.T) {
 		t.Error("BeginLogin() reported ErrPasskeyNotFound for a store failure — a broken store must not look like a user without a passkey")
 	}
 	if assertion != nil || ceremonyID != uuid.Nil() {
-		t.Fatalf("BeginLogin() = (%#v, %q), want (nil, \"\")", assertion, ceremonyID)
+		t.Fatalf("BeginLogin() = (%#v, %v), want (nil, uuid.Nil())", assertion, ceremonyID)
 	}
 }
 

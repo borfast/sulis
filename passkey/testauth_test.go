@@ -1470,8 +1470,8 @@ func TestFinishRegistrationConsumesChallengeExactlyOnce(t *testing.T) {
 	}
 }
 
-// Fixed IDs for the tests below: two users, two credential rows and an ID
-// that names nothing.
+// IDs for the tests below: two users, two credential rows and an ID that
+// names nothing.
 var (
 	testUser1 = uuid.NewV7()
 	testUser2 = uuid.NewV7()

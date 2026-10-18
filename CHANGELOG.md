@@ -7,6 +7,11 @@ does and does not promise.
 
 ## [Unreleased]
 
+### Changed
+
+- The SQLite schema declares its ID primary keys `NOT NULL`. Existing
+  databases are unaffected, because STRICT tables already made them NOT NULL.
+
 ### Fixed
 
 - `storetest`'s `ConsumeTokenWithoutUserReturnsNilUserID` fails, rather than

@@ -28,8 +28,8 @@ code and both SQL schemas change as if UUIDs had been used from the start.
   `String` and `MarshalText` for each, and callers would convert at every
   boundary.
 - **Version 7 for every ID**, so new rows go at the end of each index. The cost
-  is that an ID contains its creation time to a fraction of a millisecond, so a user ID
-  shown in a URL tells when the account was created. The README says so.
+  is that an ID contains its creation time to a fraction of a millisecond, so a
+  user ID shown in a URL tells when the account was created. The README says so.
   Rejected: version 4 for some or all IDs.
 - **`uuid.Nil()` means "no ID"** (section 4 lists where). Rejected:
   `*uuid.UUID` with nil meaning "no ID", which would make `Token.UserID` and
