@@ -430,3 +430,30 @@ func TestSessionListShowsAndRevokesOtherSession(t *testing.T) {
 		t.Errorf("clientA account after revoking the other session: status = %d", rec.Code)
 	}
 }
+
+func TestRevokeSessionWithMalformedIDReturns400(t *testing.T) {
+	a := newTestApp(t)
+	c := newTestClient(t, a)
+	rec := registerUser(t, c, "badsession@example.com", testPassword)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = c.get("/account")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("account: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	token := extractCSRFToken(t, rec.Body.String())
+
+	rec = c.post("/sessions/revoke", url.Values{
+		"csrf_token": {token}, "session_id": {"not-a-uuid"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("revoke: status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = c.get("/account")
+	if rec.Code != http.StatusOK {
+		t.Errorf("account after bad revoke: status = %d, want the session to still validate", rec.Code)
+	}
+}

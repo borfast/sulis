@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/passkey"
@@ -80,8 +81,8 @@ type secondFactors struct {
 // HasSecondFactor reports true when the user has a verified TOTP credential
 // or at least one passkey. A not-found result from either store means "no
 // factor", not an error; any other error propagates.
-func (f secondFactors) HasSecondFactor(ctx context.Context, userID string) (bool, error) {
-	_, err := f.totp.GetActiveTOTP(ctx, userID)
+func (f secondFactors) HasSecondFactor(ctx context.Context, userID uuid.UUID) (bool, error) {
+	_, err := f.totp.GetActiveTOTP(ctx, userID.String()) // transitional: Task 4
 	switch {
 	case err == nil:
 		return true, nil
@@ -91,7 +92,7 @@ func (f secondFactors) HasSecondFactor(ctx context.Context, userID string) (bool
 		return false, err
 	}
 
-	creds, err := f.passkeys.GetCredentialsByUserID(ctx, userID)
+	creds, err := f.passkeys.GetCredentialsByUserID(ctx, userID.String()) // transitional: Task 6
 	if err != nil {
 		return false, err
 	}

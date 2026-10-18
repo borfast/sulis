@@ -27,7 +27,7 @@ func signedInPasskeyDeleteUser(t *testing.T, a *app, email string) (*testClient,
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	return c, user.ID
+	return c, user.ID.String() // transitional: Task 6
 }
 
 func savePasskeyForDelete(t *testing.T, a *app, userID, credentialID string) {

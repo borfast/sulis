@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -42,7 +43,7 @@ const pendingCookieTTL = 5 * time.Minute
 // pendingLogin is the server-side half of one login waiting on a second
 // factor: which account passed the first factor, and until when.
 type pendingLogin struct {
-	userID  string
+	userID  uuid.UUID
 	expires time.Time
 }
 
@@ -62,7 +63,7 @@ func newPendingLogins() *pendingLogins {
 
 // add records userID against rawToken for pendingCookieTTL. Expired entries
 // are swept first, so abandoned login attempts cannot pile up.
-func (p *pendingLogins) add(rawToken, userID string) {
+func (p *pendingLogins) add(rawToken string, userID uuid.UUID) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -78,14 +79,14 @@ func (p *pendingLogins) add(rawToken, userID string) {
 // one pending login is resolved by exactly one submission. An unknown,
 // fabricated, or expired token reports false and no user ID: there is then
 // no account for the caller to check a code against.
-func (p *pendingLogins) take(rawToken string) (string, bool) {
+func (p *pendingLogins) take(rawToken string) (uuid.UUID, bool) {
 	key := tokenKey(rawToken)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.m[key]
 	delete(p.m, key)
 	if !ok || time.Now().After(entry.expires) {
-		return "", false
+		return uuid.Nil(), false
 	}
 	return entry.userID, true
 }
@@ -400,7 +401,7 @@ func (a *app) handleAccount(w http.ResponseWriter, r *http.Request) {
 
 	currentSessionID := ""
 	if session != nil {
-		currentSessionID = session.ID
+		currentSessionID = session.ID.String()
 	}
 
 	a.render(w, http.StatusOK, "account", accountPageData{
@@ -437,7 +438,11 @@ func (a *app) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := r.FormValue("session_id")
+	sessionID, err := uuid.Parse(r.FormValue("session_id"))
+	if err != nil {
+		a.render(w, http.StatusBadRequest, "error", "That session ID is not valid.")
+		return
+	}
 	if err := a.auth.RevokeSession(r.Context(), user.ID, sessionID); err != nil {
 		a.log.Error("revoking session", "user_id", user.ID, "session_id", sessionID, "error", err)
 	}

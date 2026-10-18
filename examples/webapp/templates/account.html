@@ -19,7 +19,7 @@
 {{range .Sessions}}
 <li>
 {{.Method}} from {{.IP}}, last seen {{.LastSeenAt}}
-{{if eq .ID $root.CurrentSessionID}}
+{{if eq .ID.String $root.CurrentSessionID}}
 (this session)
 {{else}}
 <form method="post" action="/sessions/revoke">

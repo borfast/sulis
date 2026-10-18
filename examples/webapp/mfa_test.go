@@ -428,7 +428,7 @@ func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("looking up the victim: %v", err)
 	}
-	before, err := a.recovery.Remaining(t.Context(), user.ID)
+	before, err := a.recovery.Remaining(t.Context(), user.ID.String()) // transitional: Task 5
 	if err != nil {
 		t.Fatalf("reading remaining recovery codes: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
 	attacker := newTestClient(t, a)
 	attacker.jar.SetCookies(attacker.base, []*http.Cookie{
 		{Name: pendingTokenCookie, Value: "fabricated-pending-token", Path: "/"},
-		{Name: "pending_2fa_user", Value: user.ID, Path: "/"},
+		{Name: "pending_2fa_user", Value: user.ID.String(), Path: "/"},
 	})
 
 	rec = attacker.get("/login/second-factor")
@@ -469,7 +469,7 @@ func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
 	}
 
 	// The factor check never ran, so the victim's code was never consumed.
-	after, err := a.recovery.Remaining(t.Context(), user.ID)
+	after, err := a.recovery.Remaining(t.Context(), user.ID.String()) // transitional: Task 5
 	if err != nil {
 		t.Fatalf("reading remaining recovery codes after the attempt: %v", err)
 	}

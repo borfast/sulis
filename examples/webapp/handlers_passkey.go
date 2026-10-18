@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/passkey"
@@ -144,7 +145,8 @@ func (a *app) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request)
 	}
 
 	creation, err := a.passkeys.BeginRegistration(r.Context(), &passkey.User{
-		ID: []byte(user.ID), Name: user.Email, DisplayName: user.Email,
+		// transitional: Task 6
+		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
 	})
 	if err != nil {
 		a.log.Error("beginning passkey registration", "user_id", user.ID, "error", err)
@@ -172,7 +174,8 @@ func (a *app) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request
 	}
 
 	if _, err := a.passkeys.FinishRegistrationResponse(r.Context(), &passkey.User{
-		ID: []byte(user.ID), Name: user.Email, DisplayName: user.Email,
+		// transitional: Task 6
+		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
 	}, body); err != nil {
 		a.log.Error("finishing passkey registration", "user_id", user.ID, "error", err)
 		writeJSONError(w, http.StatusBadRequest, "Could not register that passkey. Try again.")
@@ -213,7 +216,8 @@ func (a *app) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	assertion, ceremonyID, err := a.passkeys.BeginLogin(r.Context(), &passkey.User{
-		ID: []byte(user.ID), Name: user.Email, DisplayName: user.Email,
+		// transitional: Task 6
+		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
 	})
 	if err != nil {
 		a.log.Error("beginning passkey login", "user_id", user.ID, "error", err)
@@ -221,7 +225,7 @@ func (a *app) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.setPasskeyCookie(w, passkeyLoginUserCookie, user.ID)
+	a.setPasskeyCookie(w, passkeyLoginUserCookie, user.ID.String())
 	a.setPasskeyCookie(w, passkeyLoginCeremonyCookie, ceremonyID)
 	writeJSON(w, http.StatusOK, assertion)
 }
@@ -305,7 +309,13 @@ func (a *app) handlePasskeyDiscoverableFinish(w http.ResponseWriter, r *http.Req
 // ErrUserNotFound/ErrEmailNotVerified gating IssueSession does, so no
 // separate EmailVerifiedAt check is needed here: an unverified account is
 // already rejected by the call below.
-func (a *app) finishPasskeySession(w http.ResponseWriter, r *http.Request, userID string) {
+func (a *app) finishPasskeySession(w http.ResponseWriter, r *http.Request, rawUserID string) {
+	userID, err := uuid.Parse(rawUserID) // transitional: Task 6
+	if err != nil {
+		a.log.Error("parsing user ID after passkey login", "error", err)
+		writeJSONError(w, http.StatusBadRequest, "Could not complete sign-in.")
+		return
+	}
 	session, token, err := a.auth.IssueSessionUnchecked(r.Context(), userID, sulis.AuthMethodPasskey)
 	if err != nil {
 		a.log.Error("issuing session after passkey login", "user_id", userID, "error", err)
@@ -339,13 +349,13 @@ func (a *app) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	credentialID := r.FormValue("credential_id")
-	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID)
+	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID.String()) // transitional: Task 4
 	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
 		a.log.Error("checking TOTP before passkey deletion", "user_id", user.ID, "error", totpErr)
 		a.render(w, http.StatusInternalServerError, "error", "Could not remove that passkey.")
 		return
 	}
-	if err := a.passkeys.DeleteCredential(r.Context(), user.ID, credentialID, passkey.DeleteOptions{AllowLast: totpErr == nil}); err != nil {
+	if err := a.passkeys.DeleteCredential(r.Context(), user.ID.String(), credentialID, passkey.DeleteOptions{AllowLast: totpErr == nil}); err != nil { // transitional: Task 6
 		a.log.Error("deleting passkey", "user_id", user.ID, "error", err)
 		message := "Could not remove that passkey."
 		if errors.Is(err, passkey.ErrLastCredential) {

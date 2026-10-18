@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/totp"
@@ -40,7 +41,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	_, totpErr := a.db.TOTPStore().GetActiveTOTP(ctx, user.ID)
+	_, totpErr := a.db.TOTPStore().GetActiveTOTP(ctx, user.ID.String()) // transitional: Task 4
 	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
 		a.log.Error("checking totp status", "user_id", user.ID, "error", totpErr)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
@@ -48,14 +49,14 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	totpActive := totpErr == nil
 
-	remaining, err := a.recovery.Remaining(ctx, user.ID)
+	remaining, err := a.recovery.Remaining(ctx, user.ID.String()) // transitional: Task 5
 	if err != nil {
 		a.log.Error("checking recovery codes remaining", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
 		return
 	}
 
-	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(ctx, user.ID)
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(ctx, user.ID.String()) // transitional: Task 6
 	if err != nil {
 		a.log.Error("listing passkeys", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
@@ -122,7 +123,7 @@ func (a *app) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	// this token pairs with is still on the browser and still valid.
 	csrfToken := r.FormValue(sulis.CSRFFormField)
 
-	secret, uri, err := a.totp.Enroll(r.Context(), user.ID, user.Email)
+	secret, uri, err := a.totp.Enroll(r.Context(), user.ID.String(), user.Email) // transitional: Task 4
 	if err != nil {
 		a.log.Error("enrolling totp", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusUnprocessableEntity, "error",
@@ -152,7 +153,7 @@ func (a *app) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	csrfToken := r.FormValue(sulis.CSRFFormField)
 
-	if err := a.totp.ConfirmEnrollment(r.Context(), user.ID, code); err != nil {
+	if err := a.totp.ConfirmEnrollment(r.Context(), user.ID.String(), code); err != nil { // transitional: Task 4
 		// ConfirmEnrollment's own doc comment warns against treating
 		// ErrTOTPNotEnrolled here as "you are not enrolled", but every
 		// distinct cause (wrong code, rate limited, racing enrollment,
@@ -191,17 +192,17 @@ func (a *app) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.totp.Unenroll(r.Context(), user.ID); err != nil {
+	if err := a.totp.Unenroll(r.Context(), user.ID.String()); err != nil { // transitional: Task 4
 		a.log.Error("unenrolling totp", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not disable the authenticator app.")
 		return
 	}
 
-	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(r.Context(), user.ID)
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(r.Context(), user.ID.String()) // transitional: Task 6
 	if err != nil {
 		a.log.Error("checking remaining passkeys", "user_id", user.ID, "error", err)
 	} else if len(creds) == 0 {
-		if err := a.recovery.Disable(r.Context(), user.ID); err != nil {
+		if err := a.recovery.Disable(r.Context(), user.ID.String()); err != nil { // transitional: Task 5
 			a.log.Error("disabling recovery codes", "user_id", user.ID, "error", err)
 		}
 	}
@@ -235,7 +236,7 @@ func (a *app) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	codes, err := a.recovery.Generate(r.Context(), user.ID)
+	codes, err := a.recovery.Generate(r.Context(), user.ID.String()) // transitional: Task 5
 	if err != nil {
 		a.log.Error("generating recovery codes", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not generate recovery codes.")
@@ -295,7 +296,7 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		pendingToken string
-		userID       string
+		userID       uuid.UUID
 		known        bool
 	)
 	if tokenErr == nil {
@@ -315,9 +316,9 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 
 	var verifyErr error
 	if useRecovery {
-		_, verifyErr = a.recovery.Consume(r.Context(), userID, code)
+		_, verifyErr = a.recovery.Consume(r.Context(), userID.String(), code) // transitional: Task 5
 	} else {
-		verifyErr = a.totp.Validate(r.Context(), userID, code)
+		verifyErr = a.totp.Validate(r.Context(), userID.String(), code) // transitional: Task 4
 	}
 	if verifyErr != nil {
 		// Every rejection reason (wrong code, replayed code, rate limited,
