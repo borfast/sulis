@@ -23,6 +23,10 @@ var (
 	ErrChallengeExpired = errors.New("passkey: challenge expired or not found")
 	ErrCloneWarning     = errors.New("passkey: credential clone detected (sign count anomaly)")
 
+	// ErrInvalidUser is returned by the registration and login ceremonies
+	// when the User's ID is uuid.Nil().
+	ErrInvalidUser = errors.New("passkey: user has no ID")
+
 	// ErrCeremonyBodyTooLarge is returned when a ceremony response body
 	// exceeds the configured WithMaxCeremonyBody limit. See that option's
 	// GoDoc for why the cap exists.
@@ -242,6 +246,9 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 // "you already registered this key" instead of silently creating a
 // duplicate credential.
 func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.CredentialCreation, error) {
+	if user.ID == uuid.Nil() {
+		return nil, ErrInvalidUser
+	}
 	creds, err := s.store.GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
 		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "get_credentials"})
@@ -290,6 +297,9 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 // consumeToken: a rejected registration cannot be retried against the same
 // challenge.
 func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, body []byte) (*Credential, error) {
+	if user.ID == uuid.Nil() {
+		return nil, ErrInvalidUser
+	}
 	if err := s.checkCeremonyBodySize(body); err != nil {
 		return nil, err
 	}
@@ -354,6 +364,9 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 // ceremony started for the same user (e.g. from a different device) cannot
 // clobber the first ceremony's saved challenge.
 func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.CredentialAssertion, uuid.UUID, error) {
+	if user.ID == uuid.Nil() {
+		return nil, uuid.Nil(), ErrInvalidUser
+	}
 	// Load credentials from store.
 	creds, err := s.store.GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
@@ -401,6 +414,9 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 // consumeToken: a rejected assertion cannot be retried against the same
 // challenge.
 func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyID uuid.UUID, body []byte) (*Credential, error) {
+	if user.ID == uuid.Nil() {
+		return nil, ErrInvalidUser
+	}
 	if err := s.checkCeremonyBodySize(body); err != nil {
 		return nil, err
 	}

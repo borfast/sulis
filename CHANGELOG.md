@@ -14,6 +14,8 @@ does and does not promise.
   standard library, not a `string`, and `uuid.Nil()` means "no ID". The passkey
   user handle is the 16 ID bytes. Both `store/sql` schemas store IDs as `uuid`
   (Postgres) or 16-byte `BLOB` (SQLite), and `tokens.user_id` is nullable.
+  Passkey ceremonies return the new `passkey.ErrInvalidUser` for a `User`
+  whose `ID` is `uuid.Nil()`.
   Migration: there is none; recreate existing databases.
 
 ## [0.3.0] - 2026-10-16

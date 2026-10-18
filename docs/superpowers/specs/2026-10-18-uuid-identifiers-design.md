@@ -84,6 +84,9 @@ These keep their current types:
 - A method given `uuid.Nil()` as an ID behaves as it does today when given `""`:
   the lookup finds nothing, and the method returns its usual not-found error.
   There is no new validation.
+- Passkey ceremonies refuse a `User` whose `ID` is `uuid.Nil()` with
+  `passkey.ErrInvalidUser`. go-webauthn refused an empty ID before, but
+  `uuid.Nil()` is 16 bytes, so Sulis checks it itself.
 
 ## 5. Store interfaces, `memstore` and `storetest`
 

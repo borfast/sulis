@@ -2265,3 +2265,51 @@ func TestNewServiceRejectsIncompleteConfiguration(t *testing.T) {
 		}
 	})
 }
+
+func TestCeremoniesRefuseNilUserID(t *testing.T) {
+	t.Parallel()
+
+	user := &User{ID: uuid.Nil(), Name: "nobody", DisplayName: "Nobody"}
+	body := []byte(`{}`)
+	cases := []struct {
+		name string
+		call func(s *Service) error
+	}{
+		{"BeginRegistration", func(s *Service) error {
+			_, err := s.BeginRegistration(t.Context(), user)
+			return err
+		}},
+		{"FinishRegistrationResponse", func(s *Service) error {
+			_, err := s.FinishRegistrationResponse(t.Context(), user, body)
+			return err
+		}},
+		{"BeginLogin", func(s *Service) error {
+			_, _, err := s.BeginLogin(t.Context(), user)
+			return err
+		}},
+		{"FinishLoginResponse", func(s *Service) error {
+			_, err := s.FinishLoginResponse(t.Context(), user, uuid.NewV7(), body)
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &fakeStore{}
+			challenges := newFakeChallengeStore()
+			service := newTestService(t, store, challenges)
+
+			if err := tc.call(service); !errors.Is(err, ErrInvalidUser) {
+				t.Fatalf("error = %v, want ErrInvalidUser", err)
+			}
+			if store.getCredentialsCalls != 0 || store.saveCredentialCalls != 0 {
+				t.Errorf("store was called: get=%d save=%d", store.getCredentialsCalls, store.saveCredentialCalls)
+			}
+			creds, _ := store.GetCredentialsByUserID(t.Context(), uuid.Nil())
+			if len(creds) != 0 {
+				t.Errorf("store holds %d credentials for uuid.Nil()", len(creds))
+			}
+		})
+	}
+}
