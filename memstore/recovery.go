@@ -3,6 +3,7 @@ package memstore
 import (
 	"context"
 	"sync"
+	"uuid"
 
 	"github.com/borfast/sulis/recovery"
 )
@@ -14,21 +15,21 @@ import (
 // nothing to hash back.
 type RecoveryStore struct {
 	mu    sync.Mutex
-	codes map[string]map[string]struct{}
+	codes map[uuid.UUID]map[string]struct{}
 }
 
 var _ recovery.Store = (*RecoveryStore)(nil)
 
 // NewRecoveryStore returns an empty RecoveryStore.
 func NewRecoveryStore() *RecoveryStore {
-	return &RecoveryStore{codes: make(map[string]map[string]struct{})}
+	return &RecoveryStore{codes: make(map[uuid.UUID]map[string]struct{})}
 }
 
 // ReplaceCodes swaps userID's whole code set for hashes in one step, so a
 // regeneration never leaves a caller looking at a half-replaced set — some
 // codes from the old batch and some from the new. An empty or nil slice
 // clears the set.
-func (s *RecoveryStore) ReplaceCodes(_ context.Context, userID string, hashes []string) error {
+func (s *RecoveryStore) ReplaceCodes(_ context.Context, userID uuid.UUID, hashes []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -48,7 +49,7 @@ func (s *RecoveryStore) ReplaceCodes(_ context.Context, userID string, hashes []
 // The remaining count is read under the same lock as the delete, so it is
 // the count this consumption produced rather than whatever a later call
 // would find.
-func (s *RecoveryStore) ConsumeCode(_ context.Context, userID, hash string) (int, error) {
+func (s *RecoveryStore) ConsumeCode(_ context.Context, userID uuid.UUID, hash string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -65,7 +66,7 @@ func (s *RecoveryStore) ConsumeCode(_ context.Context, userID, hash string) (int
 
 // CountCodes reports how many unused codes userID has left. A user with none
 // counts zero rather than erroring.
-func (s *RecoveryStore) CountCodes(_ context.Context, userID string) (int, error) {
+func (s *RecoveryStore) CountCodes(_ context.Context, userID uuid.UUID) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -73,7 +74,7 @@ func (s *RecoveryStore) CountCodes(_ context.Context, userID string) (int, error
 }
 
 // DeleteCodes removes every code for userID.
-func (s *RecoveryStore) DeleteCodes(_ context.Context, userID string) error {
+func (s *RecoveryStore) DeleteCodes(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

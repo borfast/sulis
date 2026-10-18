@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/recovery"
 )
@@ -30,21 +31,21 @@ var _ recovery.Store = (*RecoveryStore)(nil)
 // The DELETE is the transaction's first statement, so the user's rows are
 // locked before anything is inserted and two concurrent replacements for one
 // user serialize on it rather than interleaving into a mixed set.
-func (s *RecoveryStore) ReplaceCodes(ctx context.Context, userID string, hashes []string) error {
+func (s *RecoveryStore) ReplaceCodes(ctx context.Context, userID uuid.UUID, hashes []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sulis/postgres: replacing recovery codes: %w", err)
 	}
 	defer rollback(tx)
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = $1`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = $1`, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/postgres: clearing the previous recovery codes: %w", err)
 	}
 
 	const insert = `INSERT INTO recovery_codes (user_id, code_hash, created_at) VALUES ($1, $2, $3)`
 	now := formatTime(time.Now())
 	for _, hash := range hashes {
-		if _, err := tx.ExecContext(ctx, insert, userID, hash, now); err != nil {
+		if _, err := tx.ExecContext(ctx, insert, idArg(userID), hash, now); err != nil {
 			return fmt.Errorf("sulis/postgres: storing a recovery code: %w", err)
 		}
 	}
@@ -71,19 +72,19 @@ func (s *RecoveryStore) ReplaceCodes(ctx context.Context, userID string, hashes 
 // contends for the same rows, so it either commits before this method's own
 // DELETE, which then finds nothing and reports ErrCodeNotFound, or it blocks
 // until this transaction commits and the count is already taken.
-func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) (int, error) {
+func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID uuid.UUID, hash string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("sulis/postgres: consuming a recovery code: %w", err)
 	}
 	defer rollback(tx)
 
-	if err := lockUser(ctx, tx, advisoryClassRecovery, userID); err != nil {
+	if err := lockUser(ctx, tx, advisoryClassRecovery, userID.String()); err != nil {
 		return 0, err
 	}
 
 	const del = `DELETE FROM recovery_codes WHERE user_id = $1 AND code_hash = $2`
-	res, err := tx.ExecContext(ctx, del, userID, hash)
+	res, err := tx.ExecContext(ctx, del, idArg(userID), hash)
 	if err != nil {
 		return 0, fmt.Errorf("sulis/postgres: consuming a recovery code: %w", err)
 	}
@@ -97,7 +98,7 @@ func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) (i
 
 	const count = `SELECT COUNT(*) FROM recovery_codes WHERE user_id = $1`
 	var remaining int
-	if err := tx.QueryRowContext(ctx, count, userID).Scan(&remaining); err != nil {
+	if err := tx.QueryRowContext(ctx, count, idArg(userID)).Scan(&remaining); err != nil {
 		return 0, fmt.Errorf("sulis/postgres: counting the remaining recovery codes: %w", err)
 	}
 
@@ -110,11 +111,11 @@ func (s *RecoveryStore) ConsumeCode(ctx context.Context, userID, hash string) (i
 // CountCodes returns how many unused codes the user has left. A user with none
 // is not an error: zero is the answer, and it is the answer an application shows
 // on a "you have no recovery codes left" screen.
-func (s *RecoveryStore) CountCodes(ctx context.Context, userID string) (int, error) {
+func (s *RecoveryStore) CountCodes(ctx context.Context, userID uuid.UUID) (int, error) {
 	const q = `SELECT COUNT(*) FROM recovery_codes WHERE user_id = $1`
 
 	var n int
-	if err := s.db.QueryRowContext(ctx, q, userID).Scan(&n); err != nil {
+	if err := s.db.QueryRowContext(ctx, q, idArg(userID)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("sulis/postgres: counting recovery codes: %w", err)
 	}
 	return n, nil
@@ -122,10 +123,10 @@ func (s *RecoveryStore) CountCodes(ctx context.Context, userID string) (int, err
 
 // DeleteCodes removes every code for the user. Removing nothing is not an
 // error.
-func (s *RecoveryStore) DeleteCodes(ctx context.Context, userID string) error {
+func (s *RecoveryStore) DeleteCodes(ctx context.Context, userID uuid.UUID) error {
 	const q = `DELETE FROM recovery_codes WHERE user_id = $1`
 
-	if _, err := s.db.ExecContext(ctx, q, userID); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/postgres: deleting recovery codes: %w", err)
 	}
 	return nil

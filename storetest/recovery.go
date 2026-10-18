@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"uuid"
 
 	"github.com/borfast/sulis/recovery"
 )
@@ -31,7 +32,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ReplaceCodesStoresTheWholeSet", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		hashes := newCodeHashes(5)
 		if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
@@ -53,7 +54,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ReplaceCodesDiscardsThePreviousSet", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		old := newCodeHashes(3)
 		if err := store.ReplaceCodes(ctx, userID, old); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
@@ -78,7 +79,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ConsumeCodeRemovesOnlyThatCode", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		hashes := newCodeHashes(3)
 		if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
@@ -107,7 +108,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ConsumeCodeTwiceReturnsErrCodeNotFound", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		hashes := newCodeHashes(2)
 		if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
@@ -123,13 +124,13 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ConsumeCodeForAnotherUserReturnsErrCodeNotFound", func(t *testing.T) {
 		store := factory()
-		ownerID := uniqueID("owner")
+		ownerID := uuid.NewV7()
 		hashes := newCodeHashes(2)
 		if err := store.ReplaceCodes(ctx, ownerID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
 
-		attackerID := uniqueID("attacker")
+		attackerID := uuid.NewV7()
 		if _, err := store.ConsumeCode(ctx, attackerID, hashes[0]); !errors.Is(err, recovery.ErrCodeNotFound) {
 			t.Fatalf("cross-user ConsumeCode error = %v, want ErrCodeNotFound", err)
 		}
@@ -141,7 +142,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ConsumeCodeUnknownHashReturnsErrCodeNotFound", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		if err := store.ReplaceCodes(ctx, userID, newCodeHashes(2)); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
@@ -152,7 +153,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("CountCodesForAnUnknownUserReturnsZero", func(t *testing.T) {
 		store := factory()
-		count, err := store.CountCodes(ctx, uniqueID("user"))
+		count, err := store.CountCodes(ctx, uuid.NewV7())
 		if err != nil {
 			t.Fatalf("CountCodes for a user with no codes: %v — having none is not an error", err)
 		}
@@ -163,7 +164,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("DeleteCodesRemovesEveryCode", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		hashes := newCodeHashes(3)
 		if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
@@ -186,7 +187,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("ReplaceCodesWithAnEmptySetClearsTheCodes", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		if err := store.ReplaceCodes(ctx, userID, newCodeHashes(2)); err != nil {
 			t.Fatalf("ReplaceCodes: %v", err)
 		}
@@ -204,7 +205,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 	t.Run("DeleteCodesForAnUnknownUserIsNotAnError", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteCodes(ctx, uniqueID("user")); err != nil {
+		if err := store.DeleteCodes(ctx, uuid.NewV7()); err != nil {
 			t.Fatalf("DeleteCodes with nothing to delete: %v", err)
 		}
 	})
@@ -214,7 +215,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			hashes := newCodeHashes(2)
 			if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 				t.Fatalf("iteration %d: ReplaceCodes: %v", i, err)
@@ -247,7 +248,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			hashes := newCodeHashes(codes)
 			if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 				t.Fatalf("iteration %d: ReplaceCodes: %v", i, err)
@@ -290,7 +291,7 @@ func RunRecoveryStore(t *testing.T, factory func() recovery.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			hashes := newCodeHashes(codes)
 			if err := store.ReplaceCodes(ctx, userID, hashes); err != nil {
 				t.Fatalf("iteration %d: ReplaceCodes: %v", i, err)

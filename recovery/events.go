@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"time"
+	"uuid"
 )
 
 // EventKind names one recovery-code security decision. The values are
@@ -74,7 +75,7 @@ type Event struct {
 	Kind EventKind
 
 	// UserID is the account the decision concerns.
-	UserID string
+	UserID uuid.UUID
 
 	// Remaining is the number of unused codes left for UserID after the
 	// decision. Meaningful for EventCodeConsumed; zero (and not

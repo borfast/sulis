@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"uuid"
 )
 
 // recordingSink collects every event Emit is called with, for assertions.
@@ -33,7 +34,7 @@ func (r *recordingSink) all() []Event {
 	return out
 }
 
-func (r *recordingSink) kindsFor(userID string) []EventKind {
+func (r *recordingSink) kindsFor(userID uuid.UUID) []EventKind {
 	var out []EventKind
 	for _, e := range r.all() {
 		if e.UserID == userID {
@@ -49,11 +50,11 @@ func TestConsumeEmitsCodeConsumedWithRemaining(t *testing.T) {
 	svc := mustService(t, store, WithCount(2), WithEventSink(sink))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 
@@ -64,8 +65,8 @@ func TestConsumeEmitsCodeConsumedWithRemaining(t *testing.T) {
 	if events[0].Kind != EventCodeConsumed {
 		t.Fatalf("event kind = %q, want %q", events[0].Kind, EventCodeConsumed)
 	}
-	if events[0].UserID != "user1" {
-		t.Fatalf("event UserID = %q, want %q", events[0].UserID, "user1")
+	if events[0].UserID != testUser {
+		t.Fatalf("event UserID = %v, want %v", events[0].UserID, testUser)
 	}
 	if events[0].Remaining != 1 {
 		t.Fatalf("event Remaining = %d, want 1", events[0].Remaining)
@@ -81,10 +82,10 @@ func TestConsumeEmitsCodeRejectedOnInvalidCode(t *testing.T) {
 	svc := mustService(t, store, WithEventSink(sink))
 	ctx := context.Background()
 
-	if _, err := svc.Generate(ctx, "user1"); err != nil {
+	if _, err := svc.Generate(ctx, testUser); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", "not-a-real-code"); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, testUser, "not-a-real-code"); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume error = %v, want ErrCodeInvalid", err)
 	}
 
@@ -92,8 +93,8 @@ func TestConsumeEmitsCodeRejectedOnInvalidCode(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventCodeRejected {
 		t.Fatalf("events = %+v, want exactly one EventCodeRejected", events)
 	}
-	if events[0].UserID != "user1" {
-		t.Fatalf("event UserID = %q, want %q", events[0].UserID, "user1")
+	if events[0].UserID != testUser {
+		t.Fatalf("event UserID = %v, want %v", events[0].UserID, testUser)
 	}
 }
 
@@ -107,17 +108,17 @@ func TestConsumeEmitsCodesExhaustedOnTheLastCode(t *testing.T) {
 	svc := mustService(t, store, WithCount(1), WithEventSink(sink))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 
-	kinds := sink.kindsFor("user1")
+	kinds := sink.kindsFor(testUser)
 	if len(kinds) != 2 {
-		t.Fatalf("got %d events for user1, want 2 (consumed + exhausted): %v", len(kinds), kinds)
+		t.Fatalf("got %d events for the user, want 2 (consumed + exhausted): %v", len(kinds), kinds)
 	}
 	if kinds[0] != EventCodeConsumed || kinds[1] != EventCodesExhausted {
 		t.Fatalf("event kinds = %v, want [%q %q]", kinds, EventCodeConsumed, EventCodesExhausted)
@@ -130,11 +131,11 @@ func TestConsumeDoesNotEmitExhaustedWhenCodesRemain(t *testing.T) {
 	svc := mustService(t, store, WithCount(2), WithEventSink(sink))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 
@@ -150,11 +151,11 @@ func TestNilEventSinkIsANoOp(t *testing.T) {
 	svc := mustService(t, store) // no WithEventSink
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume with no sink configured: %v", err)
 	}
 }
@@ -170,11 +171,11 @@ func TestEventSinkPanicDoesNotFailConsume(t *testing.T) {
 	svc := mustService(t, store, WithEventSink(panicSink{}))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v, want nil even though the sink panicked", err)
 	}
 }
@@ -192,10 +193,10 @@ func TestConsumeEmitsCodeRateLimitedOnDeniedAttempt(t *testing.T) {
 	svc := mustService(t, store, WithLimiter(limiter), WithEventSink(sink))
 	ctx := context.Background()
 
-	if _, err := svc.Generate(ctx, "user1"); err != nil {
+	if _, err := svc.Generate(ctx, testUser); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", "irrelevant-code"); !errors.Is(err, ErrCodeRateLimited) {
+	if _, err := svc.Consume(ctx, testUser, "irrelevant-code"); !errors.Is(err, ErrCodeRateLimited) {
 		t.Fatalf("Consume error = %v, want ErrCodeRateLimited", err)
 	}
 
@@ -203,8 +204,8 @@ func TestConsumeEmitsCodeRateLimitedOnDeniedAttempt(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventCodeRateLimited {
 		t.Fatalf("events = %+v, want exactly one EventCodeRateLimited", events)
 	}
-	if events[0].UserID != "user1" {
-		t.Fatalf("event UserID = %q, want %q", events[0].UserID, "user1")
+	if events[0].UserID != testUser {
+		t.Fatalf("event UserID = %v, want %v", events[0].UserID, testUser)
 	}
 }
 
@@ -227,21 +228,21 @@ func TestEveryDeclaredRecoveryEventKindIsEmitted(t *testing.T) {
 	svc := mustService(t, store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
 	limiter.denied = true
-	if _, err := svc.Consume(ctx, "user1", "wrong-code"); !errors.Is(err, ErrCodeRateLimited) {
+	if _, err := svc.Consume(ctx, testUser, "wrong-code"); !errors.Is(err, ErrCodeRateLimited) {
 		t.Fatalf("Consume(rate limited): %v", err)
 	}
 	limiter.denied = false
 
-	if _, err := svc.Consume(ctx, "user1", "wrong-code"); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, testUser, "wrong-code"); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(wrong code): %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 
@@ -288,7 +289,7 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	svc := mustService(t, store, WithCount(1), WithEventSink(sink), WithLimiter(limiter))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -301,7 +302,7 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	// the other two kinds below. The Limiter denies before the store is
 	// ever touched, so the code is still unconsumed afterward.
 	limiter.denied = true
-	if _, err := svc.Consume(ctx, "user1", secret); !errors.Is(err, ErrCodeRateLimited) {
+	if _, err := svc.Consume(ctx, testUser, secret); !errors.Is(err, ErrCodeRateLimited) {
 		t.Fatalf("Consume(rate limited): %v", err)
 	}
 	limiter.denied = false
@@ -309,10 +310,10 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 	// A rejection next, so the wrong code (and its hash) is also in the
 	// secret set the scan checks against — Consume must not echo back what
 	// it was handed even when refusing it.
-	if _, err := svc.Consume(ctx, "user1", wrongCode); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, testUser, wrongCode); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(wrong code): %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", secret); err != nil {
+	if _, err := svc.Consume(ctx, testUser, secret); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 
@@ -337,13 +338,14 @@ func TestNoRecoveryEventCarriesTheCode(t *testing.T) {
 // could pass because the scanner is broken rather than because the events
 // are clean.
 func TestRecoveryEventScanCatchesAPlantedSecret(t *testing.T) {
-	const secret = "s3cr3t-planted-value"
+	planted := uuid.NewV7()
+	secret := planted.String()
 
 	for _, tc := range []struct {
 		name  string
 		event Event
 	}{
-		{"UserID", Event{Kind: EventCodeConsumed, UserID: secret}},
+		{"UserID", Event{Kind: EventCodeConsumed, UserID: planted}},
 		{"Kind", Event{Kind: EventKind(secret)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -353,7 +355,7 @@ func TestRecoveryEventScanCatchesAPlantedSecret(t *testing.T) {
 		})
 	}
 
-	if scanRecoveryEventFor(t, Event{Kind: EventCodeConsumed, UserID: "an-ordinary-id"}, secret) {
+	if scanRecoveryEventFor(t, Event{Kind: EventCodeConsumed, UserID: uuid.NewV7()}, secret) {
 		t.Fatal("the scanner reports a secret in an event that has none")
 	}
 }

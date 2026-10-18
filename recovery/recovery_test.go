@@ -7,7 +7,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"uuid"
 )
+
+// testUser is the user every test in this package acts for.
+var testUser = uuid.NewV7()
 
 // In-memory recovery code store for testing.
 //
@@ -17,14 +21,14 @@ import (
 // recovery — an import cycle Go rejects outright. Keep the two in step.
 type memStore struct {
 	mu    sync.Mutex
-	codes map[string]map[string]struct{}
+	codes map[uuid.UUID]map[string]struct{}
 }
 
 func newMemStore() *memStore {
-	return &memStore{codes: make(map[string]map[string]struct{})}
+	return &memStore{codes: make(map[uuid.UUID]map[string]struct{})}
 }
 
-func (m *memStore) ReplaceCodes(_ context.Context, userID string, hashes []string) error {
+func (m *memStore) ReplaceCodes(_ context.Context, userID uuid.UUID, hashes []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set := make(map[string]struct{}, len(hashes))
@@ -35,7 +39,7 @@ func (m *memStore) ReplaceCodes(_ context.Context, userID string, hashes []strin
 	return nil
 }
 
-func (m *memStore) ConsumeCode(_ context.Context, userID, hash string) (int, error) {
+func (m *memStore) ConsumeCode(_ context.Context, userID uuid.UUID, hash string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set, ok := m.codes[userID]
@@ -49,13 +53,13 @@ func (m *memStore) ConsumeCode(_ context.Context, userID, hash string) (int, err
 	return len(set), nil
 }
 
-func (m *memStore) CountCodes(_ context.Context, userID string) (int, error) {
+func (m *memStore) CountCodes(_ context.Context, userID uuid.UUID) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.codes[userID]), nil
 }
 
-func (m *memStore) DeleteCodes(_ context.Context, userID string) error {
+func (m *memStore) DeleteCodes(_ context.Context, userID uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.codes, userID)
@@ -72,7 +76,7 @@ func TestGenerateReturnsFormattedCodesAndStoresOnlyHashes(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -86,7 +90,7 @@ func TestGenerateReturnsFormattedCodesAndStoresOnlyHashes(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	hashes := store.codes["user1"]
+	hashes := store.codes[testUser]
 	store.mu.Unlock()
 	if len(hashes) != defaultCount {
 		t.Fatalf("expected %d stored hashes, got %d", defaultCount, len(hashes))
@@ -108,19 +112,19 @@ func TestGenerateReplacesPreviousSet(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	oldCodes, err := svc.Generate(ctx, "user1")
+	oldCodes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate (first): %v", err)
 	}
-	newCodes, err := svc.Generate(ctx, "user1")
+	newCodes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate (second): %v", err)
 	}
 
-	if _, err := svc.Consume(ctx, "user1", oldCodes[0]); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, testUser, oldCodes[0]); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(old code): expected ErrCodeInvalid, got %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", newCodes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, newCodes[0]); err != nil {
 		t.Fatalf("Consume(new code): expected nil, got %v", err)
 	}
 }
@@ -130,13 +134,13 @@ func TestConsumeAcceptsSloppyInput(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	sloppy := "  " + strings.ToUpper(strings.ReplaceAll(codes[0], "-", "")) + "  "
 
-	if _, err := svc.Consume(ctx, "user1", sloppy); err != nil {
+	if _, err := svc.Consume(ctx, testUser, sloppy); err != nil {
 		t.Fatalf("Consume(sloppy): expected nil, got %v", err)
 	}
 }
@@ -171,14 +175,14 @@ func TestConsumeIsSingleUse(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("first Consume: expected nil, got %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); !errors.Is(err, ErrCodeInvalid) {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("second Consume: expected ErrCodeInvalid, got %v", err)
 	}
 }
@@ -188,7 +192,7 @@ func TestConcurrentConsumeSingleWinner(t *testing.T) {
 	svc := mustService(t, store, WithCount(1))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -200,7 +204,7 @@ func TestConcurrentConsumeSingleWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = svc.Consume(ctx, "user1", code)
+			_, errs[i] = svc.Consume(ctx, testUser, code)
 		}(i)
 	}
 	wg.Wait()
@@ -226,11 +230,11 @@ func TestRemainingCounts(t *testing.T) {
 	svc := mustService(t, store, WithCount(5))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	remaining, err := svc.Remaining(ctx, "user1")
+	remaining, err := svc.Remaining(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Remaining: %v", err)
 	}
@@ -238,10 +242,10 @@ func TestRemainingCounts(t *testing.T) {
 		t.Fatalf("expected 5 remaining, got %d", remaining)
 	}
 
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
-	remaining, err = svc.Remaining(ctx, "user1")
+	remaining, err = svc.Remaining(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Remaining: %v", err)
 	}
@@ -255,13 +259,13 @@ func TestDisableDeletesCodes(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	if _, err := svc.Generate(ctx, "user1"); err != nil {
+	if _, err := svc.Generate(ctx, testUser); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Disable(ctx, "user1"); err != nil {
+	if err := svc.Disable(ctx, testUser); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
-	remaining, err := svc.Remaining(ctx, "user1")
+	remaining, err := svc.Remaining(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Remaining: %v", err)
 	}
@@ -275,7 +279,7 @@ func TestWithCountGeneratesRequestedNumber(t *testing.T) {
 	svc := mustService(t, store, WithCount(3))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -325,7 +329,7 @@ func TestNewServiceRejectsInvalidConfiguration(t *testing.T) {
 func TestNewServiceDefaultsToTenCodes(t *testing.T) {
 	svc := mustService(t, newMemStore())
 
-	codes, err := svc.Generate(context.Background(), "user1")
+	codes, err := svc.Generate(context.Background(), testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -341,12 +345,12 @@ func TestConsumeReportsRemainingCount(t *testing.T) {
 	svc := mustService(t, store, WithCount(2))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	remaining, err := svc.Consume(ctx, testUser, codes[0])
 	if err != nil {
 		t.Fatalf("first Consume: %v", err)
 	}
@@ -354,7 +358,7 @@ func TestConsumeReportsRemainingCount(t *testing.T) {
 		t.Fatalf("first Consume: remaining = %d, want 1", remaining)
 	}
 
-	remaining, err = svc.Consume(ctx, "user1", codes[1])
+	remaining, err = svc.Consume(ctx, testUser, codes[1])
 	if err != nil {
 		t.Fatalf("second (last) Consume: %v", err)
 	}
@@ -368,11 +372,11 @@ func TestConsumeReturnsZeroRemainingOnRejection(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	if _, err := svc.Generate(ctx, "user1"); err != nil {
+	if _, err := svc.Generate(ctx, testUser); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", "not-a-real-code")
+	remaining, err := svc.Consume(ctx, testUser, "not-a-real-code")
 	if !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume(wrong code) error = %v, want ErrCodeInvalid", err)
 	}
@@ -390,7 +394,7 @@ type failingConsumeStore struct {
 	failConsume bool
 }
 
-func (f *failingConsumeStore) ConsumeCode(ctx context.Context, userID, hash string) (int, error) {
+func (f *failingConsumeStore) ConsumeCode(ctx context.Context, userID uuid.UUID, hash string) (int, error) {
 	if f.failConsume {
 		return 0, errors.New("simulated store failure")
 	}
@@ -405,12 +409,12 @@ func TestConsumePropagatesConsumeCodeStoreError(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	remaining, err := svc.Consume(ctx, testUser, codes[0])
 	if err == nil || errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume error = %v, want the raw store error propagated unchanged", err)
 	}
@@ -428,12 +432,12 @@ func TestConsumeReturnsTheCountFromTheSameOperation(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	remaining, err := svc.Consume(ctx, testUser, codes[0])
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
@@ -448,7 +452,7 @@ type lyingCountStore struct {
 	*memStore
 }
 
-func (l *lyingCountStore) CountCodes(context.Context, string) (int, error) {
+func (l *lyingCountStore) CountCodes(context.Context, uuid.UUID) (int, error) {
 	return -42, nil
 }
 
@@ -464,16 +468,16 @@ func TestConsumeAfterDisablePurgesTheCode(t *testing.T) {
 	svc := mustService(t, store)
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if err := svc.Disable(ctx, "user1"); err != nil {
+	if err := svc.Disable(ctx, testUser); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	remaining, err := svc.Consume(ctx, testUser, codes[0])
 	if !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("Consume after Disable error = %v, want ErrCodeInvalid — a purged code must not authenticate anyone", err)
 	}
@@ -524,26 +528,26 @@ func TestConsumeConsultsLimiterBeforeCheckingCode(t *testing.T) {
 	svc := mustService(t, store, WithLimiter(limiter))
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	remaining, err := svc.Consume(ctx, "user1", codes[0])
+	remaining, err := svc.Consume(ctx, testUser, codes[0])
 	if !errors.Is(err, ErrCodeRateLimited) {
 		t.Fatalf("Consume error = %v, want ErrCodeRateLimited", err)
 	}
 	if remaining != 0 {
 		t.Fatalf("Consume remaining = %d, want 0", remaining)
 	}
-	if !limiter.sawKey("recovery:user1") {
-		t.Fatalf("limiter keys = %v, want %q among them", limiter.keys, "recovery:user1")
+	if !limiter.sawKey("recovery:" + testUser.String()) {
+		t.Fatalf("limiter keys = %v, want %q among them", limiter.keys, "recovery:"+testUser.String())
 	}
 
 	// The limiter denied the attempt before the store was ever touched:
 	// the code must still be there, unconsumed, once the limiter allows.
 	limiter.denied = false
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume after limiter allows: %v", err)
 	}
 }
@@ -555,11 +559,11 @@ func TestConsumeNilLimiterIsNoOp(t *testing.T) {
 	svc := mustService(t, store) // no WithLimiter
 	ctx := context.Background()
 
-	codes, err := svc.Generate(ctx, "user1")
+	codes, err := svc.Generate(ctx, testUser)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if _, err := svc.Consume(ctx, "user1", codes[0]); err != nil {
+	if _, err := svc.Consume(ctx, testUser, codes[0]); err != nil {
 		t.Fatalf("Consume with no limiter configured: %v", err)
 	}
 }

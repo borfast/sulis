@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"uuid"
 )
 
 // ErrCodeInvalid is returned when a supplied recovery code does not match
@@ -141,7 +142,7 @@ func NewService(store Store, opts ...Option) (*Service, error) {
 // replacing any previously issued set. It returns the plaintext codes for
 // one-time display to the user; only their hashes are persisted, so the
 // plaintext values cannot be recovered later.
-func (s *Service) Generate(ctx context.Context, userID string) ([]string, error) {
+func (s *Service) Generate(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	codes := make([]string, s.cfg.Count)
 	hashes := make([]string, s.cfg.Count)
 	for i := range codes {
@@ -174,8 +175,8 @@ func (s *Service) Generate(ctx context.Context, userID string) ([]string, error)
 // anyone, or push the user toward re-enrolling a stronger factor — see this
 // package's doc comment for the full sequence a real integration needs,
 // which is the calling application's responsibility.
-func (s *Service) Consume(ctx context.Context, userID, code string) (remaining int, err error) {
-	if err = s.allow(ctx, "recovery:"+userID); err != nil {
+func (s *Service) Consume(ctx context.Context, userID uuid.UUID, code string) (remaining int, err error) {
+	if err = s.allow(ctx, "recovery:"+userID.String()); err != nil {
 		s.emit(ctx, Event{Kind: EventCodeRateLimited, UserID: userID})
 		return 0, err
 	}
@@ -197,7 +198,7 @@ func (s *Service) Consume(ctx context.Context, userID, code string) (remaining i
 }
 
 // Remaining reports the number of unused recovery codes for userID.
-func (s *Service) Remaining(ctx context.Context, userID string) (int, error) {
+func (s *Service) Remaining(ctx context.Context, userID uuid.UUID) (int, error) {
 	return s.store.CountCodes(ctx, userID)
 }
 
@@ -216,7 +217,7 @@ func (s *Service) Remaining(ctx context.Context, userID string) (int, error) {
 // unsurprisingly, what an explicit "turn off recovery codes" setting
 // should call — both uses want exactly the same operation, which is why
 // there is one method here rather than two identically-implemented ones.
-func (s *Service) Disable(ctx context.Context, userID string) error {
+func (s *Service) Disable(ctx context.Context, userID uuid.UUID) error {
 	return s.store.DeleteCodes(ctx, userID)
 }
 

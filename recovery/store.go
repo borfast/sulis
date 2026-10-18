@@ -3,6 +3,7 @@ package recovery
 import (
 	"context"
 	"errors"
+	"uuid"
 )
 
 // ErrCodeNotFound is returned by Store implementations when ConsumeCode
@@ -15,7 +16,7 @@ var ErrCodeNotFound = errors.New("recovery: code not found")
 // never stored.
 type Store interface {
 	// ReplaceCodes atomically replaces the user's full code set.
-	ReplaceCodes(ctx context.Context, userID string, hashes []string) error
+	ReplaceCodes(ctx context.Context, userID uuid.UUID, hashes []string) error
 	// ConsumeCode atomically deletes the code matching userID+hash.
 	// Returns ErrCodeNotFound if absent. Lookup and delete MUST be one
 	// atomic operation — the same requirement TokenStore.ConsumeToken,
@@ -55,9 +56,9 @@ type Store interface {
 	// engine requires to make that transaction serial per user; snapshot
 	// isolation alone is not enough, because a count is a question about
 	// absent rows. Return 0 with the error when the code is not found.
-	ConsumeCode(ctx context.Context, userID, hash string) (remaining int, err error)
+	ConsumeCode(ctx context.Context, userID uuid.UUID, hash string) (remaining int, err error)
 	// CountCodes returns the number of unused codes remaining for the user.
-	CountCodes(ctx context.Context, userID string) (int, error)
+	CountCodes(ctx context.Context, userID uuid.UUID) (int, error)
 	// DeleteCodes removes all codes for the user.
-	DeleteCodes(ctx context.Context, userID string) error
+	DeleteCodes(ctx context.Context, userID uuid.UUID) error
 }

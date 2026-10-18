@@ -469,10 +469,11 @@ func TestNewAdoptsACallerOwnedHandle(t *testing.T) {
 	if db.SQL() != handle {
 		t.Fatal("SQL() returned a different handle than the one passed to New")
 	}
-	if err := db.RecoveryStore().ReplaceCodes(ctx, "user-1", []string{"hash-a", "hash-b"}); err != nil {
+	userID := uuid.NewV7()
+	if err := db.RecoveryStore().ReplaceCodes(ctx, userID, []string{"hash-a", "hash-b"}); err != nil {
 		t.Fatalf("ReplaceCodes: %v", err)
 	}
-	count, err := db.RecoveryStore().CountCodes(ctx, "user-1")
+	count, err := db.RecoveryStore().CountCodes(ctx, userID)
 	if err != nil {
 		t.Fatalf("CountCodes: %v", err)
 	}
@@ -667,10 +668,10 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 			return db.TOTPStore().SaveTOTP(ctx, &totp.Credential{ID: uuid.NewV7(), UserID: uuid.NewV7()})
 		},
 		"DeleteTOTP":   func() error { return db.TOTPStore().DeleteTOTP(ctx, uuid.NewV7()) },
-		"ReplaceCodes": func() error { return db.RecoveryStore().ReplaceCodes(ctx, "u", []string{"h"}) },
-		"ConsumeCode":  func() error { _, err := db.RecoveryStore().ConsumeCode(ctx, "u", "h"); return err },
-		"CountCodes":   func() error { _, err := db.RecoveryStore().CountCodes(ctx, "u"); return err },
-		"DeleteCodes":  func() error { return db.RecoveryStore().DeleteCodes(ctx, "u") },
+		"ReplaceCodes": func() error { return db.RecoveryStore().ReplaceCodes(ctx, uuid.NewV7(), []string{"h"}) },
+		"ConsumeCode":  func() error { _, err := db.RecoveryStore().ConsumeCode(ctx, uuid.NewV7(), "h"); return err },
+		"CountCodes":   func() error { _, err := db.RecoveryStore().CountCodes(ctx, uuid.NewV7()); return err },
+		"DeleteCodes":  func() error { return db.RecoveryStore().DeleteCodes(ctx, uuid.NewV7()) },
 	}
 
 	for name, call := range calls {

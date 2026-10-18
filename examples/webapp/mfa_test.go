@@ -428,7 +428,7 @@ func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("looking up the victim: %v", err)
 	}
-	before, err := a.recovery.Remaining(t.Context(), user.ID.String()) // transitional: Task 5
+	before, err := a.recovery.Remaining(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("reading remaining recovery codes: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestFabricatedPendingCookieCannotProbeFactors(t *testing.T) {
 	}
 
 	// The factor check never ran, so the victim's code was never consumed.
-	after, err := a.recovery.Remaining(t.Context(), user.ID.String()) // transitional: Task 5
+	after, err := a.recovery.Remaining(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("reading remaining recovery codes after the attempt: %v", err)
 	}

@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS totp_pending (
 -- and it scopes a code to its owner: presenting another user's code hash
 -- matches no row.
 CREATE TABLE IF NOT EXISTS recovery_codes (
-    user_id    text NOT NULL,
+    user_id    uuid NOT NULL,
     code_hash  text NOT NULL,
     created_at text NOT NULL,
     PRIMARY KEY (user_id, code_hash)

@@ -49,7 +49,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	totpActive := totpErr == nil
 
-	remaining, err := a.recovery.Remaining(ctx, user.ID.String()) // transitional: Task 5
+	remaining, err := a.recovery.Remaining(ctx, user.ID)
 	if err != nil {
 		a.log.Error("checking recovery codes remaining", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
@@ -202,7 +202,7 @@ func (a *app) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.log.Error("checking remaining passkeys", "user_id", user.ID, "error", err)
 	} else if len(creds) == 0 {
-		if err := a.recovery.Disable(r.Context(), user.ID.String()); err != nil { // transitional: Task 5
+		if err := a.recovery.Disable(r.Context(), user.ID); err != nil {
 			a.log.Error("disabling recovery codes", "user_id", user.ID, "error", err)
 		}
 	}
@@ -236,7 +236,7 @@ func (a *app) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	codes, err := a.recovery.Generate(r.Context(), user.ID.String()) // transitional: Task 5
+	codes, err := a.recovery.Generate(r.Context(), user.ID)
 	if err != nil {
 		a.log.Error("generating recovery codes", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not generate recovery codes.")
@@ -316,7 +316,7 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 
 	var verifyErr error
 	if useRecovery {
-		_, verifyErr = a.recovery.Consume(r.Context(), userID.String(), code) // transitional: Task 5
+		_, verifyErr = a.recovery.Consume(r.Context(), userID, code)
 	} else {
 		verifyErr = a.totp.Validate(r.Context(), userID, code)
 	}
