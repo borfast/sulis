@@ -33,6 +33,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/passkey"
@@ -260,10 +261,10 @@ func TestEmailUniquenessIsCaseInsensitive(t *testing.T) {
 	db := openDB(t)
 	users := db.UserStore()
 
-	if err := users.CreateUser(ctx, &sulis.User{ID: "user-1", Email: "someone@example.test"}); err != nil {
+	if err := users.CreateUser(ctx, &sulis.User{ID: uuid.NewV7(), Email: "someone@example.test"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	err := users.CreateUser(ctx, &sulis.User{ID: "user-2", Email: "SomeOne@Example.Test"})
+	err := users.CreateUser(ctx, &sulis.User{ID: uuid.NewV7(), Email: "SomeOne@Example.Test"})
 	if !errors.Is(err, sulis.ErrUserAlreadyExists) {
 		t.Fatalf("CreateUser with a differently-cased duplicate = %v, want ErrUserAlreadyExists", err)
 	}
@@ -277,15 +278,16 @@ func TestGetUserByEmailIsCaseInsensitive(t *testing.T) {
 	db := openDB(t)
 	users := db.UserStore()
 
-	if err := users.CreateUser(ctx, &sulis.User{ID: "user-1", Email: "someone@example.test"}); err != nil {
+	id := uuid.NewV7()
+	if err := users.CreateUser(ctx, &sulis.User{ID: id, Email: "someone@example.test"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	got, err := users.GetUserByEmail(ctx, "SomeOne@Example.Test")
 	if err != nil {
 		t.Fatalf("GetUserByEmail with different casing: %v", err)
 	}
-	if got.ID != "user-1" {
-		t.Fatalf("GetUserByEmail returned %q, want user-1", got.ID)
+	if got.ID != id {
+		t.Fatalf("GetUserByEmail returned %v, want %v", got.ID, id)
 	}
 }
 
@@ -302,7 +304,7 @@ func TestTimestampsRoundTripToTheNanosecond(t *testing.T) {
 	// Nanoseconds that no microsecond-resolution column can hold.
 	at := time.Date(2026, 8, 18, 12, 34, 56, 123456789, time.UTC)
 	sess := &sulis.Session{
-		ID: "session-1", UserID: "user-1", TokenHash: "hash-1",
+		ID: uuid.NewV7(), UserID: uuid.NewV7(), TokenHash: "hash-1",
 		ExpiresAt: at, CreatedAt: at, AuthenticatedAt: at, LastSeenAt: at,
 	}
 	if err := sessions.CreateSession(ctx, sess); err != nil {
@@ -595,35 +597,36 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 	}
 
 	now := time.Now()
+	id := uuid.NewV7()
 	calls := map[string]func() error{
-		"CreateUser":       func() error { return db.UserStore().CreateUser(ctx, &sulis.User{ID: "u"}) },
-		"GetUserByID":      func() error { _, err := db.UserStore().GetUserByID(ctx, "u"); return err },
+		"CreateUser":       func() error { return db.UserStore().CreateUser(ctx, &sulis.User{ID: id}) },
+		"GetUserByID":      func() error { _, err := db.UserStore().GetUserByID(ctx, id); return err },
 		"GetUserByEmail":   func() error { _, err := db.UserStore().GetUserByEmail(ctx, "e"); return err },
-		"UpdateUser":       func() error { return db.UserStore().UpdateUser(ctx, &sulis.User{ID: "u"}) },
-		"DeleteUser":       func() error { return db.UserStore().DeleteUser(ctx, "u") },
-		"CreateSession":    func() error { return db.SessionStore().CreateSession(ctx, &sulis.Session{ID: "s"}) },
+		"UpdateUser":       func() error { return db.UserStore().UpdateUser(ctx, &sulis.User{ID: id}) },
+		"DeleteUser":       func() error { return db.UserStore().DeleteUser(ctx, id) },
+		"CreateSession":    func() error { return db.SessionStore().CreateSession(ctx, &sulis.Session{ID: id}) },
 		"GetSession":       func() error { _, err := db.SessionStore().GetSessionByTokenHash(ctx, "h"); return err },
-		"ListUserSessions": func() error { _, err := db.SessionStore().ListUserSessions(ctx, "u"); return err },
-		"DeleteSession":    func() error { return db.SessionStore().DeleteSession(ctx, "u", "s") },
+		"ListUserSessions": func() error { _, err := db.SessionStore().ListUserSessions(ctx, id); return err },
+		"DeleteSession":    func() error { return db.SessionStore().DeleteSession(ctx, id, id) },
 		"DeleteUserSessions": func() error {
-			return db.SessionStore().DeleteUserSessions(ctx, "u")
+			return db.SessionStore().DeleteUserSessions(ctx, id)
 		},
 		"DeleteUserSessionsExcept": func() error {
-			return db.SessionStore().DeleteUserSessionsExcept(ctx, "u", "s")
+			return db.SessionStore().DeleteUserSessionsExcept(ctx, id, id)
 		},
 		"CleanExpired": func() error { return db.SessionStore().CleanExpired(ctx) },
 		"UpdateAuthenticatedAt": func() error {
-			return db.SessionStore().UpdateAuthenticatedAt(ctx, "s", now)
+			return db.SessionStore().UpdateAuthenticatedAt(ctx, id, now)
 		},
-		"TouchSession": func() error { return db.SessionStore().TouchSession(ctx, "s", now, &now) },
-		"CreateToken":  func() error { return db.TokenStore().CreateToken(ctx, &sulis.Token{ID: "t"}) },
+		"TouchSession": func() error { return db.SessionStore().TouchSession(ctx, id, now, &now) },
+		"CreateToken":  func() error { return db.TokenStore().CreateToken(ctx, &sulis.Token{ID: id}) },
 		"ConsumeToken": func() error {
 			_, err := db.TokenStore().ConsumeToken(ctx, "h", sulis.TokenPurposeMagicLink)
 			return err
 		},
 		"DeleteExpired": func() error { return db.TokenStore().DeleteExpiredTokens(ctx) },
 		"DeleteUserTokens": func() error {
-			return db.TokenStore().DeleteUserTokens(ctx, "u", sulis.TokenPurposeMagicLink)
+			return db.TokenStore().DeleteUserTokens(ctx, id, sulis.TokenPurposeMagicLink)
 		},
 		"SaveCredential": func() error {
 			return db.PasskeyStore().SaveCredential(ctx, &passkey.Credential{ID: "c"})

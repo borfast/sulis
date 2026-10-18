@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -40,7 +41,7 @@ func (s *SessionStore) CreateSession(ctx context.Context, session *sulis.Session
 	const q = `INSERT INTO sessions (` + sessionColumns + `)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = s.db.ExecContext(ctx, q,
-		session.ID, session.UserID, session.TokenHash,
+		idArg(session.ID), idArg(session.UserID), session.TokenHash,
 		formatTime(session.ExpiresAt), formatTime(session.CreatedAt),
 		formatTime(session.AuthenticatedAt), string(session.Method),
 		formatTime(session.LastSeenAt), nullableTime(session.IdleExpiresAt),
@@ -72,10 +73,10 @@ func (s *SessionStore) GetSessionByTokenHash(ctx context.Context, tokenHash stri
 // TokenHash comes back exactly as stored, the same as GetSessionByTokenHash:
 // blanking it before an application sees it is Sulis.ListUserSessions's job,
 // done once there rather than depended on here.
-func (s *SessionStore) ListUserSessions(ctx context.Context, userID string) ([]sulis.Session, error) {
+func (s *SessionStore) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]sulis.Session, error) {
 	const q = `SELECT ` + sessionColumns + ` FROM sessions WHERE user_id = ?`
 
-	rows, err := s.db.QueryContext(ctx, q, userID)
+	rows, err := s.db.QueryContext(ctx, q, idArg(userID))
 	if err != nil {
 		return nil, fmt.Errorf("sulis/sqlite: listing a user's sessions: %w", err)
 	}
@@ -103,10 +104,10 @@ func (s *SessionStore) ListUserSessions(ctx context.Context, userID string) ([]s
 // else's session — is sulis.ErrSessionNotFound. The two cases are
 // deliberately not distinguished: telling a caller "that session exists but
 // is not yours" would answer a question they have no business asking.
-func (s *SessionStore) DeleteSession(ctx context.Context, userID, id string) error {
+func (s *SessionStore) DeleteSession(ctx context.Context, userID, id uuid.UUID) error {
 	const q = `DELETE FROM sessions WHERE id = ? AND user_id = ?`
 
-	res, err := s.db.ExecContext(ctx, q, id, userID)
+	res, err := s.db.ExecContext(ctx, q, idArg(id), idArg(userID))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a session: %w", err)
 	}
@@ -122,10 +123,10 @@ func (s *SessionStore) DeleteSession(ctx context.Context, userID, id string) err
 
 // DeleteUserSessions removes every session belonging to userID. Matching
 // nothing is not an error.
-func (s *SessionStore) DeleteUserSessions(ctx context.Context, userID string) error {
+func (s *SessionStore) DeleteUserSessions(ctx context.Context, userID uuid.UUID) error {
 	const q = `DELETE FROM sessions WHERE user_id = ?`
 
-	if _, err := s.db.ExecContext(ctx, q, userID); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a user's sessions: %w", err)
 	}
 	return nil
@@ -135,10 +136,10 @@ func (s *SessionStore) DeleteUserSessions(ctx context.Context, userID string) er
 // keepSessionID — "sign out everywhere else". keepSessionID naming nothing,
 // or naming another user's session, is not an error: every OTHER session for
 // userID goes regardless.
-func (s *SessionStore) DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID string) error {
+func (s *SessionStore) DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID uuid.UUID) error {
 	const q = `DELETE FROM sessions WHERE user_id = ? AND id <> ?`
 
-	if _, err := s.db.ExecContext(ctx, q, userID, keepSessionID); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, idArg(userID), idArg(keepSessionID)); err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a user's other sessions: %w", err)
 	}
 	return nil
@@ -163,10 +164,10 @@ func (s *SessionStore) CleanExpired(ctx context.Context) error {
 // This is ReAuthenticate's write path: it refreshes how recently the
 // session's owner proved their credential without minting a new session or
 // rotating its token.
-func (s *SessionStore) UpdateAuthenticatedAt(ctx context.Context, id string, at time.Time) error {
+func (s *SessionStore) UpdateAuthenticatedAt(ctx context.Context, id uuid.UUID, at time.Time) error {
 	const q = `UPDATE sessions SET authenticated_at = ? WHERE id = ?`
 
-	res, err := s.db.ExecContext(ctx, q, formatTime(at), id)
+	res, err := s.db.ExecContext(ctx, q, formatTime(at), idArg(id))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: stamping a session's authenticated_at: %w", err)
 	}
@@ -187,10 +188,10 @@ func (s *SessionStore) UpdateAuthenticatedAt(ctx context.Context, id string, at 
 // A nil idleExpires is written as SQL NULL, clearing whatever was there: an
 // application that enables idle expiry and later disables it must not have
 // the old deadline linger and quietly start enforcing itself again.
-func (s *SessionStore) TouchSession(ctx context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *SessionStore) TouchSession(ctx context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	const q = `UPDATE sessions SET last_seen_at = ?, idle_expires_at = ? WHERE id = ?`
 
-	res, err := s.db.ExecContext(ctx, q, formatTime(lastSeen), nullableTime(idleExpires), id)
+	res, err := s.db.ExecContext(ctx, q, formatTime(lastSeen), nullableTime(idleExpires), idArg(id))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: touching a session: %w", err)
 	}
@@ -218,7 +219,7 @@ func scanSession(row scanner, dst *sulis.Session) error {
 		idleExpiresAt, metadata                           sql.NullString
 	)
 	err := row.Scan(
-		&dst.ID, &dst.UserID, &dst.TokenHash, &expiresAt, &createdAt,
+		scanID(&dst.ID), scanID(&dst.UserID), &dst.TokenHash, &expiresAt, &createdAt,
 		&authenticatedAt, &method, &lastSeenAt, &idleExpiresAt,
 		&dst.IP, &dst.UserAgent, &metadata,
 	)

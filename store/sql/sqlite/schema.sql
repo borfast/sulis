@@ -20,6 +20,8 @@
 -- is chronological order, which is what the expiry sweeps below compare on,
 -- and nine fractional digits round-trip a time.Time without losing
 -- precision. Booleans are INTEGER 0/1. Metadata and transports are JSON text.
+-- The ID columns of users, sessions and tokens are 16-byte BLOBs, enforced by
+-- a CHECK on length.
 --
 -- # No foreign keys
 --
@@ -49,7 +51,7 @@
 -- confusable duplicate on write and matching it on lookup is the safer of
 -- the two behaviors.
 CREATE TABLE IF NOT EXISTS users (
-    id                    TEXT    PRIMARY KEY,
+    id                    BLOB    PRIMARY KEY CHECK (length(id) = 16),
     email                 TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     password_hash         TEXT    NOT NULL DEFAULT '',
     created_at            TEXT    NOT NULL,
@@ -69,8 +71,8 @@ CREATE TABLE IF NOT EXISTS users (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id               TEXT PRIMARY KEY,
-    user_id          TEXT NOT NULL,
+    id               BLOB PRIMARY KEY CHECK (length(id) = 16),
+    user_id          BLOB NOT NULL CHECK (length(user_id) = 16),
     -- The SHA-256 hash of the session token. The raw token is never stored;
     -- it exists only in the response that issued it.
     token_hash       TEXT NOT NULL UNIQUE,
@@ -92,9 +94,9 @@ CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS tokens (
-    id         TEXT    PRIMARY KEY,
-    -- Empty for a magic-link token issued before the account exists.
-    user_id    TEXT    NOT NULL DEFAULT '',
+    id         BLOB    PRIMARY KEY CHECK (length(id) = 16),
+    -- NULL for a magic-link token issued before the account exists.
+    user_id    BLOB    CHECK (length(user_id) = 16),
     token_hash TEXT    NOT NULL UNIQUE,
     purpose    TEXT    NOT NULL,
     expires_at TEXT    NOT NULL,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -34,7 +35,7 @@ func (s *TokenStore) CreateToken(ctx context.Context, token *sulis.Token) error 
 	const q = `INSERT INTO tokens (` + tokenColumns + `)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 	_, err := s.db.ExecContext(ctx, q,
-		token.ID, token.UserID, token.TokenHash, string(token.Purpose),
+		idArg(token.ID), nullableIDArg(token.UserID), token.TokenHash, string(token.Purpose),
 		formatTime(token.ExpiresAt), formatTime(token.CreatedAt),
 		token.Used, token.Email, token.NonceHash,
 	)
@@ -124,10 +125,10 @@ func (s *TokenStore) DeleteExpiredTokens(ctx context.Context) error {
 // DeleteUserTokens removes every token for the given user and purpose — the
 // "invalidate the outstanding reset links" primitive. Deleting zero tokens is
 // not an error.
-func (s *TokenStore) DeleteUserTokens(ctx context.Context, userID string, purpose sulis.TokenPurpose) error {
+func (s *TokenStore) DeleteUserTokens(ctx context.Context, userID uuid.UUID, purpose sulis.TokenPurpose) error {
 	const q = `DELETE FROM tokens WHERE user_id = $1 AND purpose = $2`
 
-	if _, err := s.db.ExecContext(ctx, q, userID, string(purpose)); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, idArg(userID), string(purpose)); err != nil {
 		return fmt.Errorf("sulis/postgres: deleting a user's tokens: %w", err)
 	}
 	return nil
@@ -141,7 +142,7 @@ func scanToken(row scanner, dst *sulis.Token) error {
 		expiresAt, createdAt string
 	)
 	err := row.Scan(
-		&dst.ID, &dst.UserID, &dst.TokenHash, &purpose, &expiresAt, &createdAt,
+		scanID(&dst.ID), scanID(&dst.UserID), &dst.TokenHash, &purpose, &expiresAt, &createdAt,
 		&dst.Used, &dst.Email, &dst.NonceHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

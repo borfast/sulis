@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -52,7 +53,7 @@ func (s *UserStore) CreateUser(ctx context.Context, user *sulis.User) error {
 	const q = `INSERT INTO users (` + userColumns + `)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0)`
 	_, err = s.db.ExecContext(ctx, q,
-		user.ID, user.Email, user.PasswordHash,
+		idArg(user.ID), user.Email, user.PasswordHash,
 		formatTime(user.CreatedAt), formatTime(user.UpdatedAt), metadata,
 		nullableTime(user.EmailVerifiedAt), user.PendingEmail,
 		nullableTime(user.DisabledAt), user.DisabledReason,
@@ -68,9 +69,9 @@ func (s *UserStore) CreateUser(ctx context.Context, user *sulis.User) error {
 }
 
 // GetUserByID returns the user with the given ID, or sulis.ErrUserNotFound.
-func (s *UserStore) GetUserByID(ctx context.Context, id string) (*sulis.User, error) {
+func (s *UserStore) GetUserByID(ctx context.Context, id uuid.UUID) (*sulis.User, error) {
 	const q = `SELECT ` + userColumns + ` FROM users WHERE id = $1`
-	return scanUser(s.db.QueryRowContext(ctx, q, id))
+	return scanUser(s.db.QueryRowContext(ctx, q, idArg(id)))
 }
 
 // GetUserByEmail returns the user whose live address is email, or
@@ -134,7 +135,7 @@ func (s *UserStore) UpdateUser(ctx context.Context, user *sulis.User) error {
 		nullableTime(user.EmailVerifiedAt), user.PendingEmail,
 		nullableTime(user.DisabledAt), user.DisabledReason,
 		nullableTime(user.LockedUntil), user.FailedLoginAttempts,
-		user.ID, int64(user.Version), // #nosec G115 -- version starts at 0 and only ever advances by one per write; 2^63 writes to one user row is not a timeline
+		idArg(user.ID), int64(user.Version), // #nosec G115 -- version starts at 0 and only ever advances by one per write; 2^63 writes to one user row is not a timeline
 	)
 	if isUniqueViolation(err) {
 		return sulis.ErrUserAlreadyExists
@@ -149,7 +150,7 @@ func (s *UserStore) UpdateUser(ctx context.Context, user *sulis.User) error {
 	}
 	if n == 0 {
 		var exists int
-		err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id = $1`, user.ID).Scan(&exists)
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id = $1`, idArg(user.ID)).Scan(&exists)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			return sulis.ErrUserNotFound
@@ -168,8 +169,8 @@ func (s *UserStore) UpdateUser(ctx context.Context, user *sulis.User) error {
 
 // DeleteUser removes the user with the given ID. Deleting a user who is not
 // there is not an error: the caller's intent is already satisfied.
-func (s *UserStore) DeleteUser(ctx context.Context, id string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, id); err != nil {
+func (s *UserStore) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, idArg(id)); err != nil {
 		return fmt.Errorf("sulis/postgres: deleting a user: %w", err)
 	}
 	return nil
@@ -187,7 +188,7 @@ func scanUser(row scanner) (*sulis.User, error) {
 		version                                  int64
 	)
 	err := row.Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &createdAt, &updatedAt, &metadata,
+		scanID(&u.ID), &u.Email, &u.PasswordHash, &createdAt, &updatedAt, &metadata,
 		&emailVerifiedAt, &u.PendingEmail, &disabledAt, &u.DisabledReason,
 		&lockedUntil, &u.FailedLoginAttempts, &version,
 	)

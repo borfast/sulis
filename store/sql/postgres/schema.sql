@@ -35,7 +35,8 @@
 --
 -- Everything else is native: bytea for the WebAuthn blobs, boolean for the
 -- flags SQLite had to spell as INTEGER 0/1, jsonb for metadata and transports,
--- bigint for the counters that carry a Go uint64 or uint32.
+-- bigint for the counters that carry a Go uint64 or uint32. The ID columns of
+-- users, sessions and tokens are native uuid.
 --
 -- # Case-insensitive e-mail
 --
@@ -60,7 +61,7 @@
 -- cascade.
 
 CREATE TABLE IF NOT EXISTS users (
-    id                    text    PRIMARY KEY,
+    id                    uuid    PRIMARY KEY,
     email                 text    NOT NULL,
     password_hash         text    NOT NULL DEFAULT '',
     created_at            text    NOT NULL,
@@ -86,8 +87,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email));
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id               text PRIMARY KEY,
-    user_id          text NOT NULL,
+    id               uuid PRIMARY KEY,
+    user_id          uuid NOT NULL,
     -- The SHA-256 hash of the session token. The raw token is never stored;
     -- it exists only in the response that issued it.
     token_hash       text NOT NULL UNIQUE,
@@ -109,9 +110,9 @@ CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS tokens (
-    id         text    PRIMARY KEY,
-    -- Empty for a magic-link token issued before the account exists.
-    user_id    text    NOT NULL DEFAULT '',
+    id         uuid    PRIMARY KEY,
+    -- NULL for a magic-link token issued before the account exists.
+    user_id    uuid,
     token_hash text    NOT NULL UNIQUE,
     purpose    text    NOT NULL,
     expires_at text    NOT NULL,
