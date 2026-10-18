@@ -22,4 +22,7 @@ func TestScanIDParsesTextAndNull(t *testing.T) {
 	if err := scanID(&got).Scan("not-a-uuid"); err == nil {
 		t.Fatal("Scan(not-a-uuid) succeeded, want an error")
 	}
+	if err := scanID(&got).Scan(int64(7)); err == nil {
+		t.Fatal("Scan(int64) succeeded, want an error")
+	}
 }

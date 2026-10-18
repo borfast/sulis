@@ -323,6 +323,9 @@ func (s *memTokenStore) DeleteExpiredTokens(_ context.Context) error {
 }
 
 func (s *memTokenStore) DeleteUserTokens(_ context.Context, userID uuid.UUID, purpose TokenPurpose) error {
+	if userID == uuid.Nil() {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, t := range s.tokens {

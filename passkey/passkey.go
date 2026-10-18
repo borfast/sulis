@@ -40,6 +40,10 @@ var (
 	ErrLastCredential = errors.New("passkey: cannot delete the account's last credential without DeleteOptions.AllowLast")
 )
 
+// errUserHandleMismatch rejects a discoverable login whose user handle is not the
+// credential owner's ID. Callers see ErrChallengeFailed; tests check for this one.
+var errUserHandleMismatch = errors.New("passkey: user handle does not match the credential's owner")
+
 // defaultMaxCeremonyBody is WithMaxCeremonyBody's default: generous enough
 // for any real WebAuthn attestation/assertion response (which run at most a
 // few KiB, even with a large X.509 attestation certificate chain) while
@@ -524,7 +528,7 @@ func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyI
 			return nil, ErrPasskeyNotFound
 		}
 		if !bytes.Equal(cred.UserID[:], userHandle) {
-			return nil, ErrChallengeFailed
+			return nil, errUserHandleMismatch
 		}
 		resolvedUserID = cred.UserID
 		return &webauthnUser{user: &User{ID: cred.UserID}, credentials: []Credential{*cred}}, nil

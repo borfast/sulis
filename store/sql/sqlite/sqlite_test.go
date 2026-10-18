@@ -196,20 +196,54 @@ func TestEmailUniquenessIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestSchemaRefusesShortID pins the CHECK on the ID columns: a value that is
-// not 16 bytes is an error, and a 16-byte one is accepted.
+// TestSchemaRefusesShortID pins the CHECK on every ID column: a value that
+// is not 16 bytes is an error, and a 16-byte one is accepted.
 func TestSchemaRefusesShortID(t *testing.T) {
-	ctx := context.Background()
-	db := openDB(t)
-
-	const q = `INSERT INTO users (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)`
 	const now = "2026-01-01T00:00:00.000000000Z"
-	if _, err := db.SQL().ExecContext(ctx, q, make([]byte, 16), "ok@example.test", now, now); err != nil {
-		t.Fatalf("inserting a 16-byte id: %v", err)
+	const (
+		usersQ    = `INSERT INTO users (id, email, created_at, updated_at) VALUES (?, ?, ?, ?)`
+		sessionsQ = `INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at, authenticated_at, last_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`
+		tokensQ  = `INSERT INTO tokens (id, user_id, token_hash, purpose, expires_at, created_at) VALUES (?, ?, ?, 'p', ?, ?)`
+		passkeyQ = `INSERT INTO passkey_credentials (id, user_id, credential_id, public_key, created_at)
+			VALUES (?, ?, ?, x'00', ?)`
+		activeQ   = `INSERT INTO totp_active (user_id, id, secret, created_at) VALUES (?, ?, 's', ?)`
+		pendingQ  = `INSERT INTO totp_pending (user_id, id, secret, created_at) VALUES (?, ?, 's', ?)`
+		recoveryQ = `INSERT INTO recovery_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)`
+	)
+	id := func() []byte { u := uuid.NewV7(); return u[:] }
+	unique := func() string { return uuid.NewV7().String() }
+
+	cases := []struct {
+		column string
+		query  string
+		args   func(value []byte) []any
+	}{
+		{"users.id", usersQ, func(v []byte) []any { return []any{v, unique() + "@example.test", now, now} }},
+		{"sessions.id", sessionsQ, func(v []byte) []any { return []any{v, id(), unique(), now, now, now, now} }},
+		{"sessions.user_id", sessionsQ, func(v []byte) []any { return []any{id(), v, unique(), now, now, now, now} }},
+		{"tokens.id", tokensQ, func(v []byte) []any { return []any{v, id(), unique(), now, now} }},
+		{"tokens.user_id", tokensQ, func(v []byte) []any { return []any{id(), v, unique(), now, now} }},
+		{"passkey_credentials.id", passkeyQ, func(v []byte) []any { return []any{v, id(), id(), now} }},
+		{"passkey_credentials.user_id", passkeyQ, func(v []byte) []any { return []any{id(), v, id(), now} }},
+		{"totp_active.user_id", activeQ, func(v []byte) []any { return []any{v, id(), now} }},
+		{"totp_active.id", activeQ, func(v []byte) []any { return []any{id(), v, now} }},
+		{"totp_pending.user_id", pendingQ, func(v []byte) []any { return []any{v, id(), now} }},
+		{"totp_pending.id", pendingQ, func(v []byte) []any { return []any{id(), v, now} }},
+		{"recovery_codes.user_id", recoveryQ, func(v []byte) []any { return []any{v, unique(), now} }},
 	}
-	_, err := db.SQL().ExecContext(ctx, q, make([]byte, 15), "short@example.test", now, now)
-	if err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
-		t.Fatalf("inserting a 15-byte id = %v, want a CHECK constraint failure", err)
+	for _, tc := range cases {
+		t.Run(tc.column, func(t *testing.T) {
+			ctx := context.Background()
+			db := openDB(t)
+			if _, err := db.SQL().ExecContext(ctx, tc.query, tc.args(id())...); err != nil {
+				t.Fatalf("inserting a 16-byte %s: %v", tc.column, err)
+			}
+			_, err := db.SQL().ExecContext(ctx, tc.query, tc.args(make([]byte, 15))...)
+			if err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+				t.Fatalf("inserting a 15-byte %s = %v, want a CHECK constraint failure", tc.column, err)
+			}
+		})
 	}
 }
 

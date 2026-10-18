@@ -19,6 +19,9 @@ func TestScanIDRequiresSixteenBytes(t *testing.T) {
 	if err := scanID(&got).Scan(make([]byte, 15)); err == nil {
 		t.Fatal("Scan(15 bytes) succeeded, want an error")
 	}
+	if err := scanID(&got).Scan(make([]byte, 17)); err == nil {
+		t.Fatal("Scan(17 bytes) succeeded, want an error")
+	}
 	if err := scanID(&got).Scan(id.String()); err == nil {
 		t.Fatal("Scan(text) succeeded, want an error")
 	}

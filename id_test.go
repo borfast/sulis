@@ -24,9 +24,13 @@ func (r *recordingTokenStore) CreateToken(ctx context.Context, t *sulis.Token) e
 	return r.TokenStore.CreateToken(ctx, t)
 }
 
-func newMemSulis(t *testing.T, tokens sulis.TokenStore, opts ...sulis.Option) *sulis.Sulis {
+// memSulisArgon2Params keep password hashing cheap under -race.
+var memSulisArgon2Params = sulis.Argon2Params{Memory: 8 * 1024, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}
+
+func newMemSulis(t *testing.T, tokens sulis.TokenStore) *sulis.Sulis {
 	t.Helper()
-	s, err := sulis.New(memstore.NewUserStore(), memstore.NewSessionStore(), tokens, sulis.NoSecondFactors{}, opts...)
+	s, err := sulis.New(memstore.NewUserStore(), memstore.NewSessionStore(), tokens, sulis.NoSecondFactors{},
+		sulis.WithArgon2Params(memSulisArgon2Params))
 	if err != nil {
 		t.Fatalf("sulis.New: %v", err)
 	}

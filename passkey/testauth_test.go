@@ -1049,8 +1049,8 @@ func TestFinishDiscoverableLoginRejectsCredentialOwnedByAnotherUser(t *testing.T
 	if cred != nil {
 		t.Fatalf("FinishDiscoverableLoginResponse() credential = %#v, want nil", cred)
 	}
-	if !strings.Contains(err.Error(), ErrChallengeFailed.Error()) {
-		t.Errorf("FinishDiscoverableLoginResponse() error = %q, want the handler's own rejection to survive into the message", err)
+	if !errors.Is(err, errUserHandleMismatch) {
+		t.Errorf("FinishDiscoverableLoginResponse() error = %v, want the handler's own rejection, errUserHandleMismatch", err)
 	}
 	if f.store.updateAfterLoginCalls != 0 {
 		t.Errorf("UpdateCredentialAfterLogin() calls = %d, want 0", f.store.updateAfterLoginCalls)
@@ -1513,6 +1513,9 @@ func TestFinishDiscoverableLoginRejectsTextUserHandle(t *testing.T) {
 	cred, err := f.service.FinishDiscoverableLoginResponse(ctx, ceremonyID, f.auth.forgeAssertion(areq))
 	if !errors.Is(err, ErrChallengeFailed) {
 		t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want errors.Is(err, ErrChallengeFailed)", err)
+	}
+	if !errors.Is(err, errUserHandleMismatch) {
+		t.Errorf("FinishDiscoverableLoginResponse() error = %v, want the handler's own rejection, errUserHandleMismatch", err)
 	}
 	if cred != nil {
 		t.Fatalf("FinishDiscoverableLoginResponse() credential = %#v, want nil", cred)

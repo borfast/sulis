@@ -432,28 +432,37 @@ func TestSessionListShowsAndRevokesOtherSession(t *testing.T) {
 }
 
 func TestRevokeSessionWithMalformedIDReturns400(t *testing.T) {
-	a := newTestApp(t)
-	c := newTestClient(t, a)
-	rec := registerUser(t, c, "badsession@example.com", testPassword)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("register: status = %d, body = %s", rec.Code, rec.Body.String())
-	}
+	for name, sessionID := range map[string]string{"malformed": "not-a-uuid", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			var log strings.Builder
+			a := newTestAppWithLog(t, &log)
+			c := newTestClient(t, a)
+			rec := registerUser(t, c, "badsession@example.com", testPassword)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("register: status = %d, body = %s", rec.Code, rec.Body.String())
+			}
 
-	rec = c.get("/account")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("account: status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	token := extractCSRFToken(t, rec.Body.String())
+			rec = c.get("/account")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("account: status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			token := extractCSRFToken(t, rec.Body.String())
 
-	rec = c.post("/sessions/revoke", url.Values{
-		"csrf_token": {token}, "session_id": {"not-a-uuid"},
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("revoke: status = %d, want 400, body = %s", rec.Code, rec.Body.String())
-	}
+			rec = c.post("/sessions/revoke", url.Values{
+				"csrf_token": {token}, "session_id": {sessionID},
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("revoke: status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+			}
+			// A call with uuid.Nil() fails with ErrSessionNotFound, which the handler logs.
+			if l := log.String(); strings.Contains(l, "revoking session") || strings.Contains(l, "kind=session.revoked") {
+				t.Errorf("RevokeSession ran for session_id %q, want it never called; log:\n%s", sessionID, l)
+			}
 
-	rec = c.get("/account")
-	if rec.Code != http.StatusOK {
-		t.Errorf("account after bad revoke: status = %d, want the session to still validate", rec.Code)
+			rec = c.get("/account")
+			if rec.Code != http.StatusOK {
+				t.Errorf("account after bad revoke: status = %d, want the session to still validate", rec.Code)
+			}
+		})
 	}
 }

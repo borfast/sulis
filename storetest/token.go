@@ -190,6 +190,9 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 		if err != nil {
 			t.Fatalf("ConsumeToken: %v", err)
 		}
+		if got == nil {
+			t.Fatal("ConsumeToken returned a nil token and no error")
+		}
 		if got.UserID != uuid.Nil() {
 			t.Errorf("UserID = %v, want uuid.Nil()", got.UserID)
 		}

@@ -7,6 +7,11 @@ does and does not promise.
 
 ## [Unreleased]
 
+### Fixed
+
+- `storetest`'s `ConsumeTokenWithoutUserReturnsNilUserID` fails, rather than
+  panics, when a store's `ConsumeToken` returns `(nil, nil)`.
+
 ## [0.4.0] - 2026-10-18
 
 ### BREAKING CHANGES

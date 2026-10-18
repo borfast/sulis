@@ -16,8 +16,14 @@ import (
 // server.
 func newTestApp(t *testing.T) *app {
 	t.Helper()
+	return newTestAppWithLog(t, io.Discard)
+}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+// newTestAppWithLog is newTestApp, with the app's log written to w.
+func newTestAppWithLog(t *testing.T, w io.Writer) *app {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(w, nil))
 	a, err := newApp(t.Context(), sqlite.MemoryDSN(), "https://localhost:8443", logger)
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
