@@ -59,7 +59,7 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri Reque
 
 // issueMagicLinkToken creates and stores a magic-link Token for either an
 // existing user (userID set, email empty) or an email with no user yet
-// (userID empty, email set — the user is created lazily at redemption; see
+// (userID uuid.Nil(), email set: the user is created lazily at redemption; see
 // getOrCreatePasswordlessUser). It always uses MagicLinkDuration, never
 // TokenDuration (which governs password-reset tokens only), and — when
 // s.cfg.MagicLinkBinding is enabled — generates a random binding nonce,
@@ -96,7 +96,7 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID uuid.UUID, email
 		return "", "", err
 	}
 
-	// UserID is empty when the address has no account yet — the token is
+	// UserID is uuid.Nil() when the address has no account yet: the token is
 	// issued anyway and the user is created at redemption (see
 	// getOrCreatePasswordlessUser). The address itself is not carried; a
 	// magic link for an unregistered address is still visible as a
@@ -195,7 +195,7 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce stri
 	return s.completeFirstFactor(ctx, user, AuthMethodMagicLink, ri)
 }
 
-// emitMagicLinkRejected reports a refused RedeemMagicLink. userID is empty
+// emitMagicLinkRejected reports a refused RedeemMagicLink. userID is uuid.Nil()
 // when the token did not resolve to one — an unknown, expired, or
 // already-used token names nobody.
 func (s *Sulis) emitMagicLinkRejected(ctx context.Context, userID uuid.UUID, ri RequestInfo, reason string) {

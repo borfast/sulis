@@ -447,7 +447,7 @@ type Event struct {
 - **the submitted email address** — people type passwords into the email field, and an event taxonomy that copies caller input is one bad day away from being a credential log;
 - the operator-supplied `reason` you passed to `DisableUser`, for the same reason.
 
-Accounts are identified by `UserID` and sessions by `SessionID`: version 7 UUIDs (`uuid.UUID` from the standard library) that sulis generated, neither of which authenticates anything on its own. The "no ID" value is `uuid.Nil()`. A version 7 UUID contains its creation time to the millisecond, so an ID shown to users (in a URL, say) tells when the record was created. The rule is enforced by test, not only by convention — `TestNoEventCarriesSecretMaterial` drives every emitting flow and scans every field of every emitted event against every secret those flows were fed, and a companion test proves the scanner catches a planted one.
+Accounts are identified by `UserID` and sessions by `SessionID`: version 7 UUIDs (`uuid.UUID` from the standard library) that sulis generated, neither of which authenticates anything on its own. The rule is enforced by test, not only by convention — `TestNoEventCarriesSecretMaterial` drives every emitting flow and scans every field of every emitted event against every secret those flows were fed, and a companion test proves the scanner catches a planted one. The "no ID" value is `uuid.Nil()`. A version 7 UUID contains its creation time to a fraction of a millisecond, so an ID shown to users (in a URL, say) tells when the record was created.
 
 `Metadata` has a closed key set — `MetaReason`, `MetaMethod`, `MetaScope`, `MetaDimension` — whose values are short fixed labels chosen by sulis (the `Reason*`, `Scope*`, and `Dimension*` constants), never error text and never caller input.
 
@@ -584,7 +584,7 @@ Pass `passkey.WithUserVerification(protocol.VerificationDiscouraged)` only when 
 
 `passkey` wraps `github.com/go-webauthn/webauthn` to provide higher-level passkey registration and login helpers. It manages begin/finish WebAuthn ceremonies, persists credentials through a consumer-owned `passkey.Store`, and persists transient ceremony state through a consumer-owned `passkey.ChallengeStore`.
 
-The WebAuthn user handle is the 16 bytes of `User.ID`.
+The WebAuthn user handle is the 16 bytes of `User.ID`. The handle therefore carries the account's creation time.
 
 Besides the identified `BeginRegistration`/`FinishRegistration` pair (which requires the caller to already know the user), `passkey` supports **discoverable ("usernameless") login**: `BeginDiscoverableLogin(ctx)` returns the assertion options plus a `ceremonyID` that the caller must round-trip to `FinishDiscoverableLogin(ctx, ceremonyID, r)`. The user is resolved from the credential's stored owner (via the authenticator's user handle), not supplied by the caller.
 

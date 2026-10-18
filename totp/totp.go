@@ -149,8 +149,8 @@ func WithSecretSize(n int) Option {
 }
 
 // WithLimiter sets the rate limiter consulted before Validate or
-// ConfirmEnrollment checks a code, keyed by "totp:"+userID.String(), because the 10^6 code
-// space (or smaller, for 6-digit codes) is guessable without one.
+// ConfirmEnrollment checks a code. The key is "totp:"+userID.String(). A
+// 6-digit code space (10^6 codes) is guessable without a limiter.
 //
 // Either this or WithoutRateLimiting must be passed; NewService rejects a
 // configuration that passes neither, and rejects one that passes both.

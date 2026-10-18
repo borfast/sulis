@@ -73,7 +73,7 @@ func (s *TokenStore) DeleteExpiredTokens(_ context.Context) error {
 }
 
 // DeleteUserTokens removes every token belonging to userID with the given
-// purpose. Matching nothing is not an error. uuid.Nil deletes nothing, so
+// purpose. Matching nothing is not an error. uuid.Nil() deletes nothing, so
 // tokens issued before an account exists survive.
 func (s *TokenStore) DeleteUserTokens(_ context.Context, userID uuid.UUID, purpose sulis.TokenPurpose) error {
 	if userID == uuid.Nil() {

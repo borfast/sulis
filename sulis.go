@@ -563,7 +563,7 @@ func (s *Sulis) setPassword(ctx context.Context, userID uuid.UUID, newPassword s
 	// minted against the old password while handing the same attacker a
 	// passwordless login to the very account just rotated away from them.
 	//
-	// Pre-registration magic links (UserID empty, Email set) are untouched,
+	// Pre-registration magic links (UserID uuid.Nil(), Email set) are untouched,
 	// correctly: they name no user, so there is no account whose recovery
 	// they could survive.
 	return s.tokens.DeleteUserTokens(ctx, user.ID, TokenPurposeMagicLink)

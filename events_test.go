@@ -821,7 +821,8 @@ func TestNoEventCarriesSecretMaterial(t *testing.T) {
 
 // TestEventSecretScanCatchesAPlantedSecret is the permanent, checked-in half
 // of the mutation test for the property above: it plants a secret in each
-// field an Event actually has and asserts the scanner notices. Without it,
+// string field an Event has (UserID and SessionID are UUIDs, which cannot hold
+// one) and asserts the scanner notices. Without it,
 // TestNoEventCarriesSecretMaterial could pass because the scanner is broken
 // rather than because the events are clean, and nothing would say which.
 func TestEventSecretScanCatchesAPlantedSecret(t *testing.T) {

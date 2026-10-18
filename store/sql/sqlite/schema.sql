@@ -20,8 +20,8 @@
 -- is chronological order, which is what the expiry sweeps below compare on,
 -- and nine fractional digits round-trip a time.Time without losing
 -- precision. Booleans are INTEGER 0/1. Metadata and transports are JSON text.
--- The ID columns of users, sessions, tokens, TOTP and passkey credentials are 16-byte BLOBs,
--- enforced by a CHECK on length.
+-- The ID columns of users, sessions, tokens, TOTP and passkey credentials, and
+-- recovery_codes.user_id, are 16-byte BLOBs, enforced by a CHECK on length.
 --
 -- # No foreign keys
 --

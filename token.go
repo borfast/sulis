@@ -31,7 +31,7 @@ type Token struct {
 	Used      bool
 	// Email records the address a token proves control of. It is set for
 	// magic-link tokens issued before the user account exists (UserID is
-	// uuid.Nil in that case until the token is redeemed) and for
+	// uuid.Nil() in that case until the token is redeemed) and for
 	// email-verification tokens (bound to the user's email at issuance, so a
 	// later address change invalidates an outstanding token). It is empty
 	// for password-reset and two-factor tokens.
@@ -57,7 +57,8 @@ type TokenStore interface {
 	ConsumeToken(ctx context.Context, hash string, purpose TokenPurpose) (*Token, error)
 	DeleteExpiredTokens(ctx context.Context) error
 	// DeleteUserTokens deletes all tokens for the given user and purpose.
-	// Deleting zero tokens is not an error.
+	// Deleting zero tokens is not an error. uuid.Nil() deletes nothing, so
+	// tokens issued before an account exists survive.
 	DeleteUserTokens(ctx context.Context, userID uuid.UUID, purpose TokenPurpose) error
 }
 

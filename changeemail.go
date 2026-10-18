@@ -153,7 +153,7 @@ func (s *Sulis) ConfirmEmailChange(ctx context.Context, rawToken string) (*User,
 	// session on the recovered account. A mailbox-compromise recovery must
 	// burn every outstanding mailbox-derived credential, not most of them.
 	//
-	// Pre-registration magic links (UserID empty, Email set) are left alone,
+	// Pre-registration magic links (UserID uuid.Nil(), Email set) are left alone,
 	// correctly: DeleteUserTokens is scoped by user, and a token naming no
 	// user belongs to no account that could be recovered.
 	if err := s.tokens.DeleteUserTokens(ctx, updated.ID, TokenPurposeMagicLink); err != nil {

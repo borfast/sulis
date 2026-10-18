@@ -110,7 +110,7 @@ const (
 
 	// EventSessionRevoked reports a successful RevokeSession (MetaScope
 	// ScopeSingleSession, with SessionID set) or RevokeAllSessions
-	// (MetaScope ScopeAllSessions, with SessionID empty).
+	// (MetaScope ScopeAllSessions, with SessionID uuid.Nil()).
 	EventSessionRevoked EventKind = "session.revoked"
 
 	// EventSessionRefreshed reports a successful RefreshSession. SessionID
@@ -143,7 +143,7 @@ const (
 	EventEmailVerified EventKind = "email.verified"
 
 	// EventMagicLinkCreated reports that CreateMagicLinkToken issued a
-	// link. UserID is empty when the address has no account yet — the user
+	// link. UserID is uuid.Nil() when the address has no account yet: the user
 	// is created at redemption.
 	EventMagicLinkCreated EventKind = "magiclink.created"
 
@@ -297,8 +297,8 @@ const (
 //   - the operator-supplied reason passed to DisableUser, for the same
 //     reason.
 //
-// Accounts are identified by UserID, sessions by SessionID. Both are opaque
-// identifiers this package generated; neither authenticates anything on its
+// Accounts are identified by UserID, sessions by SessionID. Both are version 7
+// UUIDs this package generated; neither authenticates anything on its
 // own (see SessionStore.DeleteSession for why knowing a session ID is not
 // enough to act on it). The rule is enforced by test, not only by
 // convention — see TestNoEventCarriesSecretMaterial in events_test.go, which
@@ -309,7 +309,7 @@ type Event struct {
 	Kind EventKind
 
 	// UserID is the account the decision concerns, when one is known.
-	// uuid.Nil for decisions made before an account is identified (a login for
+	// uuid.Nil() for decisions made before an account is identified (a login for
 	// an unknown address, a magic link for an address with no account yet,
 	// a rejected pending token) and for the HTTP middleware rejections,
 	// which happen before any session is validated.
@@ -317,7 +317,7 @@ type Event struct {
 
 	// SessionID is the session the decision concerns, when one is
 	// relevant: the session issued, revoked, refreshed, expired, or
-	// re-authenticated. uuid.Nil otherwise. It is the session's row ID, never
+	// re-authenticated. uuid.Nil() otherwise. It is the session's row ID, never
 	// its token or the hash of its token.
 	SessionID uuid.UUID
 

@@ -34,7 +34,7 @@ type Event struct {
 	Kind EventKind
 
 	// UserID identifies the account when the ceremony has resolved one. It is
-	// uuid.Nil for an operation that fails before an account can be identified.
+	// uuid.Nil() for an operation that fails before an account can be identified.
 	UserID uuid.UUID
 
 	// Operation identifies the store operation for EventStoreFailed. It is
