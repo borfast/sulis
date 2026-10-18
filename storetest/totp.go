@@ -29,11 +29,8 @@ import (
 // secret nobody validated a code against, or silently discard a fresh
 // enrollment, with neither caller finding out.
 //
-// The replay counter must never move backwards. SaveTOTP must reject a save
-// that would lower LastUsedCounter for the active credential with the same
-// ID, and a ConfirmEnrollment that replaces an existing factor must carry the
-// old counter forward when it is the higher of the two. A counter that can
-// regress is a code that can be replayed.
+// The replay counter only goes up: SaveTOTP refuses a save that does not raise it
+// or whose credential is no longer active, and ConfirmEnrollment keeps a higher old one.
 //
 // factory must return a fresh, empty store on every call; see the package
 // documentation.
@@ -313,8 +310,8 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 		lowered := *active
 		lowered.LastUsedCounter = 9
-		if err := store.SaveTOTP(ctx, &lowered); err == nil {
-			t.Fatal("SaveTOTP with a lowered counter returned nil, want an error: a counter that can regress is a code that can be replayed")
+		if err := store.SaveTOTP(ctx, &lowered); !errors.Is(err, totp.ErrTOTPReplayed) {
+			t.Fatalf("SaveTOTP with a lowered counter = %v, want ErrTOTPReplayed: a counter that can regress is a code that can be replayed", err)
 		}
 		got, err := store.GetActiveTOTP(ctx, userID)
 		if err != nil {
@@ -322,6 +319,90 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 		}
 		if got.LastUsedCounter != 10 {
 			t.Fatalf("LastUsedCounter = %d, want the unchanged 10 — a rejected save must not be applied", got.LastUsedCounter)
+		}
+	})
+
+	t.Run("SaveTOTPRejectsAnUnchangedCounter", func(t *testing.T) {
+		store := factory()
+		userID := uuid.NewV7()
+		active := enrollAndConfirm(t, store, userID, 10)
+
+		same := *active
+		if err := store.SaveTOTP(ctx, &same); !errors.Is(err, totp.ErrTOTPReplayed) {
+			t.Fatalf("SaveTOTP at the stored counter = %v, want ErrTOTPReplayed: two validations of one code must not both succeed", err)
+		}
+		got, err := store.GetActiveTOTP(ctx, userID)
+		if err != nil {
+			t.Fatalf("GetActiveTOTP: %v", err)
+		}
+		if got.LastUsedCounter != 10 {
+			t.Fatalf("LastUsedCounter = %d, want the unchanged 10", got.LastUsedCounter)
+		}
+	})
+
+	t.Run("SaveTOTPWritesOnlyTheCounter", func(t *testing.T) {
+		store := factory()
+		userID := uuid.NewV7()
+		active := enrollAndConfirm(t, store, userID, 10)
+
+		write := *active
+		write.LastUsedCounter = 11
+		write.Secret = "CHANGED" + active.Secret
+		write.CreatedAt = active.CreatedAt.Add(time.Hour)
+		if err := store.SaveTOTP(ctx, &write); err != nil {
+			t.Fatalf("SaveTOTP: %v", err)
+		}
+		got, err := store.GetActiveTOTP(ctx, userID)
+		if err != nil {
+			t.Fatalf("GetActiveTOTP: %v", err)
+		}
+		if got.LastUsedCounter != 11 || got.Secret != active.Secret || !got.CreatedAt.Equal(active.CreatedAt) {
+			t.Fatalf("after SaveTOTP: counter %d, secret %q, created %v; want 11, %q, %v",
+				got.LastUsedCounter, got.Secret, got.CreatedAt, active.Secret, active.CreatedAt)
+		}
+	})
+
+	t.Run("SaveTOTPAfterReplacementIsRefused", func(t *testing.T) {
+		store := factory()
+		userID := uuid.NewV7()
+		old := enrollAndConfirm(t, store, userID, 10)
+		replacement := newTOTPCredential(userID)
+		if err := store.ReplacePending(ctx, replacement); err != nil {
+			t.Fatalf("ReplacePending: %v", err)
+		}
+		if _, err := store.ConfirmEnrollment(ctx, userID, replacement.ID, 20); err != nil {
+			t.Fatalf("ConfirmEnrollment: %v", err)
+		}
+
+		stale := *old
+		stale.LastUsedCounter = 30
+		if err := store.SaveTOTP(ctx, &stale); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
+			t.Fatalf("SaveTOTP of the replaced credential = %v, want ErrTOTPNotEnrolled", err)
+		}
+		got, err := store.GetActiveTOTP(ctx, userID)
+		if err != nil {
+			t.Fatalf("GetActiveTOTP: %v", err)
+		}
+		if got.ID != replacement.ID || got.Secret != replacement.Secret || got.LastUsedCounter != 20 {
+			t.Fatalf("active = %+v, want the replacement %v at counter 20: a stale save brought back the old credential", got, replacement.ID)
+		}
+	})
+
+	t.Run("SaveTOTPAfterDeleteIsRefused", func(t *testing.T) {
+		store := factory()
+		userID := uuid.NewV7()
+		active := enrollAndConfirm(t, store, userID, 10)
+		if err := store.DeleteTOTP(ctx, userID); err != nil {
+			t.Fatalf("DeleteTOTP: %v", err)
+		}
+
+		stale := *active
+		stale.LastUsedCounter = 11
+		if err := store.SaveTOTP(ctx, &stale); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
+			t.Fatalf("SaveTOTP of the deleted credential = %v, want ErrTOTPNotEnrolled", err)
+		}
+		if got, err := store.GetActiveTOTP(ctx, userID); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
+			t.Fatalf("GetActiveTOTP = (%+v, %v), want ErrTOTPNotEnrolled: a stale save brought back the deleted credential", got, err)
 		}
 	})
 
@@ -503,6 +584,25 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 				t.Fatalf("iteration %d: LastUsedCounter = %d, want %d — a save that lowers the counter must be rejected",
 					i, got.LastUsedCounter, highest)
 			}
+		}
+	})
+
+	t.Run("ConcurrentSaveTOTPOfOneCounterHasOneWinner", func(t *testing.T) {
+		const racers = 8
+
+		for i := range raceIterations() {
+			store := factory()
+			userID := uuid.NewV7()
+			active := enrollAndConfirm(t, store, userID, 10)
+
+			// Every racer saves the same higher counter, as concurrent
+			// validations of one code do: exactly one may win.
+			errs := race(racers, func(int) error {
+				write := *active
+				write.LastUsedCounter = 11
+				return store.SaveTOTP(ctx, &write)
+			})
+			exactlyOneWinner(t, errs, totp.ErrTOTPReplayed, fmt.Sprintf("iteration %d: SaveTOTP", i))
 		}
 	})
 }

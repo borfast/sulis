@@ -129,15 +129,8 @@ type Store interface {
 	// credentials, exactly the lockout state this guard exists to prevent,
 	// reached through the guarded path.
 	//
-	// Reference implementations: SQL — run the count check and the DELETE
-	// inside one transaction after locking the user's credential rows
-	// (SELECT ... FOR UPDATE), or express both in one statement, e.g.
-	// "DELETE FROM credentials WHERE id = $1 AND user_id = $2 AND
-	// ($3 OR (SELECT COUNT(*) FROM credentials WHERE user_id = $2) > 1)"
-	// and check the affected-row count to distinguish "deleted" from
-	// "refused" (also handling "id didn't exist" — see below). A
-	// single-threaded or mutex-guarded in-memory store can simply perform
-	// the check and the removal while holding the same lock.
+	// SQL: lock the user's credential rows (SELECT ... FOR UPDATE) before counting; one DELETE
+	// with a COUNT(*) subquery is not atomic on Postgres under READ COMMITTED. In memory, hold one lock.
 	//
 	// Returns ErrPasskeyNotFound if id does not name a credential owned by
 	// userID.

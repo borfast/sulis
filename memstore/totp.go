@@ -2,19 +2,11 @@ package memstore
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"uuid"
 
 	"github.com/borfast/sulis/totp"
 )
-
-// ErrTOTPCounterRegressed is returned by TOTPStore.SaveTOTP when a save would
-// lower LastUsedCounter for the active credential with the same ID. totp.Store
-// requires such a save to be rejected but does not name the error; failing
-// closed is the point, since a counter that can regress is a code that can be
-// replayed.
-var ErrTOTPCounterRegressed = errors.New("memstore: TOTP counter would regress")
 
 // TOTPStore is an in-memory totp.Store.
 //
@@ -142,22 +134,22 @@ func (s *TOTPStore) ConfirmEnrollment(_ context.Context, userID, pendingID uuid.
 	return &cp, nil
 }
 
-// SaveTOTP persists an update to an existing active credential — in practice
-// the LastUsedCounter bump after a code is accepted. A save that would lower
-// the counter for the active credential with the same ID is refused with
-// ErrTOTPCounterRegressed rather than applied, so of two racing validations
-// only one can advance the clock and the loser cannot rewind it.
+// SaveTOTP raises only LastUsedCounter. A refused save returns
+// totp.ErrTOTPReplayed, or totp.ErrTOTPNotEnrolled if cred.ID is not active.
 func (s *TOTPStore) SaveTOTP(_ context.Context, cred *totp.Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if existing, ok := s.active[cred.UserID]; ok {
-		if existing.ID == cred.ID && cred.LastUsedCounter < existing.LastUsedCounter {
-			return ErrTOTPCounterRegressed
-		}
+	existing, ok := s.active[cred.UserID]
+	if !ok || existing.ID != cred.ID {
+		return totp.ErrTOTPNotEnrolled
 	}
-	cp := *cred
-	s.active[cred.UserID] = &cp
+	if cred.LastUsedCounter <= existing.LastUsedCounter {
+		return totp.ErrTOTPReplayed
+	}
+	updated := *existing
+	updated.LastUsedCounter = cred.LastUsedCounter
+	s.active[cred.UserID] = &updated
 	return nil
 }
 

@@ -7,6 +7,27 @@ does and does not promise.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- `totp.Store.SaveTOTP` has a stricter contract: it writes only
+  `LastUsedCounter`, only on the active credential with `cred.ID`, and only if
+  the counter goes up. Otherwise it returns `totp.ErrTOTPReplayed`, or
+  `totp.ErrTOTPNotEnrolled` when `cred.ID` is not the active credential.
+  `ErrTOTPCounterRegressed` is removed from `memstore`, `store/sql/sqlite` and
+  `store/sql/postgres`. Migration: make a custom store follow the new
+  contract (the SQL stores use one conditional `UPDATE`), and check for
+  `totp.ErrTOTPReplayed` where you checked for `ErrTOTPCounterRegressed`.
+  `storetest` checks the new contract.
+
+### Security
+
+- Two concurrent `totp.Service.Validate` calls with one code could both
+  succeed, because every store accepted a save at the stored counter. The
+  second now returns `ErrTOTPReplayed`.
+- A `Validate` that was between reading and saving when the user confirmed a
+  new TOTP enrollment, or removed TOTP, could make the old credential active
+  again. Its save is now refused with `ErrTOTPNotEnrolled`.
+
 ### Changed
 
 - The SQLite schema declares its ID primary keys `NOT NULL`. Existing
@@ -14,6 +35,10 @@ does and does not promise.
 
 ### Fixed
 
+- The reference SQL in the `totp.Store.EnrollPending` and
+  `passkey.Store.DeleteCredential` doc comments (and in the README) offered a
+  single statement, which is not atomic on PostgreSQL under READ COMMITTED.
+  They now say to take a lock first. The `store/sql` stores already did.
 - `storetest`'s `ConsumeTokenWithoutUserReturnsNilUserID` fails, rather than
   panics, when a store's `ConsumeToken` returns `(nil, nil)`.
 

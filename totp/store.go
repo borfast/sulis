@@ -69,22 +69,8 @@ type Store interface {
 	// superseded either way — at most one pending enrollment exists per
 	// user, and an unconfirmed enrollment has nothing worth protecting.
 	//
-	// Reference SQL: run the existence check and the upsert as one
-	// statement or inside one transaction, e.g.
-	//
-	//	INSERT INTO totp_pending (user_id, id, secret, created_at)
-	//	SELECT $1, $2, $3, $4
-	//	WHERE NOT EXISTS (
-	//	    SELECT 1 FROM totp_active WHERE user_id = $1
-	//	)
-	//	ON CONFLICT (user_id) DO UPDATE
-	//	  SET id = EXCLUDED.id, secret = EXCLUDED.secret, created_at = EXCLUDED.created_at
-	//
-	// and check the affected-row count: 0 rows means an active credential
-	// already exists, so return ErrTOTPAlreadyEnrolled instead of treating
-	// it as a generic no-op. A single-threaded or mutex-guarded in-memory
-	// store can simply perform the check and the write while holding the
-	// same lock.
+	// SQL: one statement is not atomic on Postgres under READ COMMITTED. First take a per-user
+	// lock that ConfirmEnrollment also takes (e.g. pg_advisory_xact_lock). In memory, hold one lock.
 	EnrollPending(ctx context.Context, cred *Credential) error
 
 	// ReplacePending is EnrollPending without the active-credential guard:
@@ -150,12 +136,8 @@ type Store interface {
 	// totp_active.
 	ConfirmEnrollment(ctx context.Context, userID, pendingID uuid.UUID, counter uint64) (*Credential, error)
 
-	// SaveTOTP persists an update to an existing ACTIVE credential — in
-	// practice, Validate's post-check LastUsedCounter bump. Implementations
-	// MUST persist LastUsedCounter atomically with respect to concurrent
-	// calls, and MUST reject (fail closed) any save that would lower
-	// LastUsedCounter for the active credential with the same ID, so two
-	// racing validates cannot both win.
+	// SaveTOTP atomically writes LastUsedCounter, and nothing else, if it goes up and cred.ID
+	// is active; if not, ErrTOTPReplayed, or ErrTOTPNotEnrolled when cred.ID is not active.
 	SaveTOTP(ctx context.Context, cred *Credential) error
 
 	// DeleteTOTP removes both userID's active credential and any pending

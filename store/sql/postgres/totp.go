@@ -37,13 +37,6 @@ type TOTPStore struct {
 
 var _ totp.Store = (*TOTPStore)(nil)
 
-// ErrTOTPCounterRegressed is returned by TOTPStore.SaveTOTP when a save would
-// lower LastUsedCounter for the active credential with the same ID. totp.Store
-// requires such a save to be rejected but does not name the error; failing
-// closed is the point, since a counter that can regress is a code that can be
-// replayed.
-var ErrTOTPCounterRegressed = errors.New("sulis/postgres: TOTP counter would regress")
-
 // GetActiveTOTP returns userID's active (verified) credential — the one Validate
 // checks codes against — or totp.ErrTOTPNotEnrolled, whether or not a pending
 // enrollment exists.
@@ -238,45 +231,56 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID uui
 	return &promoted, nil
 }
 
-// SaveTOTP persists an update to an existing active credential — in practice
-// Validate's post-check LastUsedCounter bump — as a single conditional upsert:
-//
-//	INSERT INTO totp_active (...) VALUES (...)
-//	    ON CONFLICT (user_id) DO UPDATE SET ...
-//	 WHERE totp_active.id <> excluded.id
-//	    OR excluded.last_used_counter >= totp_active.last_used_counter
-//
-// The WHERE on DO UPDATE is the monotonicity guard: a save that would lower the
-// counter for the active credential with the same ID matches nothing, changes
-// nothing, and is reported as ErrTOTPCounterRegressed rather than applied. Of
-// two racing validations only one advances the clock, and the loser cannot
-// rewind it.
-//
-// It runs under the user's lock like every other write here. PostgreSQL would
-// very likely be enough on its own — ON CONFLICT DO UPDATE re-checks its WHERE
-// against the row version a concurrent writer committed — but a replay-counter
-// guard is the last place to rest on "very likely", and the lock is already the
-// package's answer everywhere else.
+// SaveTOTP raises only last_used_counter, in one conditional UPDATE. A refused save
+// returns totp.ErrTOTPReplayed, or totp.ErrTOTPNotEnrolled if cred.ID is not active.
 func (s *TOTPStore) SaveTOTP(ctx context.Context, cred *totp.Credential) error {
-	const q = `INSERT INTO totp_active (user_id, id, secret, last_used_counter, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (user_id) DO UPDATE SET
-			id = excluded.id, secret = excluded.secret,
-			last_used_counter = excluded.last_used_counter,
-			created_at = excluded.created_at
-		 WHERE totp_active.id <> excluded.id
-		    OR excluded.last_used_counter >= totp_active.last_used_counter`
+	const q = `UPDATE totp_active SET last_used_counter = $3
+		WHERE user_id = $1 AND id = $2 AND last_used_counter < $3`
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sulis/postgres: saving a TOTP credential: %w", err)
+	}
+	defer rollback(tx)
+
+	// Under the user's lock, the read in refusedSaveError sees no other TOTP write.
+	if err := lockUser(ctx, tx, advisoryClassTOTP, cred.UserID.String()); err != nil {
+		return err
+	}
 	// #nosec G115 -- see ConfirmEnrollment: the counter is a time step.
-	n, err := s.lockedExec(ctx, cred.UserID, "saving a TOTP credential", q,
-		idArg(cred.UserID), idArg(cred.ID), cred.Secret, int64(cred.LastUsedCounter), formatTime(cred.CreatedAt))
+	res, err := tx.ExecContext(ctx, q, idArg(cred.UserID), idArg(cred.ID), int64(cred.LastUsedCounter))
+	if err != nil {
+		return fmt.Errorf("sulis/postgres: saving a TOTP credential: %w", err)
+	}
+	n, err := affected(res, "saving a TOTP credential")
 	if err != nil {
 		return err
 	}
 	if n == 0 {
-		return ErrTOTPCounterRegressed
+		return refusedSaveError(ctx, tx, cred)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sulis/postgres: committing a TOTP credential save: %w", err)
 	}
 	return nil
+}
+
+// refusedSaveError says why SaveTOTP's UPDATE matched nothing: the credential
+// is still active, so the counter did not go up, or it is not.
+func refusedSaveError(ctx context.Context, tx *sql.Tx, cred *totp.Credential) error {
+	var activeID uuid.UUID
+	err := tx.QueryRowContext(ctx, `SELECT id FROM totp_active WHERE user_id = $1`, idArg(cred.UserID)).
+		Scan(scanID(&activeID))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return totp.ErrTOTPNotEnrolled
+	case err != nil:
+		return fmt.Errorf("sulis/postgres: reading an active TOTP credential: %w", err)
+	case activeID == cred.ID:
+		return totp.ErrTOTPReplayed
+	default:
+		return totp.ErrTOTPNotEnrolled
+	}
 }
 
 // DeleteTOTP removes userID's active credential and any pending enrollment, both
