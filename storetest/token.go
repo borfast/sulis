@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -55,7 +56,7 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 			t.Errorf("ID = %q, want %q", got.ID, tok.ID)
 		}
 		if got.UserID != tok.UserID {
-			t.Errorf("UserID = %q, want %q", got.UserID, tok.UserID)
+			t.Errorf("UserID = %v, want %v", got.UserID, tok.UserID)
 		}
 		if got.Purpose != tok.Purpose {
 			t.Errorf("Purpose = %q, want %q", got.Purpose, tok.Purpose)
@@ -146,8 +147,8 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 
 	t.Run("DeleteUserTokensRemovesOnlyThatUserAndPurpose", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
-		otherID := uniqueID("user")
+		userID := uuid.NewV7()
+		otherID := uuid.NewV7()
 
 		target := newTokenFor(userID, sulis.TokenPurposePasswordReset)
 		otherPurpose := newTokenFor(userID, sulis.TokenPurposeTwoFactor)
@@ -174,8 +175,37 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 
 	t.Run("DeleteUserTokensMatchingNothingIsNotAnError", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteUserTokens(ctx, uniqueID("user"), sulis.TokenPurposeEmailChange); err != nil {
+		if err := store.DeleteUserTokens(ctx, uuid.NewV7(), sulis.TokenPurposeEmailChange); err != nil {
 			t.Fatalf("DeleteUserTokens with nothing to delete: %v", err)
+		}
+	})
+
+	t.Run("ConsumeTokenWithoutUserReturnsNilUserID", func(t *testing.T) {
+		store := factory()
+		tok := newTokenFor(uuid.Nil(), sulis.TokenPurposeMagicLink)
+		if err := store.CreateToken(ctx, tok); err != nil {
+			t.Fatalf("CreateToken: %v", err)
+		}
+		got, err := store.ConsumeToken(ctx, tok.TokenHash, tok.Purpose)
+		if err != nil {
+			t.Fatalf("ConsumeToken: %v", err)
+		}
+		if got.UserID != uuid.Nil() {
+			t.Errorf("UserID = %v, want uuid.Nil()", got.UserID)
+		}
+	})
+
+	t.Run("DeleteUserTokensForNilUserDeletesNothing", func(t *testing.T) {
+		store := factory()
+		tok := newTokenFor(uuid.Nil(), sulis.TokenPurposeMagicLink)
+		if err := store.CreateToken(ctx, tok); err != nil {
+			t.Fatalf("CreateToken: %v", err)
+		}
+		if err := store.DeleteUserTokens(ctx, uuid.Nil(), tok.Purpose); err != nil {
+			t.Fatalf("DeleteUserTokens: %v", err)
+		}
+		if _, err := store.ConsumeToken(ctx, tok.TokenHash, tok.Purpose); err != nil {
+			t.Fatalf("a token without a user was deleted by DeleteUserTokens(uuid.Nil()): %v", err)
 		}
 	})
 
@@ -216,13 +246,13 @@ func RunTokenStore(t *testing.T, factory func() sulis.TokenStore) {
 // newToken builds a token for a fresh user with a unique hash, expiring far
 // enough in the future that DeleteExpiredTokens leaves it alone.
 func newToken(purpose sulis.TokenPurpose) *sulis.Token {
-	return newTokenFor(uniqueID("user"), purpose)
+	return newTokenFor(uuid.NewV7(), purpose)
 }
 
-func newTokenFor(userID string, purpose sulis.TokenPurpose) *sulis.Token {
+func newTokenFor(userID uuid.UUID, purpose sulis.TokenPurpose) *sulis.Token {
 	now := time.Now()
 	return &sulis.Token{
-		ID:        uniqueID("token"),
+		ID:        uuid.NewV7(),
 		UserID:    userID,
 		TokenHash: uniqueHash("token"),
 		Purpose:   purpose,

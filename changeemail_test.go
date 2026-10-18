@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 	"time"
+	"uuid"
 )
 
 // countTokensByPurpose reports how many tokens of the given purpose the store
@@ -23,7 +24,7 @@ func countTokensByPurpose(ts *memTokenStore, purpose TokenPurpose) int {
 // stampVerifiedAt sets EmailVerifiedAt to a specific instant on the stored
 // user, so a test can prove a later re-stamp produced a *new* timestamp rather
 // than reusing the old one.
-func stampVerifiedAt(t *testing.T, users *memUserStore, userID string, at time.Time) {
+func stampVerifiedAt(t *testing.T, users *memUserStore, userID uuid.UUID, at time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := users.GetUserByID(ctx, userID)

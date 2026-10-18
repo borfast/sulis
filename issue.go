@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"uuid"
 )
 
 // AuthMethod names the credential that authenticated a session.
@@ -36,7 +37,7 @@ type RequestInfo struct {
 // Implementations should consult whatever the application treats as a second
 // factor: a verified TOTP enrollment, a registered passkey, or both.
 type SecondFactorChecker interface {
-	HasSecondFactor(ctx context.Context, userID string) (bool, error)
+	HasSecondFactor(ctx context.Context, userID uuid.UUID) (bool, error)
 }
 
 // NoSecondFactors is an explicit declaration that an application has no second
@@ -44,7 +45,7 @@ type SecondFactorChecker interface {
 type NoSecondFactors struct{}
 
 // HasSecondFactor always reports false.
-func (NoSecondFactors) HasSecondFactor(context.Context, string) (bool, error) {
+func (NoSecondFactors) HasSecondFactor(context.Context, uuid.UUID) (bool, error) {
 	return false, nil
 }
 
@@ -141,7 +142,7 @@ func (s *Sulis) completeFirstFactor(ctx context.Context, user *User, method Auth
 // the type exists so that, in code rather than only in a doc comment, "this
 // user is authenticated" is a value only this package can produce.
 type Authentication struct {
-	userID string
+	userID uuid.UUID
 	method AuthMethod
 	// at is when the factor behind this proof was verified. T305 minted it
 	// but left it unread; T501 is its consumer: issueSessionForUser carries
@@ -155,7 +156,7 @@ type Authentication struct {
 // newAuthentication mints an Authentication proof for userID via method,
 // timestamped now. It is unexported: this is the only way to produce a valid
 // Authentication, and nothing outside this package can reach it.
-func newAuthentication(userID string, method AuthMethod) Authentication {
+func newAuthentication(userID uuid.UUID, method AuthMethod) Authentication {
 	return Authentication{userID: userID, method: method, at: time.Now()}
 }
 
@@ -175,7 +176,7 @@ func newAuthentication(userID string, method AuthMethod) Authentication {
 // the passkey subpackage and the calling application — have no way to
 // obtain an Authentication and must call IssueSessionUnchecked instead.
 func (s *Sulis) IssueSession(ctx context.Context, auth Authentication) (*Session, string, error) {
-	if auth.userID == "" {
+	if auth.userID == uuid.Nil() {
 		return nil, "", ErrNotAuthenticated
 	}
 	return s.issueSession(ctx, auth)
@@ -192,7 +193,10 @@ func (s *Sulis) IssueSession(ctx context.Context, auth Authentication) (*Session
 // IssueSession applies. method records which credential the caller is
 // vouching for; sulis does not yet act on it beyond that, but capturing it
 // keeps this method's contract symmetric with IssueSession's.
-func (s *Sulis) IssueSessionUnchecked(ctx context.Context, userID string, method AuthMethod) (*Session, string, error) {
+func (s *Sulis) IssueSessionUnchecked(ctx context.Context, userID uuid.UUID, method AuthMethod) (*Session, string, error) {
+	if userID == uuid.Nil() {
+		return nil, "", ErrUserNotFound
+	}
 	return s.issueSession(ctx, newAuthentication(userID, method))
 }
 
@@ -247,7 +251,7 @@ func (s *Sulis) issueSessionForUser(ctx context.Context, user *User, method Auth
 // disabled — see WithIdleTimeout), the same as a fresh TouchSession would
 // compute, so a brand new session already carries a correct idle deadline
 // rather than one that only appears after its first touched validation.
-func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMethod, authenticatedAt time.Time, ri RequestInfo) (*Session, string, error) {
+func (s *Sulis) createSession(ctx context.Context, userID uuid.UUID, method AuthMethod, authenticatedAt time.Time, ri RequestInfo) (*Session, string, error) {
 	token, err := generateSessionToken(s.cfg.SessionTokenBytes)
 	if err != nil {
 		return nil, "", err
@@ -255,7 +259,7 @@ func (s *Sulis) createSession(ctx context.Context, userID string, method AuthMet
 
 	now := time.Now()
 	session := &Session{
-		ID:              generateID(),
+		ID:              uuid.NewV7(),
 		UserID:          userID,
 		TokenHash:       hashSessionToken(token),
 		ExpiresAt:       now.Add(s.cfg.SessionDuration),

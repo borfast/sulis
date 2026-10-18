@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"uuid"
 )
 
 // ChangeEmail stages newEmail as the account's pending address and returns a
@@ -22,7 +23,7 @@ import (
 // address that a change has been requested — that notification, sent to an
 // address the attacker does not control, is how a victim catches an
 // account takeover while the pending change can still be undone.
-func (s *Sulis) ChangeEmail(ctx context.Context, userID, newEmail string) (string, error) {
+func (s *Sulis) ChangeEmail(ctx context.Context, userID uuid.UUID, newEmail string) (string, error) {
 	newEmail, err := normalizeEmail(newEmail)
 	if err != nil {
 		return "", err

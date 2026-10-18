@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/passwordcheck"
 )
@@ -27,7 +28,7 @@ import (
 
 type memUserStore struct {
 	mu    sync.Mutex
-	users map[string]*User
+	users map[uuid.UUID]*User
 	// beforeUpdate, if set, fires once at the start of the next UpdateUser
 	// call and is then cleared. It lets a test interleave another complete
 	// flow between a caller's read of the user and its write, so
@@ -36,7 +37,7 @@ type memUserStore struct {
 }
 
 func newMemUserStore() *memUserStore {
-	return &memUserStore{users: make(map[string]*User)}
+	return &memUserStore{users: make(map[uuid.UUID]*User)}
 }
 
 func (s *memUserStore) CreateUser(_ context.Context, u *User) error {
@@ -51,7 +52,7 @@ func (s *memUserStore) CreateUser(_ context.Context, u *User) error {
 	return nil
 }
 
-func (s *memUserStore) GetUserByID(_ context.Context, id string) (*User, error) {
+func (s *memUserStore) GetUserByID(_ context.Context, id uuid.UUID) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.users[id]
@@ -136,7 +137,7 @@ func cloneTestUser(u *User) *User {
 	return &cp
 }
 
-func (s *memUserStore) DeleteUser(_ context.Context, id string) error {
+func (s *memUserStore) DeleteUser(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.users, id)
@@ -145,11 +146,11 @@ func (s *memUserStore) DeleteUser(_ context.Context, id string) error {
 
 type memSessionStore struct {
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[uuid.UUID]*Session
 }
 
 func newMemSessionStore() *memSessionStore {
-	return &memSessionStore{sessions: make(map[string]*Session)}
+	return &memSessionStore{sessions: make(map[uuid.UUID]*Session)}
 }
 
 func (s *memSessionStore) CreateSession(_ context.Context, sess *Session) error {
@@ -183,7 +184,7 @@ func (s *memSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash str
 	return nil, ErrSessionNotFound
 }
 
-func (s *memSessionStore) DeleteSession(_ context.Context, userID, id string) error {
+func (s *memSessionStore) DeleteSession(_ context.Context, userID, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
@@ -194,7 +195,7 @@ func (s *memSessionStore) DeleteSession(_ context.Context, userID, id string) er
 	return nil
 }
 
-func (s *memSessionStore) DeleteUserSessions(_ context.Context, userID string) error {
+func (s *memSessionStore) DeleteUserSessions(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, sess := range s.sessions {
@@ -213,7 +214,7 @@ func (s *memSessionStore) count() int {
 	return len(s.sessions)
 }
 
-func (s *memSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+func (s *memSessionStore) UpdateAuthenticatedAt(_ context.Context, id uuid.UUID, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
@@ -224,7 +225,7 @@ func (s *memSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at
 	return nil
 }
 
-func (s *memSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+func (s *memSessionStore) ListUserSessions(_ context.Context, userID uuid.UUID) ([]Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Session
@@ -236,7 +237,7 @@ func (s *memSessionStore) ListUserSessions(_ context.Context, userID string) ([]
 	return out, nil
 }
 
-func (s *memSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *memSessionStore) TouchSession(_ context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
@@ -253,7 +254,7 @@ func (s *memSessionStore) TouchSession(_ context.Context, id string, lastSeen ti
 	return nil
 }
 
-func (s *memSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+func (s *memSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, sess := range s.sessions {
@@ -278,11 +279,11 @@ func (s *memSessionStore) CleanExpired(_ context.Context) error {
 
 type memTokenStore struct {
 	mu     sync.Mutex
-	tokens map[string]*Token
+	tokens map[uuid.UUID]*Token
 }
 
 func newMemTokenStore() *memTokenStore {
-	return &memTokenStore{tokens: make(map[string]*Token)}
+	return &memTokenStore{tokens: make(map[uuid.UUID]*Token)}
 }
 
 func (s *memTokenStore) CreateToken(_ context.Context, t *Token) error {
@@ -321,7 +322,7 @@ func (s *memTokenStore) DeleteExpiredTokens(_ context.Context) error {
 	return nil
 }
 
-func (s *memTokenStore) DeleteUserTokens(_ context.Context, userID string, purpose TokenPurpose) error {
+func (s *memTokenStore) DeleteUserTokens(_ context.Context, userID uuid.UUID, purpose TokenPurpose) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, t := range s.tokens {
@@ -357,15 +358,15 @@ func (f *fakeLimiter) Allow(_ context.Context, key string) error {
 // fakeFactors is a SecondFactorChecker whose answers tests control.
 type fakeFactors struct {
 	mu       sync.Mutex
-	enrolled map[string]bool
+	enrolled map[uuid.UUID]bool
 	err      error
 }
 
 func newFakeFactors() *fakeFactors {
-	return &fakeFactors{enrolled: make(map[string]bool)}
+	return &fakeFactors{enrolled: make(map[uuid.UUID]bool)}
 }
 
-func (f *fakeFactors) HasSecondFactor(_ context.Context, userID string) (bool, error) {
+func (f *fakeFactors) HasSecondFactor(_ context.Context, userID uuid.UUID) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -374,7 +375,7 @@ func (f *fakeFactors) HasSecondFactor(_ context.Context, userID string) (bool, e
 	return f.enrolled[userID], nil
 }
 
-func (f *fakeFactors) enroll(userID string) {
+func (f *fakeFactors) enroll(userID uuid.UUID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.enrolled[userID] = true
@@ -442,7 +443,7 @@ func newTestSulis() *Sulis {
 // tests where verification is incidental to what's being tested. It bypasses
 // VerifyEmail/RedeemMagicLink so it has no side effects (e.g. no session
 // revocation).
-func verifyUserEmail(t *testing.T, users *memUserStore, userID string) {
+func verifyUserEmail(t *testing.T, users *memUserStore, userID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := users.GetUserByID(ctx, userID)
@@ -457,7 +458,7 @@ func verifyUserEmail(t *testing.T, users *memUserStore, userID string) {
 }
 
 // unverifyUserEmail clears EmailVerifiedAt directly on the stored user.
-func unverifyUserEmail(t *testing.T, users *memUserStore, userID string) {
+func unverifyUserEmail(t *testing.T, users *memUserStore, userID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := users.GetUserByID(ctx, userID)
@@ -1141,7 +1142,7 @@ func (s *observingSessionStore) GetSessionByTokenHash(_ context.Context, tokenHa
 	return &cp, nil
 }
 
-func (s *observingSessionStore) DeleteSession(_ context.Context, userID, id string) error {
+func (s *observingSessionStore) DeleteSession(_ context.Context, userID, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for hash, sess := range s.sessionByHash {
@@ -1156,7 +1157,7 @@ func (s *observingSessionStore) DeleteSession(_ context.Context, userID, id stri
 	return ErrSessionNotFound
 }
 
-func (s *observingSessionStore) DeleteUserSessions(_ context.Context, userID string) error {
+func (s *observingSessionStore) DeleteUserSessions(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for hash, sess := range s.sessionByHash {
@@ -1171,7 +1172,7 @@ func (s *observingSessionStore) CleanExpired(_ context.Context) error {
 	return nil
 }
 
-func (s *observingSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+func (s *observingSessionStore) UpdateAuthenticatedAt(_ context.Context, id uuid.UUID, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.sessionByHash {
@@ -1183,7 +1184,7 @@ func (s *observingSessionStore) UpdateAuthenticatedAt(_ context.Context, id stri
 	return ErrSessionNotFound
 }
 
-func (s *observingSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+func (s *observingSessionStore) ListUserSessions(_ context.Context, userID uuid.UUID) ([]Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Session
@@ -1195,7 +1196,7 @@ func (s *observingSessionStore) ListUserSessions(_ context.Context, userID strin
 	return out, nil
 }
 
-func (s *observingSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *observingSessionStore) TouchSession(_ context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.sessionByHash {
@@ -1208,7 +1209,7 @@ func (s *observingSessionStore) TouchSession(_ context.Context, id string, lastS
 	return ErrSessionNotFound
 }
 
-func (s *observingSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+func (s *observingSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for hash, sess := range s.sessionByHash {
@@ -1235,13 +1236,13 @@ func (s *sharedSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash 
 	return s.session, nil
 }
 
-func (s *sharedSessionStore) DeleteSession(_ context.Context, _, _ string) error { return nil }
+func (s *sharedSessionStore) DeleteSession(_ context.Context, _, _ uuid.UUID) error { return nil }
 
-func (s *sharedSessionStore) DeleteUserSessions(_ context.Context, _ string) error { return nil }
+func (s *sharedSessionStore) DeleteUserSessions(_ context.Context, _ uuid.UUID) error { return nil }
 
 func (s *sharedSessionStore) CleanExpired(_ context.Context) error { return nil }
 
-func (s *sharedSessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+func (s *sharedSessionStore) UpdateAuthenticatedAt(_ context.Context, id uuid.UUID, at time.Time) error {
 	if s.session == nil || s.session.ID != id {
 		return ErrSessionNotFound
 	}
@@ -1249,14 +1250,14 @@ func (s *sharedSessionStore) UpdateAuthenticatedAt(_ context.Context, id string,
 	return nil
 }
 
-func (s *sharedSessionStore) ListUserSessions(_ context.Context, userID string) ([]Session, error) {
+func (s *sharedSessionStore) ListUserSessions(_ context.Context, userID uuid.UUID) ([]Session, error) {
 	if s.session == nil || s.session.UserID != userID {
 		return nil, nil
 	}
 	return []Session{*s.session}, nil
 }
 
-func (s *sharedSessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *sharedSessionStore) TouchSession(_ context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	if s.session == nil || s.session.ID != id {
 		return ErrSessionNotFound
 	}
@@ -1265,7 +1266,7 @@ func (s *sharedSessionStore) TouchSession(_ context.Context, id string, lastSeen
 	return nil
 }
 
-func (s *sharedSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+func (s *sharedSessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID uuid.UUID) error {
 	if s.session != nil && s.session.UserID == userID && s.session.ID != keepSessionID {
 		s.session = nil
 	}
@@ -1284,7 +1285,7 @@ func (s *errTokenStore) ConsumeToken(_ context.Context, _ string, _ TokenPurpose
 
 func (s *errTokenStore) DeleteExpiredTokens(_ context.Context) error { return nil }
 
-func (s *errTokenStore) DeleteUserTokens(_ context.Context, _ string, _ TokenPurpose) error {
+func (s *errTokenStore) DeleteUserTokens(_ context.Context, _ uuid.UUID, _ TokenPurpose) error {
 	return nil
 }
 
@@ -1301,7 +1302,7 @@ func (s *wrappedNotFoundUserStore) CreateUser(_ context.Context, user *User) err
 	return nil
 }
 
-func (s *wrappedNotFoundUserStore) GetUserByID(_ context.Context, id string) (*User, error) {
+func (s *wrappedNotFoundUserStore) GetUserByID(_ context.Context, id uuid.UUID) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.user != nil && s.user.ID == id {
@@ -1323,7 +1324,7 @@ func (s *wrappedNotFoundUserStore) GetUserByEmail(_ context.Context, email strin
 
 func (s *wrappedNotFoundUserStore) UpdateUser(_ context.Context, _ *User) error { return nil }
 
-func (s *wrappedNotFoundUserStore) DeleteUser(_ context.Context, _ string) error { return nil }
+func (s *wrappedNotFoundUserStore) DeleteUser(_ context.Context, _ uuid.UUID) error { return nil }
 
 // failUpdateUserStore wraps a real memUserStore but forces UpdateUser to fail,
 // so tests can assert token consumption happens before the password change.
@@ -1346,7 +1347,7 @@ func TestCreateSessionStoresOnlyTokenHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if user.ID == "" {
+	if user.ID == uuid.Nil() {
 		t.Fatal("expected created user")
 	}
 	if sessionTok == "" {
@@ -1377,15 +1378,16 @@ func TestValidateSessionLooksUpByTokenHash(t *testing.T) {
 		t.Fatalf("expected empty store to miss user, got %v", err)
 	}
 
-	createdUser := &User{ID: "user-1", Email: "alice@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	createdUser := &User{ID: uuid.NewV7(), Email: "alice@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := users.CreateUser(ctx, createdUser); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
 	rawToken := "raw-session-token"
 	hash := hashSessionToken(rawToken)
+	sessionID := uuid.NewV7()
 	sessions.sessionByHash[hash] = &Session{
-		ID:        "session-1",
+		ID:        sessionID,
 		UserID:    createdUser.ID,
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -1396,8 +1398,8 @@ func TestValidateSessionLooksUpByTokenHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
-	if session.ID != "session-1" {
-		t.Fatalf("expected session-1, got %s", session.ID)
+	if session.ID != sessionID {
+		t.Fatalf("expected %v, got %v", sessionID, session.ID)
 	}
 	if gotUser.ID != createdUser.ID {
 		t.Fatalf("expected user %s, got %s", createdUser.ID, gotUser.ID)
@@ -1413,14 +1415,15 @@ func TestValidateSessionDoesNotMutateStoredSession(t *testing.T) {
 	store := &sharedSessionStore{}
 	s := mustNew(users, store, newMemTokenStore())
 
-	createdUser := &User{ID: "user-1", Email: "alice@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	createdUser := &User{ID: uuid.NewV7(), Email: "alice@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := users.CreateUser(ctx, createdUser); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
 	rawToken := "raw-session-token"
+	sessionID := uuid.NewV7()
 	store.session = &Session{
-		ID:        "session-1",
+		ID:        sessionID,
 		UserID:    createdUser.ID,
 		TokenHash: hashSessionToken(rawToken),
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -2036,7 +2039,7 @@ type raceCreateUserStore struct {
 
 func (s *raceCreateUserStore) CreateUser(ctx context.Context, u *User) error {
 	winner := &User{
-		ID:        "race-winner-" + u.ID,
+		ID:        uuid.NewV7(),
 		Email:     u.Email,
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
@@ -2081,7 +2084,7 @@ func TestVerifyPasswordDoesNotCreateSession(t *testing.T) {
 	}
 	// Register creates its own session; clear it so we can observe
 	// VerifyPassword's effect in isolation.
-	sessions.sessions = make(map[string]*Session)
+	sessions.sessions = make(map[uuid.UUID]*Session)
 
 	user, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
@@ -2253,7 +2256,7 @@ func TestTwoFactorFlowIssuesSessionOnlyAfterCompletion(t *testing.T) {
 	verifyUserEmail(t, users, user.ID)
 	// Register creates its own session; clear it so we can observe the
 	// two-factor flow's effect in isolation.
-	sessions.sessions = make(map[string]*Session)
+	sessions.sessions = make(map[uuid.UUID]*Session)
 
 	gotUser, err := s.VerifyPassword(ctx, "alice@example.com", "correct-battery-staple", RequestInfo{})
 	if err != nil {
@@ -2833,11 +2836,11 @@ func TestIssueSessionUnknownUserReturnsErrUserNotFound(t *testing.T) {
 	s := newTestSulis()
 	ctx := context.Background()
 
-	if _, _, err := s.IssueSession(ctx, newAuthentication("unknown-user-id", AuthMethodPassword)); err != ErrUserNotFound {
+	if _, _, err := s.IssueSession(ctx, newAuthentication(uuid.NewV7(), AuthMethodPassword)); err != ErrUserNotFound {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 
-	if _, _, err := s.IssueSessionUnchecked(ctx, "unknown-user-id", AuthMethodPasskey); err != ErrUserNotFound {
+	if _, _, err := s.IssueSessionUnchecked(ctx, uuid.NewV7(), AuthMethodPasskey); err != ErrUserNotFound {
 		t.Fatalf("IssueSessionUnchecked: expected ErrUserNotFound, got %v", err)
 	}
 }
@@ -3115,7 +3118,7 @@ type failSessionStore struct {
 	deleteUserSessionsErr error
 }
 
-func (s *failSessionStore) DeleteUserSessions(ctx context.Context, userID string) error {
+func (s *failSessionStore) DeleteUserSessions(ctx context.Context, userID uuid.UUID) error {
 	if s.deleteUserSessionsErr != nil {
 		return s.deleteUserSessionsErr
 	}
@@ -3130,7 +3133,7 @@ type failGetUserStore struct {
 	getErr error
 }
 
-func (s *failGetUserStore) GetUserByID(ctx context.Context, id string) (*User, error) {
+func (s *failGetUserStore) GetUserByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	if s.getErr != nil {
 		return nil, s.getErr
 	}
@@ -3655,7 +3658,7 @@ func TestCompleteTwoFactorRecordsTwoFactorMethod(t *testing.T) {
 // disableUserDirect stamps DisabledAt/DisabledReason on the stored user
 // without calling DisableUser, so a test can isolate ValidateSession's own
 // status check from DisableUser's session-revocation side effect.
-func disableUserDirect(t *testing.T, users *memUserStore, userID, reason string) {
+func disableUserDirect(t *testing.T, users *memUserStore, userID uuid.UUID, reason string) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := users.GetUserByID(ctx, userID)
@@ -3674,7 +3677,7 @@ func disableUserDirect(t *testing.T, users *memUserStore, userID, reason string)
 // the automatic-lockout mechanism, so a test can pin the pure
 // locked/expired check in isolation from whatever triggers a lock in
 // practice.
-func lockUserUntil(t *testing.T, users *memUserStore, userID string, until time.Time) {
+func lockUserUntil(t *testing.T, users *memUserStore, userID uuid.UUID, until time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	u, err := users.GetUserByID(ctx, userID)
@@ -3805,14 +3808,14 @@ func TestEnableUserRestoresLogin(t *testing.T) {
 // for both methods.
 func TestDisableUserUnknownUserReturnsErrUserNotFound(t *testing.T) {
 	s := newTestSulis()
-	if err := s.DisableUser(context.Background(), "no-such-user", "reason"); !errors.Is(err, ErrUserNotFound) {
+	if err := s.DisableUser(context.Background(), uuid.NewV7(), "reason"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("DisableUser error = %v, want ErrUserNotFound", err)
 	}
 }
 
 func TestEnableUserUnknownUserReturnsErrUserNotFound(t *testing.T) {
 	s := newTestSulis()
-	if err := s.EnableUser(context.Background(), "no-such-user"); !errors.Is(err, ErrUserNotFound) {
+	if err := s.EnableUser(context.Background(), uuid.NewV7()); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("EnableUser error = %v, want ErrUserNotFound", err)
 	}
 }
@@ -4282,7 +4285,7 @@ type touchCountingSessionStore struct {
 	touches int
 }
 
-func (s *touchCountingSessionStore) TouchSession(ctx context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *touchCountingSessionStore) TouchSession(ctx context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	s.touches++
 	return s.memSessionStore.TouchSession(ctx, id, lastSeen, idleExpires)
 }
@@ -5254,7 +5257,7 @@ func TestCompromisedPasswordRejectedOnEveryPasswordSetPath(t *testing.T) {
 
 	t.Run("SetInitialPassword", func(t *testing.T) {
 		s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
-		user := &User{ID: generateID(), Email: "passwordless@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		user := &User{ID: uuid.NewV7(), Email: "passwordless@example.com", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 		if err := users.CreateUser(ctx, user); err != nil {
 			t.Fatalf("CreateUser: %v", err)
 		}
@@ -5411,7 +5414,7 @@ func TestLegacyPasswordHashIsUpgradedToTheNormalizedFormOnLogin(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 
 	user := &User{
-		ID:           generateID(),
+		ID:           uuid.NewV7(),
 		Email:        "legacy@example.com",
 		PasswordHash: legacyHash(t, nfkcCompatibilityForm, testArgon2Params),
 		CreatedAt:    time.Now(),
@@ -5466,7 +5469,7 @@ func TestReAuthenticateUpgradesALegacyPasswordHash(t *testing.T) {
 	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params))
 
 	user := &User{
-		ID:           generateID(),
+		ID:           uuid.NewV7(),
 		Email:        "legacy@example.com",
 		PasswordHash: legacyHash(t, nfkcCompatibilityForm, testArgon2Params),
 		CreatedAt:    time.Now(),

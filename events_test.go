@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 )
 
 // --- T509: security event sink ----------------------------------------------
@@ -649,10 +650,10 @@ func TestSessionIssuedEventCarriesTheAuthMethod(t *testing.T) {
 	if got := e.Metadata[MetaMethod]; got != string(AuthMethodMagicLink) {
 		t.Fatalf("method = %q, want %q", got, AuthMethodMagicLink)
 	}
-	if e.SessionID == "" {
+	if e.SessionID == uuid.Nil() {
 		t.Fatal("session.issued carries no SessionID")
 	}
-	if e.UserID == "" {
+	if e.UserID == uuid.Nil() {
 		t.Fatal("session.issued carries no UserID")
 	}
 }
@@ -748,10 +749,11 @@ func TestUnrecognizedGateVerdictOmitsTheReasonKey(t *testing.T) {
 	sink := &recordingSink{}
 	s, _, _, _ := newTestEnv(eventOpts(sink)...)
 	ctx := context.Background()
-	session := &Session{ID: "session-1", UserID: "user-1"}
+	userID := uuid.NewV7()
+	session := &Session{ID: uuid.NewV7(), UserID: userID}
 
-	s.emitLoginFailedVia(ctx, "user-1", sweepRequestInfo, AuthMethodPassword, "")
-	s.emitSecondFactorFailed(ctx, "user-1", sweepRequestInfo, "")
+	s.emitLoginFailedVia(ctx, userID, sweepRequestInfo, AuthMethodPassword, "")
+	s.emitSecondFactorFailed(ctx, userID, sweepRequestInfo, "")
 	s.emitReauthFailed(ctx, session, sweepRequestInfo, "")
 
 	for _, kind := range []EventKind{EventLoginFailed, EventSecondFactorFailed, EventReauthFailed} {
@@ -829,8 +831,6 @@ func TestEventSecretScanCatchesAPlantedSecret(t *testing.T) {
 		name  string
 		event Event
 	}{
-		{"UserID", Event{Kind: EventLoginFailed, UserID: secret}},
-		{"SessionID", Event{Kind: EventLoginFailed, SessionID: secret}},
 		{"RequestInfo.IP", Event{Kind: EventLoginFailed, RequestInfo: RequestInfo{IP: secret}}},
 		{"RequestInfo.UserAgent", Event{Kind: EventLoginFailed, RequestInfo: RequestInfo{UserAgent: secret}}},
 		{"Metadata value", Event{Kind: EventLoginFailed, Metadata: map[MetadataKey]string{MetaReason: secret}}},
@@ -844,7 +844,7 @@ func TestEventSecretScanCatchesAPlantedSecret(t *testing.T) {
 		})
 	}
 
-	if scanEventFor(t, Event{Kind: EventLoginFailed, UserID: "an-ordinary-id"}, secret) {
+	if scanEventFor(t, Event{Kind: EventLoginFailed, UserID: uuid.NewV7()}, secret) {
 		t.Fatal("the scanner reports a secret in an event that has none")
 	}
 }
@@ -972,9 +972,10 @@ func TestNilSinkPathAllocatesNothing(t *testing.T) {
 		t.Fatal("this test needs a Sulis with no sink configured")
 	}
 	ctx := context.Background()
+	userID := uuid.NewV7()
 
 	allocs := testing.AllocsPerRun(100, func() {
-		s.emit(ctx, Event{Kind: EventLoginFailed, UserID: "user-123"},
+		s.emit(ctx, Event{Kind: EventLoginFailed, UserID: userID},
 			string(MetaMethod), string(AuthMethodPassword),
 			string(MetaReason), ReasonWrongPassword)
 	})
@@ -991,7 +992,7 @@ func TestNilSinkAllocationTestIsNotVacuous(t *testing.T) {
 	sink := &recordingSink{}
 	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithEventSink(sink))
 
-	s.emit(context.Background(), Event{Kind: EventLoginFailed, UserID: "user-123"},
+	s.emit(context.Background(), Event{Kind: EventLoginFailed, UserID: uuid.NewV7()},
 		string(MetaMethod), string(AuthMethodPassword),
 		string(MetaReason), ReasonWrongPassword)
 
@@ -1069,11 +1070,12 @@ func TestSlogSinkWritesStructuredAttributes(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	userID, sessionID := uuid.NewV7(), uuid.NewV7()
 	sink := NewSlogSink(logger)
 	sink.Emit(context.Background(), Event{
 		Kind:        EventLoginFailed,
-		UserID:      "user-123",
-		SessionID:   "session-456",
+		UserID:      userID,
+		SessionID:   sessionID,
 		RequestInfo: RequestInfo{IP: "198.51.100.7", UserAgent: "curl/8"},
 		At:          time.Unix(1700000000, 0).UTC(),
 		Metadata:    map[MetadataKey]string{MetaReason: ReasonWrongPassword, MetaMethod: string(AuthMethodPassword)},
@@ -1086,8 +1088,8 @@ func TestSlogSinkWritesStructuredAttributes(t *testing.T) {
 
 	for key, want := range map[string]string{
 		"kind":       string(EventLoginFailed),
-		"user_id":    "user-123",
-		"session_id": "session-456",
+		"user_id":    userID.String(),
+		"session_id": sessionID.String(),
 		"ip":         "198.51.100.7",
 		"user_agent": "curl/8",
 		"reason":     ReasonWrongPassword,

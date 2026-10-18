@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 )
 
 // magicLinkNonceBytes is the length, in bytes, of the random binding nonce
@@ -50,7 +51,7 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri Reque
 		if !errors.Is(err, ErrUserNotFound) {
 			return "", "", err
 		}
-		return s.issueMagicLinkToken(ctx, "", email)
+		return s.issueMagicLinkToken(ctx, uuid.Nil(), email)
 	}
 
 	return s.issueMagicLinkToken(ctx, user.ID, "")
@@ -65,7 +66,7 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri Reque
 // storing only its SHA-256 hash (Token.NonceHash) and returning the raw
 // nonce for the caller to set as a cookie. When binding is disabled,
 // bindingNonce is "" and the stored token carries no NonceHash at all.
-func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (raw, bindingNonce string, err error) {
+func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID uuid.UUID, email string) (raw, bindingNonce string, err error) {
 	raw, hashed, err := generateRawToken(s.cfg.ResetTokenBytes)
 	if err != nil {
 		return "", "", fmt.Errorf("sulis: generating token: %w", err)
@@ -81,7 +82,7 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (
 
 	now := time.Now()
 	tok := &Token{
-		ID:        generateID(),
+		ID:        uuid.NewV7(),
 		UserID:    userID,
 		Email:     email,
 		TokenHash: hashed,
@@ -146,7 +147,7 @@ func (s *Sulis) issueMagicLinkToken(ctx context.Context, userID, email string) (
 func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce string, ri RequestInfo) (*LoginResult, error) {
 	tok, err := s.consumeToken(ctx, rawToken, TokenPurposeMagicLink)
 	if err != nil {
-		s.emitMagicLinkRejected(ctx, "", ri, tokenReason(err))
+		s.emitMagicLinkRejected(ctx, uuid.Nil(), ri, tokenReason(err))
 		return nil, err
 	}
 
@@ -163,7 +164,7 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce stri
 	}
 
 	var user *User
-	if tok.UserID != "" {
+	if tok.UserID != uuid.Nil() {
 		user, err = s.users.GetUserByID(ctx, tok.UserID)
 	} else {
 		user, err = s.getOrCreatePasswordlessUser(ctx, tok.Email)
@@ -197,7 +198,7 @@ func (s *Sulis) RedeemMagicLink(ctx context.Context, rawToken, bindingNonce stri
 // emitMagicLinkRejected reports a refused RedeemMagicLink. userID is empty
 // when the token did not resolve to one — an unknown, expired, or
 // already-used token names nobody.
-func (s *Sulis) emitMagicLinkRejected(ctx context.Context, userID string, ri RequestInfo, reason string) {
+func (s *Sulis) emitMagicLinkRejected(ctx context.Context, userID uuid.UUID, ri RequestInfo, reason string) {
 	s.emit(ctx, Event{
 		Kind:        EventMagicLinkRejected,
 		UserID:      userID,
@@ -220,7 +221,7 @@ func (s *Sulis) getOrCreatePasswordlessUser(ctx context.Context, email string) (
 
 	now := time.Now()
 	user = &User{
-		ID:        generateID(),
+		ID:        uuid.NewV7(),
 		Email:     email,
 		CreatedAt: now,
 		UpdatedAt: now,

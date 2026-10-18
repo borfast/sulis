@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"maps"
 	"time"
+	"uuid"
 )
 
 // Session represents a server-side authentication session.
 type Session struct {
-	ID     string
-	UserID string
+	ID     uuid.UUID
+	UserID uuid.UUID
 	// TokenHash is the SHA-256 hash of the session token. The raw token is
 	// never a field on this struct: it is returned beside the *Session at
 	// issue time and nowhere else, so no store can persist it by accident.
@@ -88,7 +89,7 @@ type SessionStore interface {
 	// stored, the same as GetSessionByTokenHash does. Stripping it to ""
 	// before it reaches an application is Sulis.ListUserSessions's job,
 	// not this method's.
-	ListUserSessions(ctx context.Context, userID string) ([]Session, error)
+	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
 
 	// DeleteSession removes the session identified by id if it belongs to
 	// userID. The membership check and the removal MUST happen as a
@@ -102,9 +103,9 @@ type SessionStore interface {
 	// revocation impossible through RevokeSession: it passes the
 	// caller's own userID, so guessing or leaking another user's session
 	// ID never deletes anything.
-	DeleteSession(ctx context.Context, userID, id string) error
+	DeleteSession(ctx context.Context, userID, id uuid.UUID) error
 
-	DeleteUserSessions(ctx context.Context, userID string) error
+	DeleteUserSessions(ctx context.Context, userID uuid.UUID) error
 
 	// DeleteUserSessionsExcept removes every session belonging to userID
 	// except the one identified by keepSessionID, as a single operation:
@@ -121,7 +122,7 @@ type SessionStore interface {
 	// this method (see the PROGRESS.md Decisions row): Appendix A does not
 	// name one, and the facade-level path for the same outcome is
 	// ListUserSessions plus a RevokeSession per entry.
-	DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID string) error
+	DeleteUserSessionsExcept(ctx context.Context, userID, keepSessionID uuid.UUID) error
 
 	CleanExpired(ctx context.Context) error
 
@@ -142,7 +143,7 @@ type SessionStore interface {
 	// different callers and different frequencies, and folding them into
 	// one call would make a caller that means to refresh only one of the
 	// two silently refresh both.
-	UpdateAuthenticatedAt(ctx context.Context, id string, at time.Time) error
+	UpdateAuthenticatedAt(ctx context.Context, id uuid.UUID, at time.Time) error
 
 	// TouchSession stamps the session identified by id with a fresh
 	// lastSeen and idleExpires, leaving every other column (ExpiresAt,
@@ -161,7 +162,7 @@ type SessionStore interface {
 	// Sulis.ValidateSession's liveness touch, and it is deliberately
 	// throttled rather than called on every validation — see
 	// sessionTouchInterval's doc comment for the cost rationale.
-	TouchSession(ctx context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error
+	TouchSession(ctx context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error
 }
 
 // sessionTouchIntervalDivisor and defaultSessionTouchInterval configure how
@@ -225,7 +226,7 @@ func (s *Sulis) idleExpiresAt(at time.Time) *time.Time {
 // exactly as stored, the same as GetSessionByTokenHash; blanking it before
 // it ever reaches a caller happens here, once, rather than depending on
 // every current and future listing path remembering to do it themselves.
-func (s *Sulis) ListUserSessions(ctx context.Context, userID string) ([]Session, error) {
+func (s *Sulis) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error) {
 	sessions, err := s.sessions.ListUserSessions(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -331,7 +332,7 @@ func (s *Sulis) RefreshSession(ctx context.Context, session *Session) (*Session,
 
 	now := time.Now()
 	fresh := &Session{
-		ID:              generateID(),
+		ID:              uuid.NewV7(),
 		UserID:          session.UserID,
 		TokenHash:       hashSessionToken(token),
 		ExpiresAt:       now.Add(s.cfg.SessionDuration),

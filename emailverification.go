@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"uuid"
 )
 
 // errAlreadyVerified aborts the stampEmailVerified update when another writer
@@ -15,7 +16,7 @@ var errAlreadyVerified = errors.New("sulis: email already verified")
 // is bound to the user's current (normalized) email at issuance time, so it
 // is invalidated by VerifyEmail if the address changes before redemption.
 // The raw token is returned so the consumer can deliver it (e.g. via email).
-func (s *Sulis) CreateEmailVerificationToken(ctx context.Context, userID string) (string, error) {
+func (s *Sulis) CreateEmailVerificationToken(ctx context.Context, userID uuid.UUID) (string, error) {
 	user, err := s.users.GetUserByID(ctx, userID)
 	if err != nil {
 		return "", err

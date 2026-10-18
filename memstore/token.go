@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -11,14 +12,14 @@ import (
 // TokenStore is an in-memory sulis.TokenStore.
 type TokenStore struct {
 	mu     sync.Mutex
-	tokens map[string]*sulis.Token
+	tokens map[uuid.UUID]*sulis.Token
 }
 
 var _ sulis.TokenStore = (*TokenStore)(nil)
 
 // NewTokenStore returns an empty TokenStore.
 func NewTokenStore() *TokenStore {
-	return &TokenStore{tokens: make(map[string]*sulis.Token)}
+	return &TokenStore{tokens: make(map[uuid.UUID]*sulis.Token)}
 }
 
 // CreateToken stores a copy of token, keyed by its ID.
@@ -72,8 +73,12 @@ func (s *TokenStore) DeleteExpiredTokens(_ context.Context) error {
 }
 
 // DeleteUserTokens removes every token belonging to userID with the given
-// purpose. Matching nothing is not an error.
-func (s *TokenStore) DeleteUserTokens(_ context.Context, userID string, purpose sulis.TokenPurpose) error {
+// purpose. Matching nothing is not an error. uuid.Nil deletes nothing, so
+// tokens issued before an account exists survive.
+func (s *TokenStore) DeleteUserTokens(_ context.Context, userID uuid.UUID, purpose sulis.TokenPurpose) error {
+	if userID == uuid.Nil() {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

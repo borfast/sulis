@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"sync"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -18,14 +19,14 @@ import (
 // mutex to stand in for both, which is why every method here takes it.
 type UserStore struct {
 	mu    sync.Mutex
-	users map[string]*sulis.User
+	users map[uuid.UUID]*sulis.User
 }
 
 var _ sulis.UserStore = (*UserStore)(nil)
 
 // NewUserStore returns an empty UserStore.
 func NewUserStore() *UserStore {
-	return &UserStore{users: make(map[string]*sulis.User)}
+	return &UserStore{users: make(map[uuid.UUID]*sulis.User)}
 }
 
 // CreateUser stores a copy of user, rejecting an e-mail address another user
@@ -52,7 +53,7 @@ func (s *UserStore) CreateUser(_ context.Context, user *sulis.User) error {
 }
 
 // GetUserByID returns a copy of the stored user, or sulis.ErrUserNotFound.
-func (s *UserStore) GetUserByID(_ context.Context, id string) (*sulis.User, error) {
+func (s *UserStore) GetUserByID(_ context.Context, id uuid.UUID) (*sulis.User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,7 +112,7 @@ func (s *UserStore) UpdateUser(_ context.Context, user *sulis.User) error {
 
 // DeleteUser removes the user with the given ID. Deleting a user who is not
 // there is not an error: the caller's intent is already satisfied.
-func (s *UserStore) DeleteUser(_ context.Context, id string) error {
+func (s *UserStore) DeleteUser(_ context.Context, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -154,7 +155,7 @@ func cloneUser(u *sulis.User) *sulis.User {
 // Callers must hold s.mu. exceptID excludes the row being written, so an
 // update that changes anything but the address is not rejected as a
 // collision with itself.
-func (s *UserStore) emailTakenLocked(email, exceptID string) bool {
+func (s *UserStore) emailTakenLocked(email string, exceptID uuid.UUID) bool {
 	for id, u := range s.users {
 		if id != exceptID && u.Email == email {
 			return true

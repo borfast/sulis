@@ -5,6 +5,7 @@ import (
 	"maps"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -12,14 +13,14 @@ import (
 // SessionStore is an in-memory sulis.SessionStore.
 type SessionStore struct {
 	mu       sync.Mutex
-	sessions map[string]*sulis.Session
+	sessions map[uuid.UUID]*sulis.Session
 }
 
 var _ sulis.SessionStore = (*SessionStore)(nil)
 
 // NewSessionStore returns an empty SessionStore.
 func NewSessionStore() *SessionStore {
-	return &SessionStore{sessions: make(map[string]*sulis.Session)}
+	return &SessionStore{sessions: make(map[uuid.UUID]*sulis.Session)}
 }
 
 // CreateSession stores a copy of session, keyed by its ID.
@@ -53,7 +54,7 @@ func (s *SessionStore) GetSessionByTokenHash(_ context.Context, tokenHash string
 // check of the affected-row count, and it is what stops a leaked or guessed
 // session ID from revoking another user's session through
 // Sulis.RevokeSession.
-func (s *SessionStore) DeleteSession(_ context.Context, userID, id string) error {
+func (s *SessionStore) DeleteSession(_ context.Context, userID, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -67,7 +68,7 @@ func (s *SessionStore) DeleteSession(_ context.Context, userID, id string) error
 
 // DeleteUserSessions removes every session belonging to userID. Matching
 // nothing is not an error.
-func (s *SessionStore) DeleteUserSessions(_ context.Context, userID string) error {
+func (s *SessionStore) DeleteUserSessions(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -84,7 +85,7 @@ func (s *SessionStore) DeleteUserSessions(_ context.Context, userID string) erro
 // doesn't exist, or one belonging to someone else, is not an error — every
 // other session for userID is removed regardless. See
 // sulis.SessionStore.DeleteUserSessionsExcept's doc comment.
-func (s *SessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID string) error {
+func (s *SessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepSessionID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -98,7 +99,7 @@ func (s *SessionStore) DeleteUserSessionsExcept(_ context.Context, userID, keepS
 
 // ListUserSessions returns a copy of every session belonging to userID.
 // Matching nothing is not an error — a nil slice and a nil error.
-func (s *SessionStore) ListUserSessions(_ context.Context, userID string) ([]sulis.Session, error) {
+func (s *SessionStore) ListUserSessions(_ context.Context, userID uuid.UUID) ([]sulis.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -114,7 +115,7 @@ func (s *SessionStore) ListUserSessions(_ context.Context, userID string) ([]sul
 // UpdateAuthenticatedAt stamps the session identified by id with at, leaving
 // every other field untouched, and returns sulis.ErrSessionNotFound if id
 // does not exist. This is the write path behind sulis.Sulis.ReAuthenticate.
-func (s *SessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at time.Time) error {
+func (s *SessionStore) UpdateAuthenticatedAt(_ context.Context, id uuid.UUID, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -131,7 +132,7 @@ func (s *SessionStore) UpdateAuthenticatedAt(_ context.Context, id string, at ti
 // sulis.ErrSessionNotFound if id does not exist. A nil idleExpires clears
 // any previously-stored deadline. This is the write path behind
 // sulis.Sulis.ValidateSession's throttled liveness touch.
-func (s *SessionStore) TouchSession(_ context.Context, id string, lastSeen time.Time, idleExpires *time.Time) error {
+func (s *SessionStore) TouchSession(_ context.Context, id uuid.UUID, lastSeen time.Time, idleExpires *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

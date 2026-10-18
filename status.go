@@ -3,6 +3,7 @@ package sulis
 import (
 	"context"
 	"time"
+	"uuid"
 )
 
 // DisableUser marks userID as disabled, effective immediately: it stamps
@@ -21,7 +22,7 @@ import (
 // matters most.
 //
 // Returns ErrUserNotFound if no such user exists.
-func (s *Sulis) DisableUser(ctx context.Context, userID, reason string) error {
+func (s *Sulis) DisableUser(ctx context.Context, userID uuid.UUID, reason string) error {
 	now := time.Now()
 	user, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
 		u.DisabledAt = &now
@@ -54,7 +55,7 @@ func (s *Sulis) DisableUser(ctx context.Context, userID, reason string) error {
 // session DisableUser revoked — the account can simply start new ones.
 //
 // Returns ErrUserNotFound if no such user exists.
-func (s *Sulis) EnableUser(ctx context.Context, userID string) error {
+func (s *Sulis) EnableUser(ctx context.Context, userID uuid.UUID) error {
 	_, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
 		u.DisabledAt = nil
 		u.DisabledReason = ""
@@ -121,7 +122,7 @@ func (s *Sulis) accountStatus(user *User) error {
 // one early or falsely. See PROGRESS.md's T502 row — this is a pre-existing
 // property of every updateUserWithRetry caller, not something specific to
 // login failures.
-func (s *Sulis) recordFailedLogin(ctx context.Context, userID string, ri RequestInfo) {
+func (s *Sulis) recordFailedLogin(ctx context.Context, userID uuid.UUID, ri RequestInfo) {
 	now := time.Now()
 	// Set inside the closure and reset on every attempt, so a retry that
 	// re-reads a row someone else has meanwhile unlocked reports what the
@@ -156,7 +157,7 @@ func (s *Sulis) recordFailedLogin(ctx context.Context, userID string, ri Request
 // errors for the same reason recordFailedLogin does: the caller is about to
 // receive a successful result, and a bookkeeping failure here must not turn
 // that into an error instead.
-func (s *Sulis) clearFailedLogins(ctx context.Context, userID string, ri RequestInfo) {
+func (s *Sulis) clearFailedLogins(ctx context.Context, userID uuid.UUID, ri RequestInfo) {
 	_, err := s.updateUserWithRetry(ctx, userID, func(u *User) error {
 		u.FailedLoginAttempts = 0
 		u.LockedUntil = nil

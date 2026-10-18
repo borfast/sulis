@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -35,7 +36,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("CreateSessionRoundTripsByTokenHash", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -85,7 +86,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteSessionRemovesTheOwnersSession", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -100,12 +101,12 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteSessionForAnotherUserReturnsErrSessionNotFoundAndKeepsTheSession", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("owner"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
 
-		attacker := uniqueID("attacker")
+		attacker := uuid.NewV7()
 		if err := store.DeleteSession(ctx, attacker, sess.ID); !errors.Is(err, sulis.ErrSessionNotFound) {
 			t.Fatalf("cross-user DeleteSession error = %v, want ErrSessionNotFound", err)
 		}
@@ -118,15 +119,15 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteSessionUnknownIDReturnsErrSessionNotFound", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteSession(ctx, uniqueID("user"), uniqueID("session")); !errors.Is(err, sulis.ErrSessionNotFound) {
+		if err := store.DeleteSession(ctx, uuid.NewV7(), uuid.NewV7()); !errors.Is(err, sulis.ErrSessionNotFound) {
 			t.Fatalf("DeleteSession for an unknown session error = %v, want ErrSessionNotFound", err)
 		}
 	})
 
 	t.Run("DeleteUserSessionsRemovesOnlyThatUsersSessions", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
-		otherID := uniqueID("user")
+		userID := uuid.NewV7()
+		otherID := uuid.NewV7()
 		mine := []*sulis.Session{newSession(userID), newSession(userID)}
 		theirs := newSession(otherID)
 		for _, sess := range append(append([]*sulis.Session{}, mine...), theirs) {
@@ -150,14 +151,14 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteUserSessionsMatchingNothingIsNotAnError", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteUserSessions(ctx, uniqueID("user")); err != nil {
+		if err := store.DeleteUserSessions(ctx, uuid.NewV7()); err != nil {
 			t.Fatalf("DeleteUserSessions with nothing to delete: %v", err)
 		}
 	})
 
 	t.Run("CleanExpiredRemovesOnlyExpiredSessions", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		expired := newSession(userID)
 		expired.ExpiresAt = time.Now().Add(-time.Hour)
 		live := newSession(userID)
@@ -180,7 +181,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("UpdateAuthenticatedAtStampsTheStoredSession", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		old := time.Now().Add(-2 * time.Hour)
 		sess.AuthenticatedAt = old
 		if err := store.CreateSession(ctx, sess); err != nil {
@@ -210,14 +211,14 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("UpdateAuthenticatedAtUnknownIDReturnsErrSessionNotFound", func(t *testing.T) {
 		store := factory()
-		if err := store.UpdateAuthenticatedAt(ctx, uniqueID("session"), time.Now()); !errors.Is(err, sulis.ErrSessionNotFound) {
+		if err := store.UpdateAuthenticatedAt(ctx, uuid.NewV7(), time.Now()); !errors.Is(err, sulis.ErrSessionNotFound) {
 			t.Fatalf("UpdateAuthenticatedAt for an unknown session error = %v, want ErrSessionNotFound", err)
 		}
 	})
 
 	t.Run("ReturnedSessionsAreIndependentOfStoredState", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		sess.Metadata = map[string]any{"device": "laptop"}
 		wantUser := sess.UserID
 		if err := store.CreateSession(ctx, sess); err != nil {
@@ -228,7 +229,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		if err != nil {
 			t.Fatalf("GetSessionByTokenHash: %v", err)
 		}
-		read.UserID = uniqueID("hijacked")
+		read.UserID = uuid.NewV7()
 		// A struct copy copies a map header, not the map, so a store that
 		// does not clone Metadata hands every reader a live handle on the
 		// stored session.
@@ -244,7 +245,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		}
 		assertMetadataUnchanged(t, "GetSessionByTokenHash", after.Metadata, "device", "laptop")
 
-		sess.UserID = uniqueID("hijacked")
+		sess.UserID = uuid.NewV7()
 		mutateMetadata(sess.Metadata)
 
 		final, err := store.GetSessionByTokenHash(ctx, after.TokenHash)
@@ -259,7 +260,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("TouchSessionUpdatesLastSeenAndIdleExpires", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -294,7 +295,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("TouchSessionCanClearIdleExpiresAtBackToNil", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -320,7 +321,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("TouchSessionIdleExpiresAtIsNotAliased", func(t *testing.T) {
 		store := factory()
-		sess := newSession(uniqueID("user"))
+		sess := newSession(uuid.NewV7())
 		if err := store.CreateSession(ctx, sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
@@ -355,15 +356,15 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 	t.Run("TouchSessionUnknownIDReturnsErrSessionNotFound", func(t *testing.T) {
 		store := factory()
 		future := time.Now().Add(time.Hour)
-		if err := store.TouchSession(ctx, uniqueID("session"), time.Now(), &future); !errors.Is(err, sulis.ErrSessionNotFound) {
+		if err := store.TouchSession(ctx, uuid.NewV7(), time.Now(), &future); !errors.Is(err, sulis.ErrSessionNotFound) {
 			t.Fatalf("TouchSession for an unknown session error = %v, want ErrSessionNotFound", err)
 		}
 	})
 
 	t.Run("ListUserSessionsReturnsOnlyThatUsersSessions", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
-		otherID := uniqueID("user")
+		userID := uuid.NewV7()
+		otherID := uuid.NewV7()
 		mine := []*sulis.Session{newSession(userID), newSession(userID)}
 		theirs := newSession(otherID)
 		for _, sess := range append(append([]*sulis.Session{}, mine...), theirs) {
@@ -379,7 +380,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		if len(got) != len(mine) {
 			t.Fatalf("ListUserSessions returned %d sessions, want %d", len(got), len(mine))
 		}
-		wantIDs := map[string]bool{mine[0].ID: true, mine[1].ID: true}
+		wantIDs := map[uuid.UUID]bool{mine[0].ID: true, mine[1].ID: true}
 		for _, sess := range got {
 			if !wantIDs[sess.ID] {
 				t.Errorf("ListUserSessions returned unexpected session %q", sess.ID)
@@ -395,7 +396,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("ListUserSessionsMatchingNothingReturnsEmptyNotError", func(t *testing.T) {
 		store := factory()
-		got, err := store.ListUserSessions(ctx, uniqueID("user"))
+		got, err := store.ListUserSessions(ctx, uuid.NewV7())
 		if err != nil {
 			t.Fatalf("ListUserSessions: %v", err)
 		}
@@ -406,7 +407,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("ListUserSessionsReturnedSessionsAreIndependentOfStoredState", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		sess := newSession(userID)
 		sess.Metadata = map[string]any{"device": "laptop"}
 		if err := store.CreateSession(ctx, sess); err != nil {
@@ -420,7 +421,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		if len(got) != 1 {
 			t.Fatalf("ListUserSessions returned %d sessions, want 1", len(got))
 		}
-		got[0].UserID = uniqueID("hijacked")
+		got[0].UserID = uuid.NewV7()
 		mutateMetadata(got[0].Metadata)
 
 		after, err := store.GetSessionByTokenHash(ctx, sess.TokenHash)
@@ -435,10 +436,10 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteUserSessionsExceptRemovesOnlyOtherSessionsForThatUser", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		keep := newSession(userID)
 		others := []*sulis.Session{newSession(userID), newSession(userID)}
-		otherUser := newSession(uniqueID("user"))
+		otherUser := newSession(uuid.NewV7())
 		for _, sess := range append(append([]*sulis.Session{keep}, others...), otherUser) {
 			if err := store.CreateSession(ctx, sess); err != nil {
 				t.Fatalf("CreateSession: %v", err)
@@ -464,7 +465,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteUserSessionsExceptUnknownKeepIDStillRemovesTheRest", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		sessions := []*sulis.Session{newSession(userID), newSession(userID)}
 		for _, sess := range sessions {
 			if err := store.CreateSession(ctx, sess); err != nil {
@@ -476,7 +477,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 		// still counts as an "other" and is removed. Matches
 		// DeleteUserSessions's "matching nothing is not an error" behavior
 		// for the degenerate all-sessions case.
-		if err := store.DeleteUserSessionsExcept(ctx, userID, uniqueID("session")); err != nil {
+		if err := store.DeleteUserSessionsExcept(ctx, userID, uuid.NewV7()); err != nil {
 			t.Fatalf("DeleteUserSessionsExcept: %v", err)
 		}
 		for _, sess := range sessions {
@@ -488,7 +489,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 	t.Run("DeleteUserSessionsExceptMatchingNothingIsNotAnError", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteUserSessionsExcept(ctx, uniqueID("user"), uniqueID("session")); err != nil {
+		if err := store.DeleteUserSessionsExcept(ctx, uuid.NewV7(), uuid.NewV7()); err != nil {
 			t.Fatalf("DeleteUserSessionsExcept with nothing to delete: %v", err)
 		}
 	})
@@ -498,7 +499,7 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 
 		for i := range raceIterations() {
 			store := factory()
-			sess := newSession(uniqueID("user"))
+			sess := newSession(uuid.NewV7())
 			if err := store.CreateSession(ctx, sess); err != nil {
 				t.Fatalf("iteration %d: CreateSession: %v", i, err)
 			}
@@ -516,12 +517,12 @@ func RunSessionStore(t *testing.T, factory func() sulis.SessionStore) {
 }
 
 // newSession builds a live session for userID with a unique ID and token hash.
-func newSession(userID string) *sulis.Session {
+func newSession(userID uuid.UUID) *sulis.Session {
 	// SQL timestamps top out at microsecond precision, so supply a value
 	// every dialect can store and return unchanged.
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	return &sulis.Session{
-		ID:              uniqueID("session"),
+		ID:              uuid.NewV7(),
 		UserID:          userID,
 		TokenHash:       uniqueHash("session"),
 		ExpiresAt:       now.Add(time.Hour),

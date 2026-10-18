@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 )
@@ -60,7 +61,7 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 
 	t.Run("GetUserByIDUnknownReturnsErrUserNotFound", func(t *testing.T) {
 		store := factory()
-		if _, err := store.GetUserByID(ctx, uniqueID("absent")); !errors.Is(err, sulis.ErrUserNotFound) {
+		if _, err := store.GetUserByID(ctx, uuid.NewV7()); !errors.Is(err, sulis.ErrUserNotFound) {
 			t.Fatalf("GetUserByID error = %v, want ErrUserNotFound", err)
 		}
 	})
@@ -446,7 +447,7 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 			store := factory()
 			email := uniqueEmail("contested")
 
-			ids := make([]string, racers)
+			ids := make([]uuid.UUID, racers)
 			errs := race(racers, func(g int) error {
 				u := newUser()
 				u.Email = email
@@ -531,7 +532,7 @@ func RunUserStore(t *testing.T, factory func() sulis.UserStore) {
 func newUser() *sulis.User {
 	now := time.Now().UTC().Truncate(time.Second)
 	return &sulis.User{
-		ID:           uniqueID("user"),
+		ID:           uuid.NewV7(),
 		Email:        uniqueEmail("user"),
 		PasswordHash: "argon2id$placeholder$" + uniqueID("hash"),
 		CreatedAt:    now,

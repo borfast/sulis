@@ -2,14 +2,13 @@ package sulis
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/mail"
 	"strings"
 	"sync/atomic"
 	"time"
+	"uuid"
 )
 
 // Sulis is the main authentication service. It coordinates user registration,
@@ -92,7 +91,7 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 
 	now := time.Now()
 	user := &User{
-		ID:           generateID(),
+		ID:           uuid.NewV7(),
 		Email:        email,
 		PasswordHash: hash,
 		CreatedAt:    now,
@@ -170,7 +169,7 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 			// the no-secrets rule, not the submitted address either — a
 			// spray is still visible through RequestInfo and the
 			// EventRateLimitTripped events beside it.
-			s.emitLoginFailed(ctx, "", ri, ReasonUserNotFound)
+			s.emitLoginFailed(ctx, uuid.Nil(), ri, ReasonUserNotFound)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
@@ -245,13 +244,13 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 // kind, the method label, and the reason key from drifting apart between
 // them. reason may be "" for a verdict gateReason does not recognise; the
 // key is then omitted rather than filled with a guess.
-func (s *Sulis) emitLoginFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
+func (s *Sulis) emitLoginFailed(ctx context.Context, userID uuid.UUID, ri RequestInfo, reason string) {
 	s.emitLoginFailedVia(ctx, userID, ri, AuthMethodPassword, reason)
 }
 
 // emitLoginFailedVia is emitLoginFailed for a flow whose first factor is not
 // a password — a redeemed magic link reaching completeFirstFactor's gates.
-func (s *Sulis) emitLoginFailedVia(ctx context.Context, userID string, ri RequestInfo, method AuthMethod, reason string) {
+func (s *Sulis) emitLoginFailedVia(ctx context.Context, userID uuid.UUID, ri RequestInfo, method AuthMethod, reason string) {
 	e := Event{Kind: EventLoginFailed, UserID: userID, RequestInfo: ri}
 	// Two spelled-out calls rather than one built-up []string: a slice
 	// assembled here would be allocated whether or not a sink is listening,
@@ -332,7 +331,7 @@ func (s *Sulis) rehashPassword(ctx context.Context, user *User, password string,
 // emitRehashFailed reports an upgrade that was attempted and did not land.
 // See EventPasswordRehashFailed and rehashPassword's doc comment above for
 // why a swallowed failure still gets an event.
-func (s *Sulis) emitRehashFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
+func (s *Sulis) emitRehashFailed(ctx context.Context, userID uuid.UUID, ri RequestInfo, reason string) {
 	s.emit(ctx, Event{
 		Kind:        EventPasswordRehashFailed,
 		UserID:      userID,
@@ -352,7 +351,7 @@ var errRehashPasswordChanged = errors.New("sulis: password changed during rehash
 // applies only to the new password; the old one was already validated when
 // it was set, and re-judging it here would refuse the change to exactly the
 // user who most needs to make it.
-func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string, ri RequestInfo) error {
+func (s *Sulis) ChangePassword(ctx context.Context, userID uuid.UUID, oldPassword, newPassword string, ri RequestInfo) error {
 	if err := s.checkPasswordPolicy(ctx, newPassword); err != nil {
 		return err
 	}
@@ -397,7 +396,7 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID, oldPassword, newPass
 }
 
 // SetInitialPassword sets the first password for a passwordless user.
-func (s *Sulis) SetInitialPassword(ctx context.Context, userID, newPassword string) error {
+func (s *Sulis) SetInitialPassword(ctx context.Context, userID uuid.UUID, newPassword string) error {
 	if err := s.checkPasswordPolicy(ctx, newPassword); err != nil {
 		return err
 	}
@@ -468,7 +467,7 @@ const maxUserUpdateAttempts = 3
 // on every attempt, so any invariant it checks is re-established against
 // current state rather than the state the caller first read. A non-nil error
 // from mutate aborts immediately and is returned unchanged.
-func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate func(*User) error) (*User, error) {
+func (s *Sulis) updateUserWithRetry(ctx context.Context, userID uuid.UUID, mutate func(*User) error) (*User, error) {
 	var lastErr error
 	for range maxUserUpdateAttempts {
 		user, err := s.users.GetUserByID(ctx, userID)
@@ -514,7 +513,7 @@ func (s *Sulis) updateUserWithRetry(ctx context.Context, userID string, mutate f
 // to configure a long maxBackoff. DisabledAt/DisabledReason are deliberately
 // NOT cleared here: disabling is an operator action, reversed only by
 // EnableUser, not by proving control of the password.
-func (s *Sulis) setPassword(ctx context.Context, userID, newPassword string, guard func(*User) error) error {
+func (s *Sulis) setPassword(ctx context.Context, userID uuid.UUID, newPassword string, guard func(*User) error) error {
 	// Hashed once, outside the retry loop: a conflict should not make the
 	// caller pay for Argon2 again.
 	hash, err := hashPassword(newPassword, s.cfg.Argon2, s.cfg.Pepper)
@@ -784,7 +783,7 @@ func (s *Sulis) ValidateSession(ctx context.Context, token string) (*Session, *U
 // ErrSessionNotFound if sessionID does not exist or belongs to a different
 // user, so a caller can only ever revoke their own sessions — guessing or
 // leaking another user's session ID cannot be used to end their session.
-func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID string) error {
+func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID uuid.UUID) error {
 	if err := s.sessions.DeleteSession(ctx, userID, sessionID); err != nil {
 		return err
 	}
@@ -797,7 +796,7 @@ func (s *Sulis) RevokeSession(ctx context.Context, userID, sessionID string) err
 }
 
 // RevokeAllSessions deletes all sessions for a user.
-func (s *Sulis) RevokeAllSessions(ctx context.Context, userID string) error {
+func (s *Sulis) RevokeAllSessions(ctx context.Context, userID uuid.UUID) error {
 	return s.revokeUserSessions(ctx, userID)
 }
 
@@ -813,7 +812,7 @@ func (s *Sulis) RevokeAllSessions(ctx context.Context, userID string) error {
 // account was ended" one event with one meaning, rather than something a
 // sink has to infer by knowing which of this package's flows happen to
 // cascade into a revocation.
-func (s *Sulis) revokeUserSessions(ctx context.Context, userID string) error {
+func (s *Sulis) revokeUserSessions(ctx context.Context, userID uuid.UUID) error {
 	if err := s.sessions.DeleteUserSessions(ctx, userID); err != nil {
 		return err
 	}
@@ -844,14 +843,14 @@ func (s *Sulis) emitSessionEnded(ctx context.Context, kind EventKind, session *S
 // The token is not bound to a specific email address; use
 // createTokenForUserWithEmail for tokens (like email verification) that must
 // be invalidated if the user's address changes after issuance.
-func (s *Sulis) createTokenForUser(ctx context.Context, userID string, purpose TokenPurpose, ttl time.Duration) (string, error) {
+func (s *Sulis) createTokenForUser(ctx context.Context, userID uuid.UUID, purpose TokenPurpose, ttl time.Duration) (string, error) {
 	return s.createTokenForUserWithEmail(ctx, userID, "", purpose, ttl)
 }
 
 // createTokenForUserWithEmail generates a token for the given user and
 // purpose, recording email as the address the token proves control of. Pass
 // an empty email for tokens that aren't bound to a specific address.
-func (s *Sulis) createTokenForUserWithEmail(ctx context.Context, userID, email string, purpose TokenPurpose, ttl time.Duration) (string, error) {
+func (s *Sulis) createTokenForUserWithEmail(ctx context.Context, userID uuid.UUID, email string, purpose TokenPurpose, ttl time.Duration) (string, error) {
 	raw, hashed, err := generateRawToken(s.cfg.ResetTokenBytes)
 	if err != nil {
 		return "", fmt.Errorf("sulis: generating token: %w", err)
@@ -859,7 +858,7 @@ func (s *Sulis) createTokenForUserWithEmail(ctx context.Context, userID, email s
 
 	now := time.Now()
 	token := &Token{
-		ID:        generateID(),
+		ID:        uuid.NewV7(),
 		UserID:    userID,
 		Email:     email,
 		TokenHash: hashed,
@@ -922,13 +921,6 @@ func (s *Sulis) requireVerifiedEmail(user *User) error {
 		return ErrEmailNotVerified
 	}
 	return nil
-}
-
-// generateID creates a random hex-encoded ID.
-func generateID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 // normalizeEmail trims surrounding whitespace, validates the result as a

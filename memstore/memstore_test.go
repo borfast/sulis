@@ -12,6 +12,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis"
 	"github.com/borfast/sulis/memstore"
@@ -56,18 +57,19 @@ func TestRecoveryStoreConformance(t *testing.T) {
 func TestCreateUserRejectsADuplicateID(t *testing.T) {
 	ctx := context.Background()
 	store := memstore.NewUserStore()
-	first := &sulis.User{ID: "user-1", Email: "first@example.test"}
+	id := uuid.NewV7()
+	first := &sulis.User{ID: id, Email: "first@example.test"}
 	if err := store.CreateUser(ctx, first); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
 	// Two users cannot share a primary key, and silently overwriting one
 	// would lose an account.
-	second := &sulis.User{ID: "user-1", Email: "second@example.test"}
+	second := &sulis.User{ID: id, Email: "second@example.test"}
 	if err := store.CreateUser(ctx, second); !errors.Is(err, sulis.ErrUserAlreadyExists) {
 		t.Fatalf("CreateUser with a duplicate ID error = %v, want ErrUserAlreadyExists", err)
 	}
-	got, err := store.GetUserByID(ctx, "user-1")
+	got, err := store.GetUserByID(ctx, id)
 	if err != nil {
 		t.Fatalf("GetUserByID: %v", err)
 	}
@@ -91,7 +93,7 @@ func TestSessionStoreLenCountsStoredSessions(t *testing.T) {
 		t.Fatalf("Len = %d on a fresh store, want 0", n)
 	}
 
-	sess := &sulis.Session{ID: "session-1", UserID: "user-1", TokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)}
+	sess := &sulis.Session{ID: uuid.NewV7(), UserID: uuid.NewV7(), TokenHash: "hash-1", ExpiresAt: time.Now().Add(time.Hour)}
 	if err := store.CreateSession(ctx, sess); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

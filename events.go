@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"uuid"
 )
 
 // EventKind names one security-relevant decision. The values are stable,
@@ -308,17 +309,17 @@ type Event struct {
 	Kind EventKind
 
 	// UserID is the account the decision concerns, when one is known.
-	// Empty for decisions made before an account is identified (a login for
+	// uuid.Nil for decisions made before an account is identified (a login for
 	// an unknown address, a magic link for an address with no account yet,
 	// a rejected pending token) and for the HTTP middleware rejections,
 	// which happen before any session is validated.
-	UserID string
+	UserID uuid.UUID
 
 	// SessionID is the session the decision concerns, when one is
 	// relevant: the session issued, revoked, refreshed, expired, or
-	// re-authenticated. Empty otherwise. It is the session's row ID, never
+	// re-authenticated. uuid.Nil otherwise. It is the session's row ID, never
 	// its token or the hash of its token.
-	SessionID string
+	SessionID uuid.UUID
 
 	// RequestInfo is what the calling application reported about the
 	// request, passed straight through from the flow's own RequestInfo
@@ -523,11 +524,11 @@ type slogSink struct{ logger *slog.Logger }
 func (s slogSink) Emit(ctx context.Context, e Event) {
 	attrs := make([]slog.Attr, 0, 6+len(e.Metadata))
 	attrs = append(attrs, slog.String("kind", string(e.Kind)))
-	if e.UserID != "" {
-		attrs = append(attrs, slog.String("user_id", e.UserID))
+	if e.UserID != uuid.Nil() {
+		attrs = append(attrs, slog.String("user_id", e.UserID.String()))
 	}
-	if e.SessionID != "" {
-		attrs = append(attrs, slog.String("session_id", e.SessionID))
+	if e.SessionID != uuid.Nil() {
+		attrs = append(attrs, slog.String("session_id", e.SessionID.String()))
 	}
 	if e.RequestInfo.IP != "" {
 		attrs = append(attrs, slog.String("ip", e.RequestInfo.IP))

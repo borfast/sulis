@@ -3,11 +3,12 @@ package sulis
 import (
 	"context"
 	"time"
+	"uuid"
 )
 
 // User represents an authenticated user.
 type User struct {
-	ID           string
+	ID           uuid.UUID
 	Email        string
 	PasswordHash string // empty for passwordless-only users
 	CreatedAt    time.Time
@@ -98,7 +99,7 @@ type UserStore interface {
 	// CreateUser persists a new user. Returns ErrUserAlreadyExists if user.Email
 	// is already the live address of another user.
 	CreateUser(ctx context.Context, user *User) error
-	GetUserByID(ctx context.Context, id string) (*User, error)
+	GetUserByID(ctx context.Context, id uuid.UUID) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	// UpdateUser persists user, but ONLY if the stored row's version still
 	// equals user.Version. On success the stored version MUST be incremented;
@@ -118,5 +119,5 @@ type UserStore interface {
 	// guarantee behind that race, not the in-library pre-check described
 	// above.
 	UpdateUser(ctx context.Context, user *User) error
-	DeleteUser(ctx context.Context, id string) error
+	DeleteUser(ctx context.Context, id uuid.UUID) error
 }

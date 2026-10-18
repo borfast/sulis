@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"time"
+	"uuid"
 )
 
 // TokenPurpose identifies the intended use of a token.
@@ -21,8 +22,8 @@ const (
 
 // Token represents a single-use, time-limited token for password resets or magic links.
 type Token struct {
-	ID        string
-	UserID    string
+	ID        uuid.UUID
+	UserID    uuid.UUID
 	TokenHash string // SHA-256 hash of the raw token; raw token is never stored
 	Purpose   TokenPurpose
 	ExpiresAt time.Time
@@ -30,7 +31,7 @@ type Token struct {
 	Used      bool
 	// Email records the address a token proves control of. It is set for
 	// magic-link tokens issued before the user account exists (UserID is
-	// empty in that case until the token is redeemed) and for
+	// uuid.Nil in that case until the token is redeemed) and for
 	// email-verification tokens (bound to the user's email at issuance, so a
 	// later address change invalidates an outstanding token). It is empty
 	// for password-reset and two-factor tokens.
@@ -57,7 +58,7 @@ type TokenStore interface {
 	DeleteExpiredTokens(ctx context.Context) error
 	// DeleteUserTokens deletes all tokens for the given user and purpose.
 	// Deleting zero tokens is not an error.
-	DeleteUserTokens(ctx context.Context, userID string, purpose TokenPurpose) error
+	DeleteUserTokens(ctx context.Context, userID uuid.UUID, purpose TokenPurpose) error
 }
 
 // generateRawToken creates a cryptographically random token and returns both

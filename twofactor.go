@@ -3,6 +3,7 @@ package sulis
 import (
 	"context"
 	"time"
+	"uuid"
 )
 
 // CreateTwoFactorToken generates a short-lived, single-use pending-login
@@ -15,7 +16,7 @@ import (
 // flag) -> CreateTwoFactorToken -> (app verifies the second factor: TOTP,
 // recovery code, or passkey) -> CompleteTwoFactor. No session exists until
 // CompleteTwoFactor succeeds.
-func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string, error) {
+func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID uuid.UUID) (string, error) {
 	user, err := s.users.GetUserByID(ctx, userID)
 	if err != nil {
 		return "", err
@@ -51,12 +52,12 @@ func (s *Sulis) CreateTwoFactorToken(ctx context.Context, userID string) (string
 // request. The token is consumed first and then checked against userID,
 // rejecting with ErrTokenInvalid on a mismatch; either way the token is
 // burned, so a mismatched userID cannot be retried against the same token.
-func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, ri RequestInfo) (*LoginResult, error) {
+func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID uuid.UUID, rawToken string, ri RequestInfo) (*LoginResult, error) {
 	token, err := s.consumeToken(ctx, rawToken, TokenPurposeTwoFactor)
 	if err != nil {
 		// No UserID: the token did not resolve to one, and userID is the
 		// caller's claim rather than anything sulis has verified.
-		s.emitSecondFactorFailed(ctx, "", ri, tokenReason(err))
+		s.emitSecondFactorFailed(ctx, uuid.Nil(), ri, tokenReason(err))
 		return nil, err
 	}
 	if token.UserID != userID {
@@ -110,7 +111,7 @@ func (s *Sulis) CompleteTwoFactor(ctx context.Context, userID, rawToken string, 
 // emitSecondFactorFailed reports a refused CompleteTwoFactor. One helper for
 // the four branches that can refuse, so the kind and the reason key stay in
 // step across them.
-func (s *Sulis) emitSecondFactorFailed(ctx context.Context, userID string, ri RequestInfo, reason string) {
+func (s *Sulis) emitSecondFactorFailed(ctx context.Context, userID uuid.UUID, ri RequestInfo, reason string) {
 	e := Event{Kind: EventSecondFactorFailed, UserID: userID, RequestInfo: ri}
 	if reason == "" {
 		s.emit(ctx, e)
