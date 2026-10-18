@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"uuid"
 
 	"github.com/borfast/sulis/totp"
 )
@@ -46,7 +47,7 @@ var ErrTOTPCounterRegressed = errors.New("sulis/postgres: TOTP counter would reg
 // GetActiveTOTP returns userID's active (verified) credential — the one Validate
 // checks codes against — or totp.ErrTOTPNotEnrolled, whether or not a pending
 // enrollment exists.
-func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	const q = `SELECT id, user_id, secret, last_used_counter, created_at
 		FROM totp_active WHERE user_id = $1`
 
@@ -55,8 +56,8 @@ func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Cre
 		counter   int64
 		createdAt string
 	)
-	err := s.db.QueryRowContext(ctx, q, userID).
-		Scan(&cred.ID, &cred.UserID, &cred.Secret, &counter, &createdAt)
+	err := s.db.QueryRowContext(ctx, q, idArg(userID)).
+		Scan(scanID(&cred.ID), scanID(&cred.UserID), &cred.Secret, &counter, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -73,15 +74,15 @@ func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Cre
 
 // GetPendingTOTP returns userID's pending (unverified) enrollment awaiting
 // ConfirmEnrollment, or totp.ErrTOTPNotEnrolled.
-func (s *TOTPStore) GetPendingTOTP(ctx context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetPendingTOTP(ctx context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	const q = `SELECT id, user_id, secret, created_at FROM totp_pending WHERE user_id = $1`
 
 	var (
 		cred      totp.Credential
 		createdAt string
 	)
-	err := s.db.QueryRowContext(ctx, q, userID).
-		Scan(&cred.ID, &cred.UserID, &cred.Secret, &createdAt)
+	err := s.db.QueryRowContext(ctx, q, idArg(userID)).
+		Scan(scanID(&cred.ID), scanID(&cred.UserID), &cred.Secret, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -126,7 +127,7 @@ func (s *TOTPStore) EnrollPending(ctx context.Context, cred *totp.Credential) er
 			id = excluded.id, secret = excluded.secret, created_at = excluded.created_at`
 
 	n, err := s.lockedExec(ctx, cred.UserID, "enrolling a pending TOTP credential", q,
-		cred.UserID, cred.ID, cred.Secret, formatTime(cred.CreatedAt))
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, formatTime(cred.CreatedAt))
 	if err != nil {
 		return err
 	}
@@ -151,7 +152,7 @@ func (s *TOTPStore) ReplacePending(ctx context.Context, cred *totp.Credential) e
 			id = excluded.id, secret = excluded.secret, created_at = excluded.created_at`
 
 	_, err := s.lockedExec(ctx, cred.UserID, "replacing a pending TOTP enrollment", q,
-		cred.UserID, cred.ID, cred.Secret, formatTime(cred.CreatedAt))
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, formatTime(cred.CreatedAt))
 	return err
 }
 
@@ -173,14 +174,14 @@ func (s *TOTPStore) ReplacePending(ctx context.Context, cred *totp.Credential) e
 // already exists (this is a replacement, not a first enrollment) the promoted
 // credential keeps whichever counter is higher, so swapping factors can never
 // roll the user's replay-protection clock backwards.
-func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID string, counter uint64) (*totp.Credential, error) {
+func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID uuid.UUID, counter uint64) (*totp.Credential, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("sulis/postgres: confirming a TOTP enrollment: %w", err)
 	}
 	defer rollback(tx)
 
-	if err := lockUser(ctx, tx, advisoryClassTOTP, userID); err != nil {
+	if err := lockUser(ctx, tx, advisoryClassTOTP, userID.String()); err != nil {
 		return nil, err
 	}
 
@@ -191,8 +192,8 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 		promoted  totp.Credential
 		createdAt string
 	)
-	err = tx.QueryRowContext(ctx, consume, userID, pendingID).
-		Scan(&promoted.ID, &promoted.Secret, &createdAt)
+	err = tx.QueryRowContext(ctx, consume, idArg(userID), idArg(pendingID)).
+		Scan(scanID(&promoted.ID), &promoted.Secret, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -205,7 +206,7 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 
 	var prior int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT last_used_counter FROM totp_active WHERE user_id = $1`, userID).Scan(&prior)
+		`SELECT last_used_counter FROM totp_active WHERE user_id = $1`, idArg(userID)).Scan(&prior)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("sulis/postgres: reading the prior TOTP counter: %w", err)
 	}
@@ -222,7 +223,7 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 	// #nosec G115 -- a TOTP time-step counter is unix-seconds/period; it does
 	// not reach 2^63 in any timeline this code outlives.
 	if _, err := tx.ExecContext(ctx, promote,
-		userID, promoted.ID, promoted.Secret, int64(counter), formatTime(promoted.CreatedAt),
+		idArg(userID), idArg(promoted.ID), promoted.Secret, int64(counter), formatTime(promoted.CreatedAt),
 	); err != nil {
 		return nil, fmt.Errorf("sulis/postgres: promoting a TOTP enrollment: %w", err)
 	}
@@ -268,7 +269,7 @@ func (s *TOTPStore) SaveTOTP(ctx context.Context, cred *totp.Credential) error {
 
 	// #nosec G115 -- see ConfirmEnrollment: the counter is a time step.
 	n, err := s.lockedExec(ctx, cred.UserID, "saving a TOTP credential", q,
-		cred.UserID, cred.ID, cred.Secret, int64(cred.LastUsedCounter), formatTime(cred.CreatedAt))
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, int64(cred.LastUsedCounter), formatTime(cred.CreatedAt))
 	if err != nil {
 		return err
 	}
@@ -285,21 +286,21 @@ func (s *TOTPStore) SaveTOTP(ctx context.Context, cred *totp.Credential) error {
 // believed it had removed entirely — and on PostgreSQL the transaction alone
 // does not close that gap, because the promotion writes a row this transaction's
 // DELETE never saw and so never locked. Removing nothing is not an error.
-func (s *TOTPStore) DeleteTOTP(ctx context.Context, userID string) error {
+func (s *TOTPStore) DeleteTOTP(ctx context.Context, userID uuid.UUID) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sulis/postgres: deleting TOTP credentials: %w", err)
 	}
 	defer rollback(tx)
 
-	if err := lockUser(ctx, tx, advisoryClassTOTP, userID); err != nil {
+	if err := lockUser(ctx, tx, advisoryClassTOTP, userID.String()); err != nil {
 		return err
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_active WHERE user_id = $1`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_active WHERE user_id = $1`, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/postgres: deleting an active TOTP credential: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_pending WHERE user_id = $1`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_pending WHERE user_id = $1`, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/postgres: deleting a pending TOTP enrollment: %w", err)
 	}
 
@@ -313,14 +314,14 @@ func (s *TOTPStore) DeleteTOTP(ctx context.Context, userID string) error {
 // TOTP lock, and reports how many rows it affected. The three single-statement
 // mutations above all need the lock and nothing else, and this keeps the shape
 // in one place rather than repeated three times.
-func (s *TOTPStore) lockedExec(ctx context.Context, userID, op, query string, args ...any) (int64, error) {
+func (s *TOTPStore) lockedExec(ctx context.Context, userID uuid.UUID, op, query string, args ...any) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("sulis/postgres: %s: %w", op, err)
 	}
 	defer rollback(tx)
 
-	if err := lockUser(ctx, tx, advisoryClassTOTP, userID); err != nil {
+	if err := lockUser(ctx, tx, advisoryClassTOTP, userID.String()); err != nil {
 		return 0, err
 	}
 

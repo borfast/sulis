@@ -27,7 +27,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -344,15 +343,15 @@ func TestDeleteTOTPAndConfirmEnrollmentNeverDeadlock(t *testing.T) {
 	store := db.TOTPStore()
 
 	for i := range 50 {
-		userID := fmt.Sprintf("user-%d", i)
-		active := &totp.Credential{ID: fmt.Sprintf("active-%d", i), UserID: userID, Secret: "s", CreatedAt: time.Now().UTC()}
+		userID := uuid.NewV7()
+		active := &totp.Credential{ID: uuid.NewV7(), UserID: userID, Secret: "s", CreatedAt: time.Now().UTC()}
 		if err := store.EnrollPending(ctx, active); err != nil {
 			t.Fatalf("iteration %d: EnrollPending: %v", i, err)
 		}
 		if _, err := store.ConfirmEnrollment(ctx, userID, active.ID, 1); err != nil {
 			t.Fatalf("iteration %d: ConfirmEnrollment (setup): %v", i, err)
 		}
-		replacement := &totp.Credential{ID: fmt.Sprintf("pending-%d", i), UserID: userID, Secret: "s", CreatedAt: time.Now().UTC()}
+		replacement := &totp.Credential{ID: uuid.NewV7(), UserID: userID, Secret: "s", CreatedAt: time.Now().UTC()}
 		if err := store.ReplacePending(ctx, replacement); err != nil {
 			t.Fatalf("iteration %d: ReplacePending: %v", i, err)
 		}
@@ -652,20 +651,22 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 		"SaveChallenge":           func() error { return db.ChallengeStore().SaveChallenge(ctx, "k", []byte("d")) },
 		"ConsumeChallenge":        func() error { _, err := db.ChallengeStore().ConsumeChallenge(ctx, "k"); return err },
 		"DeleteExpiredChallenges": func() error { return db.ChallengeStore().DeleteExpiredChallenges(ctx) },
-		"GetActiveTOTP":           func() error { _, err := db.TOTPStore().GetActiveTOTP(ctx, "u"); return err },
-		"GetPendingTOTP":          func() error { _, err := db.TOTPStore().GetPendingTOTP(ctx, "u"); return err },
+		"GetActiveTOTP":           func() error { _, err := db.TOTPStore().GetActiveTOTP(ctx, uuid.NewV7()); return err },
+		"GetPendingTOTP":          func() error { _, err := db.TOTPStore().GetPendingTOTP(ctx, uuid.NewV7()); return err },
 		"EnrollPending": func() error {
-			return db.TOTPStore().EnrollPending(ctx, &totp.Credential{ID: "p", UserID: "u"})
+			return db.TOTPStore().EnrollPending(ctx, &totp.Credential{ID: uuid.NewV7(), UserID: uuid.NewV7()})
 		},
 		"ReplacePending": func() error {
-			return db.TOTPStore().ReplacePending(ctx, &totp.Credential{ID: "p", UserID: "u"})
+			return db.TOTPStore().ReplacePending(ctx, &totp.Credential{ID: uuid.NewV7(), UserID: uuid.NewV7()})
 		},
 		"ConfirmEnrollment": func() error {
-			_, err := db.TOTPStore().ConfirmEnrollment(ctx, "u", "p", 1)
+			_, err := db.TOTPStore().ConfirmEnrollment(ctx, uuid.NewV7(), uuid.NewV7(), 1)
 			return err
 		},
-		"SaveTOTP":     func() error { return db.TOTPStore().SaveTOTP(ctx, &totp.Credential{ID: "a", UserID: "u"}) },
-		"DeleteTOTP":   func() error { return db.TOTPStore().DeleteTOTP(ctx, "u") },
+		"SaveTOTP": func() error {
+			return db.TOTPStore().SaveTOTP(ctx, &totp.Credential{ID: uuid.NewV7(), UserID: uuid.NewV7()})
+		},
+		"DeleteTOTP":   func() error { return db.TOTPStore().DeleteTOTP(ctx, uuid.NewV7()) },
 		"ReplaceCodes": func() error { return db.RecoveryStore().ReplaceCodes(ctx, "u", []string{"h"}) },
 		"ConsumeCode":  func() error { _, err := db.RecoveryStore().ConsumeCode(ctx, "u", "h"); return err },
 		"CountCodes":   func() error { _, err := db.RecoveryStore().CountCodes(ctx, "u"); return err },

@@ -41,7 +41,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	_, totpErr := a.db.TOTPStore().GetActiveTOTP(ctx, user.ID.String()) // transitional: Task 4
+	_, totpErr := a.db.TOTPStore().GetActiveTOTP(ctx, user.ID)
 	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
 		a.log.Error("checking totp status", "user_id", user.ID, "error", totpErr)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
@@ -123,7 +123,7 @@ func (a *app) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	// this token pairs with is still on the browser and still valid.
 	csrfToken := r.FormValue(sulis.CSRFFormField)
 
-	secret, uri, err := a.totp.Enroll(r.Context(), user.ID.String(), user.Email) // transitional: Task 4
+	secret, uri, err := a.totp.Enroll(r.Context(), user.ID, user.Email)
 	if err != nil {
 		a.log.Error("enrolling totp", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusUnprocessableEntity, "error",
@@ -153,7 +153,7 @@ func (a *app) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	csrfToken := r.FormValue(sulis.CSRFFormField)
 
-	if err := a.totp.ConfirmEnrollment(r.Context(), user.ID.String(), code); err != nil { // transitional: Task 4
+	if err := a.totp.ConfirmEnrollment(r.Context(), user.ID, code); err != nil {
 		// ConfirmEnrollment's own doc comment warns against treating
 		// ErrTOTPNotEnrolled here as "you are not enrolled", but every
 		// distinct cause (wrong code, rate limited, racing enrollment,
@@ -192,7 +192,7 @@ func (a *app) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.totp.Unenroll(r.Context(), user.ID.String()); err != nil { // transitional: Task 4
+	if err := a.totp.Unenroll(r.Context(), user.ID); err != nil {
 		a.log.Error("unenrolling totp", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not disable the authenticator app.")
 		return
@@ -318,7 +318,7 @@ func (a *app) handleSecondFactor(w http.ResponseWriter, r *http.Request) {
 	if useRecovery {
 		_, verifyErr = a.recovery.Consume(r.Context(), userID.String(), code) // transitional: Task 5
 	} else {
-		verifyErr = a.totp.Validate(r.Context(), userID.String(), code) // transitional: Task 4
+		verifyErr = a.totp.Validate(r.Context(), userID, code)
 	}
 	if verifyErr != nil {
 		// Every rejection reason (wrong code, replayed code, rate limited,

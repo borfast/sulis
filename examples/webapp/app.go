@@ -82,7 +82,7 @@ type secondFactors struct {
 // or at least one passkey. A not-found result from either store means "no
 // factor", not an error; any other error propagates.
 func (f secondFactors) HasSecondFactor(ctx context.Context, userID uuid.UUID) (bool, error) {
-	_, err := f.totp.GetActiveTOTP(ctx, userID.String()) // transitional: Task 4
+	_, err := f.totp.GetActiveTOTP(ctx, userID)
 	switch {
 	case err == nil:
 		return true, nil

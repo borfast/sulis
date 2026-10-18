@@ -203,12 +203,12 @@ func TestServiceWithEncryptorStoresCiphertextNotPlaintext(t *testing.T) {
 	svc := mustService(t, store, "Example", WithEncryptor(enc))
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
 
-	pending, err := store.GetPendingTOTP(ctx, "user-1")
+	pending, err := store.GetPendingTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetPendingTOTP: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestReplaceEnrollmentStoresCiphertextNotPlaintext(t *testing.T) {
 
 	// Establish a verified, active credential first, so ReplaceEnrollment
 	// is genuinely replacing something rather than enrolling from scratch.
-	firstSecret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	firstSecret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -248,16 +248,16 @@ func TestReplaceEnrollmentStoresCiphertextNotPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user-1", firstCode); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, firstCode); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
-	secret, _, err := svc.ReplaceEnrollment(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.ReplaceEnrollment(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("ReplaceEnrollment: %v", err)
 	}
 
-	pending, err := store.GetPendingTOTP(ctx, "user-1")
+	pending, err := store.GetPendingTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetPendingTOTP: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestServiceWithEncryptorRoundTripsThroughEnrollConfirmValidate(t *testing.T
 	svc := mustService(t, store, "Example", WithEncryptor(enc))
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestServiceWithEncryptorRoundTripsThroughEnrollConfirmValidate(t *testing.T
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user-1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -299,13 +299,13 @@ func TestServiceWithEncryptorRoundTripsThroughEnrollConfirmValidate(t *testing.T
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user-1", nextCode); err != nil {
+	if err := svc.Validate(ctx, testUserID, nextCode); err != nil {
 		t.Fatalf("Validate after encrypted round trip: %v", err)
 	}
 
 	// The active credential's counter bump (Validate's SaveTOTP) must still
 	// carry ciphertext, not the plaintext secret decrypted along the way.
-	active, err := store.GetActiveTOTP(ctx, "user-1")
+	active, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -321,12 +321,12 @@ func TestServiceWithoutEncryptorStoresPlaintext(t *testing.T) {
 	svc := mustService(t, store, "Example")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
 
-	pending, err := store.GetPendingTOTP(ctx, "user-1")
+	pending, err := store.GetPendingTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetPendingTOTP: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestServiceEnrollFailsClosedWhenEncryptFails(t *testing.T) {
 	store := newMemTOTPStore()
 	svc := mustService(t, store, "Example", WithEncryptor(&failingEncryptor{encryptErr: errTestEncryptFailure}))
 
-	if _, _, err := svc.Enroll(context.Background(), "user-1", "user1@example.com"); err == nil {
+	if _, _, err := svc.Enroll(context.Background(), testUserID, "user1@example.com"); err == nil {
 		t.Fatal("Enroll succeeded despite the configured Encryptor failing to encrypt")
 	}
 }
@@ -390,7 +390,7 @@ func TestServiceConfirmEnrollmentFailsClosedWhenDecryptFails(t *testing.T) {
 	svc := mustService(t, store, "Example", WithEncryptor(&failingEncryptor{}))
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestServiceConfirmEnrollmentFailsClosedWhenDecryptFails(t *testing.T) {
 	}
 
 	broken := mustService(t, store, "Example", WithEncryptor(&failingEncryptor{decryptErr: errTestDecryptFailure}))
-	err = broken.ConfirmEnrollment(ctx, "user-1", code)
+	err = broken.ConfirmEnrollment(ctx, testUserID, code)
 	if err == nil {
 		t.Fatal("ConfirmEnrollment succeeded despite the configured Encryptor failing to decrypt")
 	}
@@ -414,7 +414,7 @@ func TestServiceValidateFailsClosedWhenDecryptFails(t *testing.T) {
 	svc := mustService(t, store, "Example", WithEncryptor(&failingEncryptor{}))
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestServiceValidateFailsClosedWhenDecryptFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user-1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestServiceValidateFailsClosedWhenDecryptFails(t *testing.T) {
 	}
 
 	broken := mustService(t, store, "Example", WithEncryptor(&failingEncryptor{decryptErr: errTestDecryptFailure}))
-	err = broken.Validate(ctx, "user-1", nextCode)
+	err = broken.Validate(ctx, testUserID, nextCode)
 	if err == nil {
 		t.Fatal("Validate succeeded despite the configured Encryptor failing to decrypt")
 	}
@@ -470,7 +470,7 @@ func TestConfirmEnrollmentFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
 
 	// Seed a pending enrollment the old way: no Encryptor configured.
 	plainSvc := mustService(t, store, "Example")
-	secret, _, err := plainSvc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := plainSvc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestConfirmEnrollmentFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
 	}
 	encryptedSvc := mustService(t, store, "Example", WithEncryptor(enc))
 
-	err = encryptedSvc.ConfirmEnrollment(ctx, "user-1", code)
+	err = encryptedSvc.ConfirmEnrollment(ctx, testUserID, code)
 	if err == nil {
 		t.Fatal("ConfirmEnrollment succeeded against a pre-encryption plaintext row; it must fail closed instead")
 	}
@@ -503,7 +503,7 @@ func TestValidateFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
 
 	// Seed a fully active credential the old way: no Encryptor configured.
 	plainSvc := mustService(t, store, "Example")
-	secret, _, err := plainSvc.Enroll(ctx, "user-1", "user1@example.com")
+	secret, _, err := plainSvc.Enroll(ctx, testUserID, "user1@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestValidateFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := plainSvc.ConfirmEnrollment(ctx, "user-1", code); err != nil {
+	if err := plainSvc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -529,7 +529,7 @@ func TestValidateFailsClosedOnPreEncryptorPlaintextRow(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	err = encryptedSvc.Validate(ctx, "user-1", anyCode)
+	err = encryptedSvc.Validate(ctx, testUserID, anyCode)
 	if err == nil {
 		t.Fatal("Validate succeeded against a pre-encryption plaintext row; it must fail closed instead")
 	}

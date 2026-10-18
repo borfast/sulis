@@ -174,8 +174,8 @@ CREATE INDEX IF NOT EXISTS passkey_challenges_expires_at_idx ON passkey_challeng
 -- constraint rather than a convention, and ConfirmEnrollment's promotion is
 -- one DELETE ... RETURNING feeding one upsert.
 CREATE TABLE IF NOT EXISTS totp_active (
-    user_id           text   PRIMARY KEY,
-    id                text   NOT NULL,
+    user_id           uuid   PRIMARY KEY,
+    id                uuid   NOT NULL,
     -- Opaque to this package: ciphertext when totp is configured with an
     -- Encryptor, the base32 secret otherwise. A store cannot tell.
     secret            text   NOT NULL,
@@ -184,8 +184,8 @@ CREATE TABLE IF NOT EXISTS totp_active (
 );
 
 CREATE TABLE IF NOT EXISTS totp_pending (
-    user_id    text PRIMARY KEY,
-    id         text NOT NULL,
+    user_id    uuid PRIMARY KEY,
+    id         uuid NOT NULL,
     secret     text NOT NULL,
     created_at text NOT NULL
 );

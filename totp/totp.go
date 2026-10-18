@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"uuid"
 )
 
 var (
@@ -148,7 +149,7 @@ func WithSecretSize(n int) Option {
 }
 
 // WithLimiter sets the rate limiter consulted before Validate or
-// ConfirmEnrollment checks a code, keyed by "totp:"+userID — the 10^6 code
+// ConfirmEnrollment checks a code, keyed by "totp:"+userID.String(), because the 10^6 code
 // space (or smaller, for 6-digit codes) is guessable without one.
 //
 // Either this or WithoutRateLimiting must be passed; NewService rejects a
@@ -256,7 +257,7 @@ func NewService(store Store, issuer string, opts ...Option) (*Service, error) {
 // should gate this endpoint behind recent re-authentication —
 // sulis.Sulis.RequireRecentAuth against the caller's session, refreshed via
 // sulis.Sulis.ReAuthenticate — rather than a bare session.
-func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
+func (s *Service) Enroll(ctx context.Context, userID uuid.UUID, accountName string) (secret, uri string, err error) {
 	return s.enroll(ctx, userID, accountName, false)
 }
 
@@ -272,14 +273,14 @@ func (s *Service) Enroll(ctx context.Context, userID, accountName string) (secre
 // should gate this endpoint behind recent re-authentication —
 // sulis.Sulis.RequireRecentAuth against the caller's session, refreshed via
 // sulis.Sulis.ReAuthenticate — rather than a bare session.
-func (s *Service) ReplaceEnrollment(ctx context.Context, userID, accountName string) (secret, uri string, err error) {
+func (s *Service) ReplaceEnrollment(ctx context.Context, userID uuid.UUID, accountName string) (secret, uri string, err error) {
 	return s.enroll(ctx, userID, accountName, true)
 }
 
 // enroll implements both Enroll (forceReplace=false) and ReplaceEnrollment
 // (forceReplace=true): the two differ only in which Store method they use
 // to guard (or not) against an existing active credential.
-func (s *Service) enroll(ctx context.Context, userID, accountName string, forceReplace bool) (secret, uri string, err error) {
+func (s *Service) enroll(ctx context.Context, userID uuid.UUID, accountName string, forceReplace bool) (secret, uri string, err error) {
 	secretBytes := make([]byte, s.cfg.SecretSize)
 	if _, err := rand.Read(secretBytes); err != nil {
 		return "", "", fmt.Errorf("totp: generating secret: %w", err)
@@ -292,8 +293,9 @@ func (s *Service) enroll(ctx context.Context, userID, accountName string, forceR
 		return "", "", err
 	}
 
+	credID := uuid.NewV7()
 	cred := &Credential{
-		ID:        generateID(),
+		ID:        credID,
 		UserID:    userID,
 		Secret:    storedSecret,
 		Verified:  false,
@@ -341,8 +343,8 @@ func (s *Service) enroll(ctx context.Context, userID, accountName string, forceR
 // check the user's current enrollment status (e.g. via GetActiveTOTP)
 // before deciding how to react to a confirm retry, rather than trusting
 // the error alone.
-func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) error {
-	if err := s.allow(ctx, "totp:"+userID); err != nil {
+func (s *Service) ConfirmEnrollment(ctx context.Context, userID uuid.UUID, code string) error {
+	if err := s.allow(ctx, "totp:"+userID.String()); err != nil {
 		return err
 	}
 
@@ -384,8 +386,8 @@ func (s *Service) ConfirmEnrollment(ctx context.Context, userID, code string) er
 // credential. Reusing a previously accepted code (or an older one, once a
 // newer counter has been accepted) returns ErrTOTPReplayed, distinguishable
 // from a wrong code (ErrTOTPInvalid) via errors.Is.
-func (s *Service) Validate(ctx context.Context, userID, code string) error {
-	if err := s.allow(ctx, "totp:"+userID); err != nil {
+func (s *Service) Validate(ctx context.Context, userID uuid.UUID, code string) error {
+	if err := s.allow(ctx, "totp:"+userID.String()); err != nil {
 		return err
 	}
 
@@ -433,7 +435,7 @@ func (s *Service) Validate(ctx context.Context, userID, code string) error {
 }
 
 // Unenroll removes TOTP enrollment for a user.
-func (s *Service) Unenroll(ctx context.Context, userID string) error {
+func (s *Service) Unenroll(ctx context.Context, userID uuid.UUID) error {
 	return s.store.DeleteTOTP(ctx, userID)
 }
 
@@ -580,10 +582,4 @@ func buildOTPAuthURI(issuer, account, secret string, cfg Config) string {
 
 	label := url.PathEscape(issuer) + ":" + url.PathEscape(account)
 	return fmt.Sprintf("otpauth://totp/%s?%s", label, v.Encode())
-}
-
-func generateID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x", b)
 }

@@ -349,7 +349,7 @@ func (a *app) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	credentialID := r.FormValue("credential_id")
-	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID.String()) // transitional: Task 4
+	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID)
 	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
 		a.log.Error("checking TOTP before passkey deletion", "user_id", user.ID, "error", totpErr)
 		a.render(w, http.StatusInternalServerError, "error", "Could not remove that passkey.")

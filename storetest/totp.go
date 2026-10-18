@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/totp"
 )
@@ -43,7 +44,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("EnrollPendingFillsOnlyThePendingSlot", func(t *testing.T) {
 		store := factory()
-		cred := newTOTPCredential(uniqueID("user"))
+		cred := newTOTPCredential(uuid.NewV7())
 		if err := store.EnrollPending(ctx, cred); err != nil {
 			t.Fatalf("EnrollPending: %v", err)
 		}
@@ -65,21 +66,21 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("GetPendingTOTPWithNoneReturnsErrTOTPNotEnrolled", func(t *testing.T) {
 		store := factory()
-		if _, err := store.GetPendingTOTP(ctx, uniqueID("user")); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
+		if _, err := store.GetPendingTOTP(ctx, uuid.NewV7()); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
 			t.Fatalf("GetPendingTOTP error = %v, want ErrTOTPNotEnrolled", err)
 		}
 	})
 
 	t.Run("GetActiveTOTPWithNoneReturnsErrTOTPNotEnrolled", func(t *testing.T) {
 		store := factory()
-		if _, err := store.GetActiveTOTP(ctx, uniqueID("user")); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
+		if _, err := store.GetActiveTOTP(ctx, uuid.NewV7()); !errors.Is(err, totp.ErrTOTPNotEnrolled) {
 			t.Fatalf("GetActiveTOTP error = %v, want ErrTOTPNotEnrolled", err)
 		}
 	})
 
 	t.Run("EnrollPendingSupersedesAnEarlierPendingEnrollment", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		first := newTOTPCredential(userID)
 		if err := store.EnrollPending(ctx, first); err != nil {
 			t.Fatalf("EnrollPending: %v", err)
@@ -102,7 +103,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ConfirmEnrollmentPromotesThePendingEnrollment", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		cred := newTOTPCredential(userID)
 		if err := store.EnrollPending(ctx, cred); err != nil {
 			t.Fatalf("EnrollPending: %v", err)
@@ -143,7 +144,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ConfirmEnrollmentWithAStalePendingIDReturnsErrTOTPNotEnrolled", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		stale := newTOTPCredential(userID)
 		if err := store.EnrollPending(ctx, stale); err != nil {
 			t.Fatalf("EnrollPending: %v", err)
@@ -172,7 +173,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ConfirmEnrollmentRepeatedAfterSuccessReturnsErrTOTPNotEnrolled", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		cred := newTOTPCredential(userID)
 		if err := store.EnrollPending(ctx, cred); err != nil {
 			t.Fatalf("EnrollPending: %v", err)
@@ -197,7 +198,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("EnrollPendingRefusesWhenAnActiveCredentialExists", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		active := enrollAndConfirm(t, store, userID, 5)
 
 		if err := store.EnrollPending(ctx, newTOTPCredential(userID)); !errors.Is(err, totp.ErrTOTPAlreadyEnrolled) {
@@ -215,7 +216,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ReplacePendingLeavesTheActiveCredentialUntouched", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		active := enrollAndConfirm(t, store, userID, 5)
 
 		replacement := newTOTPCredential(userID)
@@ -243,7 +244,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ConfirmEnrollmentCarriesTheOldCounterForward", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		enrollAndConfirm(t, store, userID, 100)
 
 		// Replacing a factor must never roll the replay clock backwards, even
@@ -271,7 +272,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("ConfirmEnrollmentTakesTheHigherOfTheTwoCounters", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		enrollAndConfirm(t, store, userID, 10)
 
 		replacement := newTOTPCredential(userID)
@@ -289,7 +290,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("SaveTOTPPersistsAnAdvancedCounter", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		active := enrollAndConfirm(t, store, userID, 10)
 
 		active.LastUsedCounter = 11
@@ -307,7 +308,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("SaveTOTPRejectsALoweredCounter", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		active := enrollAndConfirm(t, store, userID, 10)
 
 		lowered := *active
@@ -326,7 +327,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("DeleteTOTPRemovesBothSlots", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		enrollAndConfirm(t, store, userID, 3)
 		if err := store.ReplacePending(ctx, newTOTPCredential(userID)); err != nil {
 			t.Fatalf("ReplacePending: %v", err)
@@ -345,7 +346,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 	t.Run("DeleteTOTPForAnUnenrolledUserIsNotAnError", func(t *testing.T) {
 		store := factory()
-		if err := store.DeleteTOTP(ctx, uniqueID("user")); err != nil {
+		if err := store.DeleteTOTP(ctx, uuid.NewV7()); err != nil {
 			t.Fatalf("DeleteTOTP with nothing to delete: %v", err)
 		}
 	})
@@ -355,7 +356,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			cred := newTOTPCredential(userID)
 			if err := store.EnrollPending(ctx, cred); err != nil {
 				t.Fatalf("iteration %d: EnrollPending: %v", i, err)
@@ -376,7 +377,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 	t.Run("ConfirmEnrollmentIsAtomicAgainstConcurrentEnrollPending", func(t *testing.T) {
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			first := newTOTPCredential(userID)
 			if err := store.EnrollPending(ctx, first); err != nil {
 				t.Fatalf("iteration %d: EnrollPending: %v", i, err)
@@ -439,7 +440,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 	t.Run("DeleteTOTPIsAtomicAgainstConcurrentConfirmEnrollment", func(t *testing.T) {
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			enrollAndConfirm(t, store, userID, 1)
 			replacement := newTOTPCredential(userID)
 			if err := store.ReplacePending(ctx, replacement); err != nil {
@@ -480,7 +481,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			active := enrollAndConfirm(t, store, userID, 0)
 
 			// Racers save an ascending counter each, in whatever order the
@@ -508,7 +509,7 @@ func RunTOTPStore(t *testing.T, factory func() totp.Store) {
 
 // enrollAndConfirm puts userID's active factor in place at the given counter
 // and returns it, for subtests whose subject is what happens afterwards.
-func enrollAndConfirm(t *testing.T, store totp.Store, userID string, counter uint64) *totp.Credential {
+func enrollAndConfirm(t *testing.T, store totp.Store, userID uuid.UUID, counter uint64) *totp.Credential {
 	t.Helper()
 
 	ctx := context.Background()
@@ -525,12 +526,12 @@ func enrollAndConfirm(t *testing.T, store totp.Store, userID string, counter uin
 
 // newTOTPCredential builds an unverified enrollment for userID. The secret is
 // a placeholder: a store never interprets it.
-func newTOTPCredential(userID string) *totp.Credential {
-	id := uniqueID("totp")
+func newTOTPCredential(userID uuid.UUID) *totp.Credential {
+	id := uuid.NewV7()
 	return &totp.Credential{
 		ID:        id,
 		UserID:    userID,
-		Secret:    "JBSWY3DPEHPK3PXP" + id,
+		Secret:    "JBSWY3DPEHPK3PXP" + id.String(),
 		CreatedAt: time.Now().UTC().Truncate(time.Second),
 	}
 }

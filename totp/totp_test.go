@@ -7,6 +7,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
+)
+
+// Fixed IDs shared by the tests in this package.
+var (
+	testUserID         = uuid.NewV7()
+	testCredID1        = uuid.NewV7()
+	testCredID2        = uuid.NewV7()
+	testPendingID1     = uuid.NewV7()
+	testPendingID2     = uuid.NewV7()
+	testRacedPendingID = uuid.NewV7()
 )
 
 // mustService creates a Service, failing the test if construction errors.
@@ -56,18 +67,18 @@ var errTOTPCounterRegressed = errors.New("totp: counter would regress for existi
 // store weaker than any real implementation is allowed to be.
 type memTOTPStore struct {
 	mu      sync.Mutex
-	active  map[string]*Credential
-	pending map[string]*Credential
+	active  map[uuid.UUID]*Credential
+	pending map[uuid.UUID]*Credential
 }
 
 func newMemTOTPStore() *memTOTPStore {
 	return &memTOTPStore{
-		active:  make(map[string]*Credential),
-		pending: make(map[string]*Credential),
+		active:  make(map[uuid.UUID]*Credential),
+		pending: make(map[uuid.UUID]*Credential),
 	}
 }
 
-func (s *memTOTPStore) GetActiveTOTP(_ context.Context, userID string) (*Credential, error) {
+func (s *memTOTPStore) GetActiveTOTP(_ context.Context, userID uuid.UUID) (*Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.active[userID]
@@ -78,7 +89,7 @@ func (s *memTOTPStore) GetActiveTOTP(_ context.Context, userID string) (*Credent
 	return &cp, nil
 }
 
-func (s *memTOTPStore) GetPendingTOTP(_ context.Context, userID string) (*Credential, error) {
+func (s *memTOTPStore) GetPendingTOTP(_ context.Context, userID uuid.UUID) (*Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.pending[userID]
@@ -119,7 +130,7 @@ func (s *memTOTPStore) ReplacePending(_ context.Context, cred *Credential) error
 // (removing the pending enrollment, installing it as active) both happen
 // while holding s.mu, so a concurrent EnrollPending/ReplacePending call
 // cannot land between them undetected.
-func (s *memTOTPStore) ConfirmEnrollment(_ context.Context, userID, pendingID string, counter uint64) (*Credential, error) {
+func (s *memTOTPStore) ConfirmEnrollment(_ context.Context, userID, pendingID uuid.UUID, counter uint64) (*Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.pending[userID]
@@ -159,7 +170,7 @@ func (s *memTOTPStore) SaveTOTP(_ context.Context, cred *Credential) error {
 	return nil
 }
 
-func (s *memTOTPStore) DeleteTOTP(_ context.Context, userID string) error {
+func (s *memTOTPStore) DeleteTOTP(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.active, userID)
@@ -262,7 +273,7 @@ func TestEnrollAndValidate(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, uri, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, uri, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -279,7 +290,7 @@ func TestEnrollAndValidate(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -288,12 +299,12 @@ func TestEnrollAndValidate(t *testing.T) {
 	// rejection.
 	period := time.Duration(svc.cfg.Period) * time.Second
 	code, _ = svc.Generate(secret, time.Now().Add(period))
-	if err := svc.Validate(ctx, "user1", code); err != nil {
+	if err := svc.Validate(ctx, testUserID, code); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 
 	// Wrong code should fail with ErrTOTPInvalid.
-	if err := svc.Validate(ctx, "user1", "000000"); !errors.Is(err, ErrTOTPInvalid) {
+	if err := svc.Validate(ctx, testUserID, "000000"); !errors.Is(err, ErrTOTPInvalid) {
 		t.Fatalf("expected ErrTOTPInvalid, got %v", err)
 	}
 }
@@ -303,10 +314,10 @@ func TestValidateBeforeConfirm(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, _ := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, _ := svc.Enroll(ctx, testUserID, "alice@example.com")
 	code, _ := svc.Generate(secret, time.Now())
 
-	err := svc.Validate(ctx, "user1", code)
+	err := svc.Validate(ctx, testUserID, code)
 	if err != ErrTOTPNotVerified {
 		t.Fatalf("expected ErrTOTPNotVerified, got %v", err)
 	}
@@ -317,10 +328,10 @@ func TestUnenroll(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	svc.Enroll(ctx, "user1", "alice@example.com")
-	svc.Unenroll(ctx, "user1")
+	svc.Enroll(ctx, testUserID, "alice@example.com")
+	svc.Unenroll(ctx, testUserID)
 
-	err := svc.Validate(ctx, "user1", "123456")
+	err := svc.Validate(ctx, testUserID, "123456")
 	if err != ErrTOTPNotEnrolled {
 		t.Fatalf("expected ErrTOTPNotEnrolled, got %v", err)
 	}
@@ -336,7 +347,7 @@ func TestValidateRejectsWrongCodeWithError(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -344,11 +355,11 @@ func TestValidateRejectsWrongCodeWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
-	err = svc.Validate(ctx, "user1", "000000")
+	err = svc.Validate(ctx, testUserID, "000000")
 	if err == nil {
 		t.Fatal("Validate returned a nil error for a wrong code")
 	}
@@ -362,7 +373,7 @@ func TestValidateRejectsReplayedCode(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -371,13 +382,13 @@ func TestValidateRejectsReplayedCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
 	// ConfirmEnrollment already consumed this counter, so the same code
 	// must not be replayable as a login code.
-	err = svc.Validate(ctx, "user1", code)
+	err = svc.Validate(ctx, testUserID, code)
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
 	}
@@ -388,7 +399,7 @@ func TestValidateAcceptsNextWindowCode(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -398,7 +409,7 @@ func TestValidateAcceptsNextWindowCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", codeT); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, codeT); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -408,7 +419,7 @@ func TestValidateAcceptsNextWindowCode(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+	if err := svc.Validate(ctx, testUserID, codeNext); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -418,7 +429,7 @@ func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -428,7 +439,7 @@ func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", codeT); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, codeT); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -437,13 +448,13 @@ func TestValidateRejectsOlderWindowAfterNewer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+	if err := svc.Validate(ctx, testUserID, codeNext); err != nil {
 		t.Fatalf("Validate(next) = %v, want nil", err)
 	}
 
 	// Once the newer window's code has been used, the older code's
 	// counter is superseded and must be rejected as a replay.
-	err = svc.Validate(ctx, "user1", codeT)
+	err = svc.Validate(ctx, testUserID, codeT)
 	if !errors.Is(err, ErrTOTPReplayed) {
 		t.Fatalf("expected ErrTOTPReplayed, got %v", err)
 	}
@@ -454,7 +465,7 @@ func TestValidatePersistsLastUsedCounter(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -464,7 +475,7 @@ func TestValidatePersistsLastUsedCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", codeT); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, codeT); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -474,12 +485,12 @@ func TestValidatePersistsLastUsedCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+	if err := svc.Validate(ctx, testUserID, codeNext); err != nil {
 		t.Fatalf("Validate(next) = %v, want nil", err)
 	}
 
 	wantCounter := uint64(next.Unix()) / svc.cfg.Period
-	cred, err := store.GetActiveTOTP(ctx, "user1")
+	cred, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -499,7 +510,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -509,7 +520,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", codeT); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, codeT); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -519,7 +530,7 @@ func TestValidateFailsClosedWhenPersistFails(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	err = svc.Validate(ctx, "user1", codeNext)
+	err = svc.Validate(ctx, testUserID, codeNext)
 	if err == nil {
 		t.Fatal("expected an error when persisting LastUsedCounter fails")
 	}
@@ -545,7 +556,7 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -553,7 +564,7 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -561,7 +572,7 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 	// beyond what any freshly-generated confirmation code could naturally
 	// match, so the assertion below depends on promotion's carry-forward
 	// logic, not coincidence.
-	activeBefore, err := store.GetActiveTOTP(ctx, "user1")
+	activeBefore, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -571,7 +582,7 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 		t.Fatalf("SaveTOTP (inflate counter): %v", err)
 	}
 
-	newSecret, _, err := svc.ReplaceEnrollment(ctx, "user1", "alice@example.com")
+	newSecret, _, err := svc.ReplaceEnrollment(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("ReplaceEnrollment: %v", err)
 	}
@@ -579,11 +590,11 @@ func TestConfirmEnrollmentCarriesCounterForwardAcrossReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", newCode); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, newCode); err != nil {
 		t.Fatalf("ConfirmEnrollment (replacement): %v", err)
 	}
 
-	promoted, err := store.GetActiveTOTP(ctx, "user1")
+	promoted, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP (after replacement): %v", err)
 	}
@@ -610,7 +621,7 @@ func TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -620,21 +631,21 @@ func TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled(t *testing.T) {
 	}
 
 	// First confirm: succeeds and promotes the pending enrollment.
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment (first): %v", err)
 	}
 
 	// Retry with the exact same code (the double-submit/dropped-response
 	// scenario): nothing is pending any more, so this must fail with
 	// ErrTOTPNotEnrolled, not silently succeed again.
-	err = svc.ConfirmEnrollment(ctx, "user1", code)
+	err = svc.ConfirmEnrollment(ctx, testUserID, code)
 	if !errors.Is(err, ErrTOTPNotEnrolled) {
 		t.Fatalf("ConfirmEnrollment (retry) error = %v, want ErrTOTPNotEnrolled", err)
 	}
 
 	// The retry must not have disturbed the factor the first call promoted:
 	// it stays active and untouched, and Validate keeps working for it.
-	active, err := store.GetActiveTOTP(ctx, "user1")
+	active, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -647,7 +658,7 @@ func TestConfirmEnrollmentRetryAfterSuccessReturnsNotEnrolled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", nextCode); err != nil {
+	if err := svc.Validate(ctx, testUserID, nextCode); err != nil {
 		t.Fatalf("Validate after retried confirm: %v", err)
 	}
 }
@@ -665,12 +676,12 @@ type confirmRaceStore struct {
 	raced bool
 }
 
-func (s *confirmRaceStore) GetPendingTOTP(ctx context.Context, userID string) (*Credential, error) {
+func (s *confirmRaceStore) GetPendingTOTP(ctx context.Context, userID uuid.UUID) (*Credential, error) {
 	cred, err := s.memTOTPStore.GetPendingTOTP(ctx, userID)
 	if err == nil && !s.raced {
 		s.raced = true
 		if raceErr := s.memTOTPStore.EnrollPending(ctx, &Credential{
-			ID:        "raced-pending",
+			ID:        testRacedPendingID,
 			UserID:    userID,
 			Secret:    "RACEDSECRET",
 			CreatedAt: time.Now(),
@@ -697,7 +708,7 @@ func TestConfirmEnrollmentReturnsNotEnrolledWhenPendingSupersededMidCall(t *test
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -706,21 +717,21 @@ func TestConfirmEnrollmentReturnsNotEnrolledWhenPendingSupersededMidCall(t *test
 		t.Fatalf("Generate: %v", err)
 	}
 
-	err = svc.ConfirmEnrollment(ctx, "user1", code)
+	err = svc.ConfirmEnrollment(ctx, testUserID, code)
 	if !errors.Is(err, ErrTOTPNotEnrolled) {
 		t.Fatalf("ConfirmEnrollment() error = %v, want ErrTOTPNotEnrolled", err)
 	}
 
 	// The stale read must not have promoted anything to active.
-	if _, err := store.GetActiveTOTP(ctx, "user1"); !errors.Is(err, ErrTOTPNotEnrolled) {
+	if _, err := store.GetActiveTOTP(ctx, testUserID); !errors.Is(err, ErrTOTPNotEnrolled) {
 		t.Fatalf("expected no active credential, got err = %v", err)
 	}
 	// The racing pending enrollment is the one left standing, untouched.
-	p, err := store.GetPendingTOTP(ctx, "user1")
+	p, err := store.GetPendingTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetPendingTOTP: %v", err)
 	}
-	if p.ID != "raced-pending" {
+	if p.ID != testRacedPendingID {
 		t.Fatalf("expected raced-pending to remain pending, got %+v", p)
 	}
 }
@@ -740,18 +751,18 @@ func TestMemTOTPStoreRejectsLoweredCounterForSameCredential(t *testing.T) {
 	store := newMemTOTPStore()
 	ctx := context.Background()
 
-	cred := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 10}
+	cred := &Credential{ID: testCredID1, UserID: testUserID, Secret: "SECRET", Verified: true, LastUsedCounter: 10}
 	if err := store.SaveTOTP(ctx, cred); err != nil {
 		t.Fatalf("SaveTOTP (initial): %v", err)
 	}
 
 	// Same credential ID, lower counter: must be rejected.
-	lowered := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 5}
+	lowered := &Credential{ID: testCredID1, UserID: testUserID, Secret: "SECRET", Verified: true, LastUsedCounter: 5}
 	if err := store.SaveTOTP(ctx, lowered); !errors.Is(err, errTOTPCounterRegressed) {
 		t.Fatalf("expected errTOTPCounterRegressed, got %v", err)
 	}
 	// The rejected save must not have overwritten the stored counter.
-	got, err := store.GetActiveTOTP(ctx, "user1")
+	got, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -761,14 +772,14 @@ func TestMemTOTPStoreRejectsLoweredCounterForSameCredential(t *testing.T) {
 
 	// Same credential ID, equal counter: must succeed (ConfirmEnrollment's
 	// no-op-counter re-save relies on this).
-	same := &Credential{ID: "cred-1", UserID: "user1", Secret: "SECRET", Verified: true, LastUsedCounter: 10}
+	same := &Credential{ID: testCredID1, UserID: testUserID, Secret: "SECRET", Verified: true, LastUsedCounter: 10}
 	if err := store.SaveTOTP(ctx, same); err != nil {
 		t.Fatalf("SaveTOTP (equal counter): %v", err)
 	}
 
 	// Different credential ID for the same user: always succeeds, even with
 	// a lower/zero counter.
-	reenrolled := &Credential{ID: "cred-2", UserID: "user1", Secret: "OTHERSECRET", Verified: false, LastUsedCounter: 0}
+	reenrolled := &Credential{ID: testCredID2, UserID: testUserID, Secret: "OTHERSECRET", Verified: false, LastUsedCounter: 0}
 	if err := store.SaveTOTP(ctx, reenrolled); err != nil {
 		t.Fatalf("SaveTOTP (different ID): %v", err)
 	}
@@ -903,12 +914,12 @@ func TestValidateConsultsLimiterBeforeCheckingCode(t *testing.T) {
 	svc := mustService(t, store, "TestApp", WithLimiter(limiter))
 	ctx := context.Background()
 
-	err := svc.Validate(ctx, "user1", "000000")
+	err := svc.Validate(ctx, testUserID, "000000")
 	if !errors.Is(err, ErrTOTPRateLimited) {
 		t.Fatalf("expected ErrTOTPRateLimited, got %v", err)
 	}
-	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:user1" {
-		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:user1", limiter.keys)
+	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:"+testUserID.String() {
+		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:"+testUserID.String(), limiter.keys)
 	}
 }
 
@@ -920,12 +931,12 @@ func TestConfirmEnrollmentConsultsLimiterBeforeCheckingCode(t *testing.T) {
 	svc := mustService(t, store, "TestApp", WithLimiter(limiter))
 	ctx := context.Background()
 
-	err := svc.ConfirmEnrollment(ctx, "user1", "000000")
+	err := svc.ConfirmEnrollment(ctx, testUserID, "000000")
 	if !errors.Is(err, ErrTOTPRateLimited) {
 		t.Fatalf("expected ErrTOTPRateLimited, got %v", err)
 	}
-	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:user1" {
-		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:user1", limiter.keys)
+	if len(limiter.keys) != 1 || limiter.keys[0] != "totp:"+testUserID.String() {
+		t.Fatalf("expected limiter to be consulted with key %q, got %v", "totp:"+testUserID.String(), limiter.keys)
 	}
 }
 
@@ -936,7 +947,7 @@ func TestTOTPNilLimiterIsNoOp(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -945,7 +956,7 @@ func TestTOTPNilLimiterIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
@@ -954,7 +965,7 @@ func TestTOTPNilLimiterIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", codeNext); err != nil {
+	if err := svc.Validate(ctx, testUserID, codeNext); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -971,7 +982,7 @@ func TestEnrollReturnsErrTOTPAlreadyEnrolledForVerifiedUser(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -979,18 +990,18 @@ func TestEnrollReturnsErrTOTPAlreadyEnrolledForVerifiedUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
-	_, _, err = svc.Enroll(ctx, "user1", "alice@example.com")
+	_, _, err = svc.Enroll(ctx, testUserID, "alice@example.com")
 	if !errors.Is(err, ErrTOTPAlreadyEnrolled) {
 		t.Fatalf("Enroll() error = %v, want ErrTOTPAlreadyEnrolled", err)
 	}
 
 	// The clobber this guards against: the active credential must be
 	// completely untouched by the refused Enroll call.
-	active, err := store.GetActiveTOTP(ctx, "user1")
+	active, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -1004,7 +1015,7 @@ func TestEnrollReturnsErrTOTPAlreadyEnrolledForVerifiedUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", nextCode); err != nil {
+	if err := svc.Validate(ctx, testUserID, nextCode); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -1019,7 +1030,7 @@ func TestPendingEnrollmentDoesNotDisturbActiveCredential(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	secret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	secret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -1027,12 +1038,12 @@ func TestPendingEnrollmentDoesNotDisturbActiveCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", code); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, code); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
 	// Start (but do not confirm) a replacement enrollment.
-	newSecret, _, err := svc.ReplaceEnrollment(ctx, "user1", "alice@example.com")
+	newSecret, _, err := svc.ReplaceEnrollment(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("ReplaceEnrollment: %v", err)
 	}
@@ -1047,7 +1058,7 @@ func TestPendingEnrollmentDoesNotDisturbActiveCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", nextCode); err != nil {
+	if err := svc.Validate(ctx, testUserID, nextCode); err != nil {
 		t.Fatalf("Validate against the active secret failed while a pending enrollment exists: %v", err)
 	}
 
@@ -1057,7 +1068,7 @@ func TestPendingEnrollmentDoesNotDisturbActiveCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", pendingCode); !errors.Is(err, ErrTOTPInvalid) {
+	if err := svc.Validate(ctx, testUserID, pendingCode); !errors.Is(err, ErrTOTPInvalid) {
 		t.Fatalf("Validate accepted a code for the unconfirmed pending secret: err = %v, want ErrTOTPInvalid", err)
 	}
 }
@@ -1073,7 +1084,7 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 	svc := mustService(t, store, "TestApp")
 	ctx := context.Background()
 
-	oldSecret, _, err := svc.Enroll(ctx, "user1", "alice@example.com")
+	oldSecret, _, err := svc.Enroll(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -1081,11 +1092,11 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", oldCode); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, oldCode); err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
 
-	newSecret, newURI, err := svc.ReplaceEnrollment(ctx, "user1", "alice@example.com")
+	newSecret, newURI, err := svc.ReplaceEnrollment(ctx, testUserID, "alice@example.com")
 	if err != nil {
 		t.Fatalf("ReplaceEnrollment() error = %v, want nil (must supersede despite an active factor)", err)
 	}
@@ -1102,7 +1113,7 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", oldNextCode); err != nil {
+	if err := svc.Validate(ctx, testUserID, oldNextCode); err != nil {
 		t.Fatalf("Validate(old secret) before confirmation = %v, want nil", err)
 	}
 
@@ -1110,12 +1121,12 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.ConfirmEnrollment(ctx, "user1", newCode); err != nil {
+	if err := svc.ConfirmEnrollment(ctx, testUserID, newCode); err != nil {
 		t.Fatalf("ConfirmEnrollment (replacement): %v", err)
 	}
 
 	// The replacement is now active …
-	active, err := store.GetActiveTOTP(ctx, "user1")
+	active, err := store.GetActiveTOTP(ctx, testUserID)
 	if err != nil {
 		t.Fatalf("GetActiveTOTP: %v", err)
 	}
@@ -1128,7 +1139,7 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	if err := svc.Validate(ctx, "user1", oldFurtherCode); !errors.Is(err, ErrTOTPInvalid) {
+	if err := svc.Validate(ctx, testUserID, oldFurtherCode); !errors.Is(err, ErrTOTPInvalid) {
 		t.Fatalf("Validate accepted the superseded factor's code: err = %v, want ErrTOTPInvalid", err)
 	}
 }
@@ -1153,7 +1164,7 @@ func TestReplaceEnrollmentSupersedesActiveEnrollmentExplicitly(t *testing.T) {
 // get lucky.
 //
 // The two racers are:
-//   - ConfirmEnrollment(userID, "pending-1", ...): promotes the pending
+//   - ConfirmEnrollment(userID, testPendingID1, ...): promotes the pending
 //     enrollment set up before the race, if it's still current.
 //   - EnrollPending(cred-2): a racing (e.g. double-submitted) Enroll call,
 //     which supersedes the pending enrollment if no active credential
@@ -1175,7 +1186,7 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 		store := newMemTOTPStore()
 		ctx := context.Background()
 
-		pending := &Credential{ID: "pending-1", UserID: "user1", Secret: "SECRET1", CreatedAt: time.Now()}
+		pending := &Credential{ID: testPendingID1, UserID: testUserID, Secret: "SECRET1", CreatedAt: time.Now()}
 		if err := store.EnrollPending(ctx, pending); err != nil {
 			t.Fatalf("iteration %d: EnrollPending (setup): %v", i, err)
 		}
@@ -1188,12 +1199,12 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			confirmed, confirmErr = store.ConfirmEnrollment(ctx, "user1", "pending-1", 42)
+			confirmed, confirmErr = store.ConfirmEnrollment(ctx, testUserID, testPendingID1, 42)
 		}()
 		go func() {
 			defer wg.Done()
 			<-start
-			enrollErr = store.EnrollPending(ctx, &Credential{ID: "pending-2", UserID: "user1", Secret: "SECRET2", CreatedAt: time.Now()})
+			enrollErr = store.EnrollPending(ctx, &Credential{ID: testPendingID2, UserID: testUserID, Secret: "SECRET2", CreatedAt: time.Now()})
 		}()
 		close(start)
 		wg.Wait()
@@ -1204,7 +1215,7 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 			t.Fatalf("iteration %d: confirmErr=%v enrollErr=%v — want exactly one to succeed", i, confirmErr, enrollErr)
 		}
 
-		active, activeErr := store.GetActiveTOTP(ctx, "user1")
+		active, activeErr := store.GetActiveTOTP(ctx, testUserID)
 		if confirmOK {
 			if !errors.Is(enrollErr, ErrTOTPAlreadyEnrolled) {
 				t.Fatalf("iteration %d: confirm won but Enroll's error = %v, want ErrTOTPAlreadyEnrolled", i, enrollErr)
@@ -1212,10 +1223,10 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 			if activeErr != nil {
 				t.Fatalf("iteration %d: GetActiveTOTP: %v", i, activeErr)
 			}
-			if active.ID != "pending-1" || active.Secret != "SECRET1" || !active.Verified {
+			if active.ID != testPendingID1 || active.Secret != "SECRET1" || !active.Verified {
 				t.Fatalf("iteration %d: expected pending-1 promoted to active, got %+v", i, active)
 			}
-			if confirmed == nil || confirmed.ID != "pending-1" {
+			if confirmed == nil || confirmed.ID != testPendingID1 {
 				t.Fatalf("iteration %d: ConfirmEnrollment returned %+v, want the promoted pending-1 credential", i, confirmed)
 			}
 		} else {
@@ -1225,13 +1236,30 @@ func TestConfirmEnrollmentIsAtomicUnderConcurrentEnrollPending(t *testing.T) {
 			if activeErr == nil {
 				t.Fatalf("iteration %d: expected no active credential yet, got %+v", i, active)
 			}
-			p, err := store.GetPendingTOTP(ctx, "user1")
+			p, err := store.GetPendingTOTP(ctx, testUserID)
 			if err != nil {
 				t.Fatalf("iteration %d: GetPendingTOTP: %v", i, err)
 			}
-			if p.ID != "pending-2" {
+			if p.ID != testPendingID2 {
 				t.Fatalf("iteration %d: expected pending-2 to remain pending, got %+v", i, p)
 			}
 		}
+	}
+}
+
+func TestEnrollCreatesVersion7CredentialID(t *testing.T) {
+	ctx := context.Background()
+	store := newMemTOTPStore()
+	svc := mustService(t, store, "Example")
+	userID := uuid.NewV7()
+	if _, _, err := svc.Enroll(ctx, userID, "a@example.com"); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	pending, err := store.GetPendingTOTP(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetPendingTOTP: %v", err)
+	}
+	if pending.ID[6]>>4 != 7 {
+		t.Errorf("credential ID %s is not version 7", pending.ID)
 	}
 }

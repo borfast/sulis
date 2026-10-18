@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"uuid"
 
 	"github.com/borfast/sulis/totp"
 )
@@ -24,8 +25,8 @@ var ErrTOTPCounterRegressed = errors.New("memstore: TOTP counter would regress")
 // between them a single step.
 type TOTPStore struct {
 	mu      sync.Mutex
-	active  map[string]*totp.Credential
-	pending map[string]*totp.Credential
+	active  map[uuid.UUID]*totp.Credential
+	pending map[uuid.UUID]*totp.Credential
 }
 
 var _ totp.Store = (*TOTPStore)(nil)
@@ -33,14 +34,14 @@ var _ totp.Store = (*TOTPStore)(nil)
 // NewTOTPStore returns an empty TOTPStore.
 func NewTOTPStore() *TOTPStore {
 	return &TOTPStore{
-		active:  make(map[string]*totp.Credential),
-		pending: make(map[string]*totp.Credential),
+		active:  make(map[uuid.UUID]*totp.Credential),
+		pending: make(map[uuid.UUID]*totp.Credential),
 	}
 }
 
 // GetActiveTOTP returns a copy of userID's active (verified) credential, or
 // totp.ErrTOTPNotEnrolled — whether or not a pending enrollment exists.
-func (s *TOTPStore) GetActiveTOTP(_ context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetActiveTOTP(_ context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -54,7 +55,7 @@ func (s *TOTPStore) GetActiveTOTP(_ context.Context, userID string) (*totp.Crede
 
 // GetPendingTOTP returns a copy of userID's pending (unverified) enrollment,
 // or totp.ErrTOTPNotEnrolled.
-func (s *TOTPStore) GetPendingTOTP(_ context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetPendingTOTP(_ context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -114,7 +115,7 @@ func (s *TOTPStore) ReplacePending(_ context.Context, cred *totp.Credential) err
 // already exists — a replacement rather than a first enrollment — the
 // promoted credential keeps whichever counter is higher, so swapping factors
 // can never roll the user's replay-protection clock backwards.
-func (s *TOTPStore) ConfirmEnrollment(_ context.Context, userID, pendingID string, counter uint64) (*totp.Credential, error) {
+func (s *TOTPStore) ConfirmEnrollment(_ context.Context, userID, pendingID uuid.UUID, counter uint64) (*totp.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -164,7 +165,7 @@ func (s *TOTPStore) SaveTOTP(_ context.Context, cred *totp.Credential) error {
 // both in one step. Removing them one after the other would let a concurrent
 // ConfirmEnrollment promotion land in the gap, leaving the just-promoted
 // credential behind as an active factor the caller believed it had removed.
-func (s *TOTPStore) DeleteTOTP(_ context.Context, userID string) error {
+func (s *TOTPStore) DeleteTOTP(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

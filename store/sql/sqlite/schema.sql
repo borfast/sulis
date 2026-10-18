@@ -20,7 +20,7 @@
 -- is chronological order, which is what the expiry sweeps below compare on,
 -- and nine fractional digits round-trip a time.Time without losing
 -- precision. Booleans are INTEGER 0/1. Metadata and transports are JSON text.
--- The ID columns of users, sessions and tokens are 16-byte BLOBs, enforced by
+-- The ID columns of users, sessions, tokens and TOTP are 16-byte BLOBs, enforced by
 -- a CHECK on length.
 --
 -- # No foreign keys
@@ -157,8 +157,8 @@ CREATE INDEX IF NOT EXISTS passkey_challenges_expires_at_idx ON passkey_challeng
 -- constraint rather than a convention, and ConfirmEnrollment's promotion is
 -- one DELETE ... RETURNING feeding one upsert.
 CREATE TABLE IF NOT EXISTS totp_active (
-    user_id           TEXT    PRIMARY KEY,
-    id                TEXT    NOT NULL,
+    user_id           BLOB    PRIMARY KEY CHECK (length(user_id) = 16),
+    id                BLOB    NOT NULL CHECK (length(id) = 16),
     -- Opaque to this package: ciphertext when totp is configured with an
     -- Encryptor, the base32 secret otherwise. A store cannot tell.
     secret            TEXT    NOT NULL,
@@ -167,8 +167,8 @@ CREATE TABLE IF NOT EXISTS totp_active (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS totp_pending (
-    user_id    TEXT PRIMARY KEY,
-    id         TEXT NOT NULL,
+    user_id    BLOB PRIMARY KEY CHECK (length(user_id) = 16),
+    id         BLOB NOT NULL CHECK (length(id) = 16),
     secret     TEXT NOT NULL,
     created_at TEXT NOT NULL
 ) STRICT;

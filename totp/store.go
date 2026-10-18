@@ -3,6 +3,7 @@ package totp
 import (
 	"context"
 	"time"
+	"uuid"
 )
 
 // Credential represents a user's TOTP enrollment — either the active
@@ -13,8 +14,8 @@ import (
 // Credential GetActiveTOTP returns and false on every Credential
 // GetPendingTOTP returns.
 type Credential struct {
-	ID     string
-	UserID string
+	ID     uuid.UUID
+	UserID uuid.UUID
 	// Secret is the base32-encoded shared secret, UNLESS Service is
 	// configured with an Encryptor (see WithEncryptor), in which case every
 	// value a Store implementation ever sees here is that Encryptor's
@@ -40,12 +41,12 @@ type Store interface {
 	// one Validate checks codes against. Returns ErrTOTPNotEnrolled if
 	// userID has no active credential, whether or not a pending
 	// enrollment exists.
-	GetActiveTOTP(ctx context.Context, userID string) (*Credential, error)
+	GetActiveTOTP(ctx context.Context, userID uuid.UUID) (*Credential, error)
 
 	// GetPendingTOTP returns userID's pending (unverified) enrollment
 	// awaiting ConfirmEnrollment, if any. Returns ErrTOTPNotEnrolled if
 	// none exists.
-	GetPendingTOTP(ctx context.Context, userID string) (*Credential, error)
+	GetPendingTOTP(ctx context.Context, userID uuid.UUID) (*Credential, error)
 
 	// EnrollPending atomically stores cred as userID's new pending
 	// enrollment, after first checking that userID has no active
@@ -147,7 +148,7 @@ type Store interface {
 	// Check the DELETE's affected-row count: 0 rows means pendingID no
 	// longer matches, so return ErrTOTPNotEnrolled without touching
 	// totp_active.
-	ConfirmEnrollment(ctx context.Context, userID, pendingID string, counter uint64) (*Credential, error)
+	ConfirmEnrollment(ctx context.Context, userID, pendingID uuid.UUID, counter uint64) (*Credential, error)
 
 	// SaveTOTP persists an update to an existing ACTIVE credential — in
 	// practice, Validate's post-check LastUsedCounter bump. Implementations
@@ -164,5 +165,5 @@ type Store interface {
 	// two deletes, leaving the just-promoted credential behind as a
 	// resurrected "active" factor the caller believed it had just removed
 	// entirely.
-	DeleteTOTP(ctx context.Context, userID string) error
+	DeleteTOTP(ctx context.Context, userID uuid.UUID) error
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"uuid"
 
 	"github.com/borfast/sulis/totp"
 )
@@ -40,7 +41,7 @@ var ErrTOTPCounterRegressed = errors.New("sulis/sqlite: TOTP counter would regre
 // GetActiveTOTP returns userID's active (verified) credential — the one
 // Validate checks codes against — or totp.ErrTOTPNotEnrolled, whether or not
 // a pending enrollment exists.
-func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	const q = `SELECT id, user_id, secret, last_used_counter, created_at
 		FROM totp_active WHERE user_id = ?`
 
@@ -49,8 +50,8 @@ func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Cre
 		counter   int64
 		createdAt string
 	)
-	err := s.db.QueryRowContext(ctx, q, userID).
-		Scan(&cred.ID, &cred.UserID, &cred.Secret, &counter, &createdAt)
+	err := s.db.QueryRowContext(ctx, q, idArg(userID)).
+		Scan(scanID(&cred.ID), scanID(&cred.UserID), &cred.Secret, &counter, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -67,15 +68,15 @@ func (s *TOTPStore) GetActiveTOTP(ctx context.Context, userID string) (*totp.Cre
 
 // GetPendingTOTP returns userID's pending (unverified) enrollment awaiting
 // ConfirmEnrollment, or totp.ErrTOTPNotEnrolled.
-func (s *TOTPStore) GetPendingTOTP(ctx context.Context, userID string) (*totp.Credential, error) {
+func (s *TOTPStore) GetPendingTOTP(ctx context.Context, userID uuid.UUID) (*totp.Credential, error) {
 	const q = `SELECT id, user_id, secret, created_at FROM totp_pending WHERE user_id = ?`
 
 	var (
 		cred      totp.Credential
 		createdAt string
 	)
-	err := s.db.QueryRowContext(ctx, q, userID).
-		Scan(&cred.ID, &cred.UserID, &cred.Secret, &createdAt)
+	err := s.db.QueryRowContext(ctx, q, idArg(userID)).
+		Scan(scanID(&cred.ID), scanID(&cred.UserID), &cred.Secret, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -114,7 +115,7 @@ func (s *TOTPStore) EnrollPending(ctx context.Context, cred *totp.Credential) er
 			id = excluded.id, secret = excluded.secret, created_at = excluded.created_at`
 
 	res, err := s.db.ExecContext(ctx, q,
-		cred.UserID, cred.ID, cred.Secret, formatTime(cred.CreatedAt), cred.UserID)
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, formatTime(cred.CreatedAt), idArg(cred.UserID))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: enrolling a pending TOTP credential: %w", err)
 	}
@@ -139,7 +140,7 @@ func (s *TOTPStore) ReplacePending(ctx context.Context, cred *totp.Credential) e
 			id = excluded.id, secret = excluded.secret, created_at = excluded.created_at`
 
 	_, err := s.db.ExecContext(ctx, q,
-		cred.UserID, cred.ID, cred.Secret, formatTime(cred.CreatedAt))
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, formatTime(cred.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: replacing a pending TOTP enrollment: %w", err)
 	}
@@ -164,7 +165,7 @@ func (s *TOTPStore) ReplacePending(ctx context.Context, cred *totp.Credential) e
 // already exists (this is a replacement, not a first enrollment) the promoted
 // credential keeps whichever counter is higher, so swapping factors can never
 // roll the user's replay-protection clock backwards.
-func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID string, counter uint64) (*totp.Credential, error) {
+func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID uuid.UUID, counter uint64) (*totp.Credential, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("sulis/sqlite: confirming a TOTP enrollment: %w", err)
@@ -178,8 +179,8 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 		promoted  totp.Credential
 		createdAt string
 	)
-	err = tx.QueryRowContext(ctx, consume, userID, pendingID).
-		Scan(&promoted.ID, &promoted.Secret, &createdAt)
+	err = tx.QueryRowContext(ctx, consume, idArg(userID), idArg(pendingID)).
+		Scan(scanID(&promoted.ID), &promoted.Secret, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, totp.ErrTOTPNotEnrolled
 	}
@@ -192,7 +193,7 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 
 	var prior int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT last_used_counter FROM totp_active WHERE user_id = ?`, userID).Scan(&prior)
+		`SELECT last_used_counter FROM totp_active WHERE user_id = ?`, idArg(userID)).Scan(&prior)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("sulis/sqlite: reading the prior TOTP counter: %w", err)
 	}
@@ -209,7 +210,7 @@ func (s *TOTPStore) ConfirmEnrollment(ctx context.Context, userID, pendingID str
 	// #nosec G115 -- a TOTP time-step counter is unix-seconds/period; it does
 	// not reach 2^63 in any timeline this code outlives.
 	if _, err := tx.ExecContext(ctx, promote,
-		userID, promoted.ID, promoted.Secret, int64(counter), formatTime(promoted.CreatedAt),
+		idArg(userID), idArg(promoted.ID), promoted.Secret, int64(counter), formatTime(promoted.CreatedAt),
 	); err != nil {
 		return nil, fmt.Errorf("sulis/sqlite: promoting a TOTP enrollment: %w", err)
 	}
@@ -250,7 +251,7 @@ func (s *TOTPStore) SaveTOTP(ctx context.Context, cred *totp.Credential) error {
 
 	// #nosec G115 -- see ConfirmEnrollment: the counter is a time step.
 	res, err := s.db.ExecContext(ctx, q,
-		cred.UserID, cred.ID, cred.Secret, int64(cred.LastUsedCounter), formatTime(cred.CreatedAt))
+		idArg(cred.UserID), idArg(cred.ID), cred.Secret, int64(cred.LastUsedCounter), formatTime(cred.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: saving a TOTP credential: %w", err)
 	}
@@ -269,17 +270,17 @@ func (s *TOTPStore) SaveTOTP(ctx context.Context, cred *totp.Credential) error {
 // concurrent ConfirmEnrollment promotion land in the gap, leaving the
 // just-promoted credential behind as an active factor the caller believed it
 // had removed entirely. Removing nothing is not an error.
-func (s *TOTPStore) DeleteTOTP(ctx context.Context, userID string) error {
+func (s *TOTPStore) DeleteTOTP(ctx context.Context, userID uuid.UUID) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting TOTP credentials: %w", err)
 	}
 	defer rollback(tx)
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_active WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_active WHERE user_id = ?`, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting an active TOTP credential: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_pending WHERE user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM totp_pending WHERE user_id = ?`, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a pending TOTP enrollment: %w", err)
 	}
 

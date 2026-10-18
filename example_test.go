@@ -26,7 +26,7 @@ import (
 type totpSecondFactor struct{ store totp.Store }
 
 func (c totpSecondFactor) HasSecondFactor(ctx context.Context, userID uuid.UUID) (bool, error) {
-	_, err := c.store.GetActiveTOTP(ctx, userID.String()) // transitional: Task 4
+	_, err := c.store.GetActiveTOTP(ctx, userID)
 	switch {
 	case err == nil:
 		return true, nil
@@ -100,17 +100,17 @@ func Example_passwordLoginWithTwoFactor() {
 	// code moments later at login, and Validate's replay check below would
 	// correctly refuse it as a genuine reuse. Recording LastUsedCounter as
 	// 0 here keeps that fixture out of the real check's way.
-	secret, _, err := totpSvc.Enroll(ctx, user.ID.String(), user.Email) // transitional: Task 4
+	secret, _, err := totpSvc.Enroll(ctx, user.ID, user.Email)
 	if err != nil {
 		fmt.Println("enroll:", err)
 		return
 	}
-	pending, err := totpStore.GetPendingTOTP(ctx, user.ID.String()) // transitional: Task 4
+	pending, err := totpStore.GetPendingTOTP(ctx, user.ID)
 	if err != nil {
 		fmt.Println("pending:", err)
 		return
 	}
-	if _, err := totpStore.ConfirmEnrollment(ctx, user.ID.String(), pending.ID, 0); err != nil { // transitional: Task 4
+	if _, err := totpStore.ConfirmEnrollment(ctx, user.ID, pending.ID, 0); err != nil {
 		fmt.Println("confirm:", err)
 		return
 	}
@@ -138,7 +138,7 @@ func Example_passwordLoginWithTwoFactor() {
 		fmt.Println("generate:", err)
 		return
 	}
-	if err := totpSvc.Validate(ctx, user.ID.String(), code); err != nil { // transitional: Task 4
+	if err := totpSvc.Validate(ctx, user.ID, code); err != nil {
 		// totp.ErrTOTPInvalid, totp.ErrTOTPNotEnrolled, totp.ErrTOTPNotVerified,
 		// totp.ErrTOTPReplayed, or totp.ErrTOTPRateLimited.
 		fmt.Println("validate:", err)
