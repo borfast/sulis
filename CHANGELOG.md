@@ -7,6 +7,8 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
 ### BREAKING CHANGES
 
 - `totp.Store.SaveTOTP` has a stricter contract: it writes only
