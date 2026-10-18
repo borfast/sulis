@@ -7,6 +7,15 @@ does and does not promise.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- Every ID sulis generates (users, sessions, tokens, TOTP and passkey
+  credentials, passkey ceremonies) is now a version 7 `uuid.UUID` from the
+  standard library, not a `string`, and `uuid.Nil()` means "no ID". The passkey
+  user handle is the 16 ID bytes. Both `store/sql` schemas store IDs as `uuid`
+  (Postgres) or 16-byte `BLOB` (SQLite), and `tokens.user_id` is nullable.
+  Migration: there is none; recreate existing databases.
+
 ## [0.3.0] - 2026-10-16
 
 ### BREAKING CHANGES

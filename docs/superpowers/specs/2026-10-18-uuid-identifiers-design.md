@@ -31,7 +31,7 @@ code and both SQL schemas change as if UUIDs had been used from the start.
   is that an ID contains its creation time to the millisecond, so a user ID
   shown in a URL tells when the account was created. The README says so.
   Rejected: version 4 for some or all IDs.
-- **`uuid.Nil` means "no ID"** (section 4 lists where). Rejected:
+- **`uuid.Nil()` means "no ID"** (section 4 lists where). Rejected:
   `*uuid.UUID` with nil meaning "no ID", which would make `Token.UserID` and
   `Event.UserID` pointers that every reader must check for nil.
 - **The passkey user handle is the 16 UUID bytes.** Rejected: the bytes of the
@@ -70,18 +70,18 @@ These keep their current types:
 - `[]byte`: the WebAuthn `CredentialID` and `AAGUID`, which the authenticator
   supplies.
 
-## 4. Generation and `uuid.Nil`
+## 4. Generation and `uuid.Nil()`
 
 - `uuid.NewV7()` replaces the three copies of `generateID` (root, `totp`,
   `passkey`), which are deleted.
-- `uuid.Nil` means "no ID":
+- `uuid.Nil()` means "no ID":
   - a magic-link token issued before the account exists has `UserID` set to
-    `uuid.Nil`;
-  - an event with no user has `UserID` set to `uuid.Nil`;
-  - the zero `Authentication` has `userID` set to `uuid.Nil`, and
+    `uuid.Nil()`;
+  - an event with no user has `UserID` set to `uuid.Nil()`;
+  - the zero `Authentication` has `userID` set to `uuid.Nil()`, and
     `IssueSession` still rejects it with `ErrNotAuthenticated`.
-- Each test of an ID against `""` becomes a test against `uuid.Nil`.
-- A method given `uuid.Nil` as an ID behaves as it does today when given `""`:
+- Each test of an ID against `""` becomes a test against `uuid.Nil()`.
+- A method given `uuid.Nil()` as an ID behaves as it does today when given `""`:
   the lookup finds nothing, and the method returns its usual not-found error.
   There is no new validation.
 
@@ -94,7 +94,7 @@ These keep their current types:
 - `storetest` creates IDs with `uuid.NewV7()`. `uniqueID` stays for the
   values that are not IDs: challenge keys, hashes and names.
 - New check in `RunTokenStore`: a token created with `UserID` set to
-  `uuid.Nil` comes back from `ConsumeToken` with `UserID` set to `uuid.Nil`.
+  `uuid.Nil()` comes back from `ConsumeToken` with `UserID` set to `uuid.Nil()`.
 
 ## 6. SQL schemas and stores (`store/sql`)
 
@@ -104,14 +104,14 @@ Both `schema.sql` files are edited in place:
 - SQLite: every `id` and `user_id` column is `BLOB` with
   `CHECK (length(<column>) = 16)`.
 - `tokens.user_id` is nullable in both, NULL meaning no user, replacing
-  `NOT NULL DEFAULT ''`. The stores write NULL for `uuid.Nil` and read NULL
-  back as `uuid.Nil`.
+  `NOT NULL DEFAULT ''`. The stores write NULL for `uuid.Nil()` and read NULL
+  back as `uuid.Nil()`.
 - The comments that describe IDs as text are updated. The "No foreign keys"
   section does not change.
 
 `store/sql/postgres` and `store/sql/sqlite` each get an unexported helper that
 turns a `uuid.UUID` into a query argument (the text form for Postgres, the 16
-bytes for SQLite, NULL for `uuid.Nil` in `tokens.user_id`) and scans a column
+bytes for SQLite, NULL for `uuid.Nil()` in `tokens.user_id`) and scans a column
 back into a `uuid.UUID`.
 
 ## 7. Passkeys
@@ -151,7 +151,7 @@ Tests come first. New tests:
   credential, ceremony) is version 7;
 - discoverable login with a user handle of the wrong length returns
   `ErrChallengeFailed`;
-- the `uuid.Nil` token check from section 5, run against `memstore` and both
+- the `uuid.Nil()` token check from section 5, run against `memstore` and both
   SQL stores;
 - in `store/sql/sqlite`, a raw `INSERT` with a 15-byte `id` is refused by the
   `CHECK`.
