@@ -36,7 +36,7 @@
 -- Everything else is native: bytea for the WebAuthn blobs, boolean for the
 -- flags SQLite had to spell as INTEGER 0/1, jsonb for metadata and transports,
 -- bigint for the counters that carry a Go uint64 or uint32. The ID columns of
--- users, sessions and tokens are native uuid.
+-- users, sessions, tokens, TOTP and passkey credentials are native uuid.
 --
 -- # Case-insensitive e-mail
 --
@@ -132,8 +132,8 @@ CREATE INDEX IF NOT EXISTS tokens_expires_at_idx ON tokens (expires_at);
 CREATE TABLE IF NOT EXISTS passkey_credentials (
     -- The store's own opaque ID, which is what DeleteCredential and
     -- RenameCredential address a credential by.
-    id               text    PRIMARY KEY,
-    user_id          text    NOT NULL,
+    id               uuid    PRIMARY KEY,
+    user_id          uuid    NOT NULL,
     -- The raw WebAuthn credential ID, which is what GetCredentialByID and
     -- UpdateCredentialAfterLogin address it by.
     credential_id    bytea   NOT NULL UNIQUE,

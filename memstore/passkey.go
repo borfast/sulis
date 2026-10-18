@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/passkey"
 )
@@ -25,14 +26,14 @@ var ErrChallengeNotFound = errors.New("memstore: challenge not found")
 // that makes a passkey unusable after a rename or a sign-count update.
 type PasskeyStore struct {
 	mu    sync.Mutex
-	creds map[string]*passkey.Credential
+	creds map[uuid.UUID]*passkey.Credential
 }
 
 var _ passkey.Store = (*PasskeyStore)(nil)
 
 // NewPasskeyStore returns an empty PasskeyStore.
 func NewPasskeyStore() *PasskeyStore {
-	return &PasskeyStore{creds: make(map[string]*passkey.Credential)}
+	return &PasskeyStore{creds: make(map[uuid.UUID]*passkey.Credential)}
 }
 
 // SaveCredential stores a deep copy of cred, keyed by cred.ID.
@@ -47,7 +48,7 @@ func (s *PasskeyStore) SaveCredential(_ context.Context, cred *passkey.Credentia
 // GetCredentialsByUserID returns copies of every credential owned by userID.
 // A user with no credentials is not an error: it is how a caller learns the
 // user has no passkey enrolled.
-func (s *PasskeyStore) GetCredentialsByUserID(_ context.Context, userID string) ([]passkey.Credential, error) {
+func (s *PasskeyStore) GetCredentialsByUserID(_ context.Context, userID uuid.UUID) ([]passkey.Credential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -105,7 +106,7 @@ func (s *PasskeyStore) UpdateCredentialAfterLogin(_ context.Context, credentialI
 // the path that exists to prevent exactly that. A SQL store gets the same
 // effect from one conditional DELETE, or from a transaction that locks the
 // user's credential rows before counting them.
-func (s *PasskeyStore) DeleteCredential(_ context.Context, userID, id string, allowLast bool) error {
+func (s *PasskeyStore) DeleteCredential(_ context.Context, userID, id uuid.UUID, allowLast bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -124,7 +125,7 @@ func (s *PasskeyStore) DeleteCredential(_ context.Context, userID, id string, al
 // last-credential guard deliberately does not apply: deleting a whole account
 // is a stronger action the caller has already gated, and leaving one
 // credential behind because it happened to be last would be surprising.
-func (s *PasskeyStore) DeleteCredentialsByUserID(_ context.Context, userID string) error {
+func (s *PasskeyStore) DeleteCredentialsByUserID(_ context.Context, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -139,7 +140,7 @@ func (s *PasskeyStore) DeleteCredentialsByUserID(_ context.Context, userID strin
 // RenameCredential sets the caller-supplied display name on the credential
 // named by id if it belongs to userID, or returns passkey.ErrPasskeyNotFound.
 // The name is stored verbatim: passkey never generates, infers, or validates it.
-func (s *PasskeyStore) RenameCredential(_ context.Context, userID, id, name string) error {
+func (s *PasskeyStore) RenameCredential(_ context.Context, userID, id uuid.UUID, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -164,7 +165,7 @@ func (s *PasskeyStore) byCredentialIDLocked(credentialID []byte) *passkey.Creden
 
 // countByUserLocked reports how many credentials userID owns. Callers must
 // hold s.mu.
-func (s *PasskeyStore) countByUserLocked(userID string) int {
+func (s *PasskeyStore) countByUserLocked(userID uuid.UUID) int {
 	n := 0
 	for _, cred := range s.creds {
 		if cred.UserID == userID {

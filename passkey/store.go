@@ -3,14 +3,15 @@ package passkey
 import (
 	"context"
 	"time"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 )
 
 // Credential represents a registered WebAuthn/passkey credential.
 type Credential struct {
-	ID              string
-	UserID          string
+	ID              uuid.UUID
+	UserID          uuid.UUID
 	CredentialID    []byte
 	PublicKey       []byte
 	AttestationType string
@@ -91,7 +92,7 @@ type Credential struct {
 // Store defines the persistence operations for passkey credentials.
 type Store interface {
 	SaveCredential(ctx context.Context, cred *Credential) error
-	GetCredentialsByUserID(ctx context.Context, userID string) ([]Credential, error)
+	GetCredentialsByUserID(ctx context.Context, userID uuid.UUID) ([]Credential, error)
 	GetCredentialByID(ctx context.Context, credentialID []byte) (*Credential, error)
 
 	// UpdateCredentialAfterLogin persists the bookkeeping that must change
@@ -146,7 +147,7 @@ type Store interface {
 	// specifically so the check and the mutation cannot be split across
 	// two separate calls the way a Service-level "load, check, then
 	// delete" would split them.
-	DeleteCredential(ctx context.Context, userID, id string, allowLast bool) error
+	DeleteCredential(ctx context.Context, userID, id uuid.UUID, allowLast bool) error
 
 	// DeleteCredentialsByUserID removes every credential owned by userID —
 	// e.g. as part of deleting the user's whole account. It does not apply
@@ -155,7 +156,7 @@ type Store interface {
 	// presumably already gated on its own, and silently leaving one
 	// credential behind because it "happened to be last" would be
 	// surprising here.
-	DeleteCredentialsByUserID(ctx context.Context, userID string) error
+	DeleteCredentialsByUserID(ctx context.Context, userID uuid.UUID) error
 
 	// RenameCredential sets Credential.Name, caller-supplied display
 	// metadata that passkey itself never generates or validates, on the
@@ -167,7 +168,7 @@ type Store interface {
 	// credential matches no row at all. A rename endpoint takes id from the
 	// request, and without this scoping any signed-in user could rename any
 	// other user's passkey.
-	RenameCredential(ctx context.Context, userID, id, name string) error
+	RenameCredential(ctx context.Context, userID, id uuid.UUID, name string) error
 }
 
 // ChallengeStore handles the transient WebAuthn challenge/session data

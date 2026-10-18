@@ -629,10 +629,10 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 			return db.TokenStore().DeleteUserTokens(ctx, id, sulis.TokenPurposeMagicLink)
 		},
 		"SaveCredential": func() error {
-			return db.PasskeyStore().SaveCredential(ctx, &passkey.Credential{ID: "c"})
+			return db.PasskeyStore().SaveCredential(ctx, &passkey.Credential{ID: uuid.NewV7()})
 		},
 		"GetCredentialsByUserID": func() error {
-			_, err := db.PasskeyStore().GetCredentialsByUserID(ctx, "u")
+			_, err := db.PasskeyStore().GetCredentialsByUserID(ctx, uuid.NewV7())
 			return err
 		},
 		"GetCredentialByID": func() error {
@@ -643,12 +643,12 @@ func TestEveryMethodFailsClosedOnAnUnavailableDatabase(t *testing.T) {
 			return db.PasskeyStore().UpdateCredentialAfterLogin(ctx, []byte("c"), 1, true, now)
 		},
 		"DeleteCredential": func() error {
-			return db.PasskeyStore().DeleteCredential(ctx, "u", "c", false)
+			return db.PasskeyStore().DeleteCredential(ctx, uuid.NewV7(), uuid.NewV7(), false)
 		},
 		"DeleteCredentialsByUserID": func() error {
-			return db.PasskeyStore().DeleteCredentialsByUserID(ctx, "u")
+			return db.PasskeyStore().DeleteCredentialsByUserID(ctx, uuid.NewV7())
 		},
-		"RenameCredential":        func() error { return db.PasskeyStore().RenameCredential(ctx, "u", "c", "n") },
+		"RenameCredential":        func() error { return db.PasskeyStore().RenameCredential(ctx, uuid.NewV7(), uuid.NewV7(), "n") },
 		"SaveChallenge":           func() error { return db.ChallengeStore().SaveChallenge(ctx, "k", []byte("d")) },
 		"ConsumeChallenge":        func() error { _, err := db.ChallengeStore().ConsumeChallenge(ctx, "k"); return err },
 		"DeleteExpiredChallenges": func() error { return db.ChallengeStore().DeleteExpiredChallenges(ctx) },

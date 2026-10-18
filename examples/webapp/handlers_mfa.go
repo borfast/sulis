@@ -56,7 +56,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(ctx, user.ID.String()) // transitional: Task 6
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
 		a.log.Error("listing passkeys", "user_id", user.ID, "error", err)
 		a.render(w, http.StatusInternalServerError, "error", "Could not load your security settings.")
@@ -69,7 +69,7 @@ func (a *app) handleSecurity(w http.ResponseWriter, r *http.Request) {
 			label = "Unnamed passkey"
 		}
 		passkeys = append(passkeys, passkeyView{
-			ID: cred.ID, Label: label, CreatedAt: cred.CreatedAt, LastUsedAt: cred.LastUsedAt,
+			ID: cred.ID.String(), Label: label, CreatedAt: cred.CreatedAt, LastUsedAt: cred.LastUsedAt,
 		})
 	}
 
@@ -198,7 +198,7 @@ func (a *app) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(r.Context(), user.ID.String()) // transitional: Task 6
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(r.Context(), user.ID)
 	if err != nil {
 		a.log.Error("checking remaining passkeys", "user_id", user.ID, "error", err)
 	} else if len(creds) == 0 {

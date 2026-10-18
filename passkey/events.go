@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 )
@@ -33,8 +34,8 @@ type Event struct {
 	Kind EventKind
 
 	// UserID identifies the account when the ceremony has resolved one. It is
-	// empty for an operation that fails before an account can be identified.
-	UserID string
+	// uuid.Nil for an operation that fails before an account can be identified.
+	UserID uuid.UUID
 
 	// Operation identifies the store operation for EventStoreFailed. It is
 	// empty for other event kinds.

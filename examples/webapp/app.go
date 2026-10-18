@@ -92,7 +92,7 @@ func (f secondFactors) HasSecondFactor(ctx context.Context, userID uuid.UUID) (b
 		return false, err
 	}
 
-	creds, err := f.passkeys.GetCredentialsByUserID(ctx, userID.String()) // transitional: Task 6
+	creds, err := f.passkeys.GetCredentialsByUserID(ctx, userID)
 	if err != nil {
 		return false, err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"uuid"
 )
 
 // FinishRegistration completes the WebAuthn registration ceremony from an
@@ -30,7 +31,7 @@ func (s *Service) FinishRegistration(ctx context.Context, user *User, r *http.Re
 // call.
 //
 // The http.Request must contain the authenticator's response body.
-func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string, r *http.Request) (*Credential, error) {
+func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID uuid.UUID, r *http.Request) (*Credential, error) {
 	body, err := s.readCeremonyBody(r)
 	if err != nil {
 		return nil, err
@@ -44,7 +45,7 @@ func (s *Service) FinishLogin(ctx context.Context, user *User, ceremonyID string
 // by the matching BeginDiscoverableLogin call.
 //
 // The http.Request must contain the authenticator's response body.
-func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID string, r *http.Request) (*Credential, error) {
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, ceremonyID uuid.UUID, r *http.Request) (*Credential, error) {
 	body, err := s.readCeremonyBody(r)
 	if err != nil {
 		return nil, err

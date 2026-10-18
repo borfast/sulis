@@ -5,12 +5,13 @@
 package passkey
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -128,7 +129,7 @@ func WithEventSink(sink EventSink) Option {
 // Consumers create this from their own user type when calling Service
 // methods.
 type User struct {
-	ID          []byte
+	ID          uuid.UUID
 	Name        string
 	DisplayName string
 }
@@ -144,7 +145,7 @@ type webauthnUser struct {
 	credentials []Credential
 }
 
-func (u *webauthnUser) WebAuthnID() []byte          { return u.user.ID }
+func (u *webauthnUser) WebAuthnID() []byte          { return u.user.ID[:] }
 func (u *webauthnUser) WebAuthnName() string        { return u.user.Name }
 func (u *webauthnUser) WebAuthnDisplayName() string { return u.user.DisplayName }
 func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential {
@@ -241,9 +242,9 @@ func NewService(store Store, challenges ChallengeStore, cfg WebAuthnConfig, opts
 // "you already registered this key" instead of silently creating a
 // duplicate credential.
 func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.CredentialCreation, error) {
-	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
+	creds, err := s.store.GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "get_credentials"})
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "get_credentials"})
 		return nil, err
 	}
 
@@ -267,8 +268,8 @@ func (s *Service) BeginRegistration(ctx context.Context, user *User) (*protocol.
 		return nil, fmt.Errorf("passkey: marshaling session: %w", err)
 	}
 
-	if err := s.challenges.SaveChallenge(ctx, challengeKey("register", string(user.ID)), data); err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "save_challenge"})
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("register", user.ID.String()), data); err != nil {
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "save_challenge"})
 		return nil, err
 	}
 
@@ -293,16 +294,16 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 		return nil, err
 	}
 
-	key := challengeKey("register", string(user.ID))
+	key := challengeKey("register", user.ID.String())
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventRegistrationChallengeExpired, UserID: string(user.ID), Diagnostic: "challenge_expired"})
+		s.emit(ctx, Event{Kind: EventRegistrationChallengeExpired, UserID: user.ID, Diagnostic: "challenge_expired"})
 		return nil, ErrChallengeExpired
 	}
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
-		s.emit(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID), Diagnostic: "session_data"})
+		s.emit(ctx, Event{Kind: EventRegistrationRejected, UserID: user.ID, Diagnostic: "session_data"})
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
@@ -311,20 +312,20 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 	// below to populate Credential.Discoverable.
 	parsedResponse, err := protocol.ParseCredentialCreationResponseBytes(body)
 	if err != nil {
-		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID)}, err, diagnosticCategory)
+		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: user.ID}, err, diagnosticCategory)
 		return nil, fmt.Errorf("passkey: parsing registration response: %w", err)
 	}
 
 	waUser := &webauthnUser{user: user}
 	waCredential, err := s.wa.CreateCredential(waUser, sessionData, parsedResponse)
 	if err != nil {
-		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: string(user.ID)}, err, diagnosticCategory)
+		s.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: user.ID}, err, diagnosticCategory)
 		return nil, fmt.Errorf("passkey: finish registration: %w", err)
 	}
 
 	cred := &Credential{
-		ID:              generateID(),
-		UserID:          string(user.ID),
+		ID:              uuid.NewV7(),
+		UserID:          user.ID,
 		CredentialID:    waCredential.ID,
 		PublicKey:       waCredential.PublicKey,
 		AttestationType: waCredential.AttestationType,
@@ -338,11 +339,11 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 	}
 
 	if err := s.store.SaveCredential(ctx, cred); err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "save_credential"})
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "save_credential"})
 		return nil, err
 	}
 
-	s.emit(ctx, Event{Kind: EventRegistrationSucceeded, UserID: string(user.ID)})
+	s.emit(ctx, Event{Kind: EventRegistrationSucceeded, UserID: user.ID})
 	return cred, nil
 }
 
@@ -352,32 +353,32 @@ func (s *Service) FinishRegistrationResponse(ctx context.Context, user *User, bo
 // is keyed by this ceremony ID rather than by user ID so that a second login
 // ceremony started for the same user (e.g. from a different device) cannot
 // clobber the first ceremony's saved challenge.
-func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.CredentialAssertion, string, error) {
+func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.CredentialAssertion, uuid.UUID, error) {
 	// Load credentials from store.
-	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
+	creds, err := s.store.GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "get_credentials"})
-		return nil, "", err
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "get_credentials"})
+		return nil, uuid.Nil(), err
 	}
 	if len(creds) == 0 {
-		return nil, "", ErrPasskeyNotFound
+		return nil, uuid.Nil(), ErrPasskeyNotFound
 	}
 	waUser := &webauthnUser{user: user, credentials: creds}
 
 	assertion, sessionData, err := s.wa.BeginLogin(waUser, webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
-		return nil, "", fmt.Errorf("passkey: begin login: %w", err)
+		return nil, uuid.Nil(), fmt.Errorf("passkey: begin login: %w", err)
 	}
 
 	data, err := json.Marshal(sessionData)
 	if err != nil {
-		return nil, "", fmt.Errorf("passkey: marshaling session: %w", err)
+		return nil, uuid.Nil(), fmt.Errorf("passkey: marshaling session: %w", err)
 	}
 
-	ceremonyID := generateID()
-	if err := s.challenges.SaveChallenge(ctx, challengeKey("login", ceremonyID), data); err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "save_challenge"})
-		return nil, "", err
+	ceremonyID := uuid.NewV7()
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("login", ceremonyID.String()), data); err != nil {
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "save_challenge"})
+		return nil, uuid.Nil(), err
 	}
 
 	return assertion, ceremonyID, nil
@@ -399,45 +400,45 @@ func (s *Service) BeginLogin(ctx context.Context, user *User) (*protocol.Credent
 // verification still burns it — the safe direction, same policy as sulis's
 // consumeToken: a rejected assertion cannot be retried against the same
 // challenge.
-func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyID string, body []byte) (*Credential, error) {
+func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyID uuid.UUID, body []byte) (*Credential, error) {
 	if err := s.checkCeremonyBodySize(body); err != nil {
 		return nil, err
 	}
 
 	// Load credentials from store.
-	creds, err := s.store.GetCredentialsByUserID(ctx, string(user.ID))
+	creds, err := s.store.GetCredentialsByUserID(ctx, user.ID)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: string(user.ID), Operation: "get_credentials"})
+		s.emit(ctx, Event{Kind: EventStoreFailed, UserID: user.ID, Operation: "get_credentials"})
 		return nil, err
 	}
 	waUser := &webauthnUser{user: user, credentials: creds}
 
-	key := challengeKey("login", ceremonyID)
+	key := challengeKey("login", ceremonyID.String())
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
-		s.emit(ctx, Event{Kind: EventLoginChallengeExpired, UserID: string(user.ID), Diagnostic: "challenge_expired"})
+		s.emit(ctx, Event{Kind: EventLoginChallengeExpired, UserID: user.ID, Diagnostic: "challenge_expired"})
 		return nil, ErrChallengeExpired
 	}
 
 	var sessionData webauthn.SessionData
 	if err := json.Unmarshal(data, &sessionData); err != nil {
-		s.emit(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID), Diagnostic: "session_data"})
+		s.emit(ctx, Event{Kind: EventLoginRejected, UserID: user.ID, Diagnostic: "session_data"})
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
 	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
-		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID)}, err, diagnosticCategory)
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: user.ID}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 
 	waCredential, err := s.wa.ValidateLogin(waUser, sessionData, parsedResponse)
 	if err != nil {
-		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: string(user.ID)}, err, diagnosticCategory)
+		s.emitDiag(ctx, Event{Kind: EventLoginRejected, UserID: user.ID}, err, diagnosticCategory)
 		return nil, fmt.Errorf("%w: %w", ErrChallengeFailed, err)
 	}
 
-	return s.finishLoginCredential(ctx, string(user.ID), waCredential)
+	return s.finishLoginCredential(ctx, user.ID, waCredential)
 }
 
 // BeginDiscoverableLogin starts a usernameless ("discoverable") WebAuthn
@@ -446,19 +447,19 @@ func (s *Service) FinishLoginResponse(ctx context.Context, user *User, ceremonyI
 // FinishDiscoverableLogin.
 // Returns the credential assertion options to send to the client and a
 // ceremony ID that the caller must round-trip to FinishDiscoverableLogin.
-func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
+func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, uuid.UUID, error) {
 	assertion, sessionData, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(s.cfg.userVerification))
 	if err != nil {
-		return nil, "", fmt.Errorf("passkey: begin discoverable login: %w", err)
+		return nil, uuid.Nil(), fmt.Errorf("passkey: begin discoverable login: %w", err)
 	}
 	data, err := json.Marshal(sessionData)
 	if err != nil {
-		return nil, "", fmt.Errorf("passkey: marshaling session: %w", err)
+		return nil, uuid.Nil(), fmt.Errorf("passkey: marshaling session: %w", err)
 	}
-	ceremonyID := generateID()
-	if err := s.challenges.SaveChallenge(ctx, challengeKey("discover", ceremonyID), data); err != nil {
+	ceremonyID := uuid.NewV7()
+	if err := s.challenges.SaveChallenge(ctx, challengeKey("discover", ceremonyID.String()), data); err != nil {
 		s.emit(ctx, Event{Kind: EventStoreFailed, Operation: "save_challenge"})
-		return nil, "", err
+		return nil, uuid.Nil(), err
 	}
 	return assertion, ceremonyID, nil
 }
@@ -481,12 +482,12 @@ func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.Credent
 // verification still burns it — the safe direction, same policy as sulis's
 // consumeToken: a rejected assertion cannot be retried against the same
 // challenge.
-func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyID string, body []byte) (*Credential, error) {
+func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyID uuid.UUID, body []byte) (*Credential, error) {
 	if err := s.checkCeremonyBodySize(body); err != nil {
 		return nil, err
 	}
 
-	key := challengeKey("discover", ceremonyID)
+	key := challengeKey("discover", ceremonyID.String())
 	data, err := s.challenges.ConsumeChallenge(ctx, key)
 	if err != nil {
 		s.emit(ctx, Event{Kind: EventLoginChallengeExpired, Diagnostic: "challenge_expired"})
@@ -499,18 +500,18 @@ func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyI
 		return nil, fmt.Errorf("passkey: unmarshaling session: %w", err)
 	}
 
-	var resolvedUserID string
+	var resolvedUserID uuid.UUID
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
 		cred, err := s.store.GetCredentialByID(ctx, rawID)
 		if err != nil {
 			s.emit(ctx, Event{Kind: EventStoreFailed, Operation: "get_credential"})
 			return nil, ErrPasskeyNotFound
 		}
-		if cred.UserID != string(userHandle) {
+		if !bytes.Equal(cred.UserID[:], userHandle) {
 			return nil, ErrChallengeFailed
 		}
 		resolvedUserID = cred.UserID
-		return &webauthnUser{user: &User{ID: userHandle}, credentials: []Credential{*cred}}, nil
+		return &webauthnUser{user: &User{ID: cred.UserID}, credentials: []Credential{*cred}}, nil
 	}
 
 	parsedResponse, err := protocol.ParseCredentialRequestResponseBytes(body)
@@ -531,7 +532,7 @@ func (s *Service) FinishDiscoverableLoginResponse(ctx context.Context, ceremonyI
 // for a successfully verified assertion: it rejects credentials flagged as
 // possibly cloned, then persists the updated sign count, backup state, and
 // last-used timestamp, and returns the stored credential.
-func (s *Service) finishLoginCredential(ctx context.Context, userID string, waCred *webauthn.Credential) (*Credential, error) {
+func (s *Service) finishLoginCredential(ctx context.Context, userID uuid.UUID, waCred *webauthn.Credential) (*Credential, error) {
 	if waCred.Authenticator.CloneWarning {
 		s.emit(ctx, Event{Kind: EventCloneWarning, UserID: userID, Diagnostic: "clone_warning"})
 		return nil, ErrCloneWarning
@@ -586,7 +587,7 @@ type DeleteOptions struct {
 // each load the pre-deletion count before either delete lands, both pass a
 // Service-level check, and both succeed — see Store.DeleteCredential's
 // GoDoc for the full reasoning and reference implementations.
-func (s *Service) DeleteCredential(ctx context.Context, userID, id string, opts DeleteOptions) error {
+func (s *Service) DeleteCredential(ctx context.Context, userID, id uuid.UUID, opts DeleteOptions) error {
 	err := s.store.DeleteCredential(ctx, userID, id, opts.AllowLast)
 	if err == nil {
 		s.emit(ctx, Event{Kind: EventCredentialDeleted, UserID: userID})
@@ -669,10 +670,4 @@ func toWebAuthnCreds(creds []Credential) []webauthn.Credential {
 // ceremonies for the same user do not overwrite each other's saved challenge.
 func challengeKey(kind, id string) string {
 	return kind + ":" + id
-}
-
-func generateID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x", b)
 }

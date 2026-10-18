@@ -264,7 +264,7 @@ func Example_passkey() {
 		return
 	}
 
-	pu := &passkey.User{ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email} // transitional: Task 6
+	pu := &passkey.User{ID: user.ID, Name: user.Email, DisplayName: user.Email}
 
 	// Registration: BeginRegistration hands the browser a challenge for its
 	// authenticator to sign.
@@ -279,8 +279,8 @@ func Example_passkey() {
 	// A fixture stands in below for what that call would have stored, so
 	// BeginLogin below has a credential to challenge.
 	if err := credentials.SaveCredential(ctx, &passkey.Credential{
-		ID:           "example-credential",
-		UserID:       user.ID.String(), // transitional: Task 6
+		ID:           uuid.NewV7(),
+		UserID:       user.ID,
 		CredentialID: []byte("example-credential-id"),
 		PublicKey:    []byte("example-public-key"),
 		CreatedAt:    time.Now(),

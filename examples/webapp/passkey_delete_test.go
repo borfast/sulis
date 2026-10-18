@@ -7,11 +7,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/passkey"
 )
 
-func signedInPasskeyDeleteUser(t *testing.T, a *app, email string) (*testClient, string) {
+func signedInPasskeyDeleteUser(t *testing.T, a *app, email string) (*testClient, uuid.UUID) {
 	t.Helper()
 	c := newTestClient(t, a)
 	if rec := registerUser(t, c, email, testPassword); rec.Code != http.StatusOK {
@@ -27,13 +28,13 @@ func signedInPasskeyDeleteUser(t *testing.T, a *app, email string) (*testClient,
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
-	return c, user.ID.String() // transitional: Task 6
+	return c, user.ID
 }
 
-func savePasskeyForDelete(t *testing.T, a *app, userID, credentialID string) {
+func savePasskeyForDelete(t *testing.T, a *app, userID, credentialID uuid.UUID) {
 	t.Helper()
 	err := a.db.PasskeyStore().SaveCredential(t.Context(), &passkey.Credential{
-		ID: credentialID, UserID: userID, CredentialID: []byte(credentialID),
+		ID: credentialID, UserID: userID, CredentialID: []byte(credentialID.String()),
 		PublicKey: []byte("public-key"), CreatedAt: time.Now(),
 	})
 	if err != nil {
@@ -66,12 +67,13 @@ func TestPasskeyDeleteLastCredentialRequiresActiveTOTP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newTestApp(t)
 			c, userID := signedInPasskeyDeleteUser(t, a, "passkey-delete@example.com")
-			savePasskeyForDelete(t, a, userID, "last-passkey")
+			lastID := uuid.NewV7()
+			savePasskeyForDelete(t, a, userID, lastID)
 			if tc.withTOTP {
 				enrollTOTP(t, a, c)
 			}
 
-			rec := deletePasskeyRequest(t, c, "last-passkey")
+			rec := deletePasskeyRequest(t, c, lastID.String())
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("delete: status = %d, want %d, body = %s", rec.Code, tc.wantStatus, rec.Body.String())
 			}
@@ -93,10 +95,11 @@ func TestPasskeyDeleteCannotRemoveAnotherUsersCredential(t *testing.T) {
 	a := newTestApp(t)
 	_, ownerID := signedInPasskeyDeleteUser(t, a, "passkey-owner@example.com")
 	attacker, _ := signedInPasskeyDeleteUser(t, a, "passkey-attacker@example.com")
-	savePasskeyForDelete(t, a, ownerID, "owner-passkey")
+	ownerPasskey := uuid.NewV7()
+	savePasskeyForDelete(t, a, ownerID, ownerPasskey)
 	enrollTOTP(t, a, attacker)
 
-	rec := deletePasskeyRequest(t, attacker, "owner-passkey")
+	rec := deletePasskeyRequest(t, attacker, ownerPasskey.String())
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("delete another user's passkey: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -104,7 +107,27 @@ func TestPasskeyDeleteCannotRemoveAnotherUsersCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list owner's passkeys: %v", err)
 	}
-	if len(creds) != 1 || creds[0].ID != "owner-passkey" {
+	if len(creds) != 1 || creds[0].ID != ownerPasskey {
 		t.Errorf("owner's passkeys changed: %+v", creds)
+	}
+}
+
+func TestDeletePasskeyWithMalformedIDReturns400(t *testing.T) {
+	a := newTestApp(t)
+	c, userID := signedInPasskeyDeleteUser(t, a, "passkey-malformed@example.com")
+	id := uuid.NewV7()
+	savePasskeyForDelete(t, a, userID, id)
+	enrollTOTP(t, a, c)
+
+	rec := deletePasskeyRequest(t, c, "not-a-uuid")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete with malformed ID: status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	creds, err := a.db.PasskeyStore().GetCredentialsByUserID(t.Context(), userID)
+	if err != nil {
+		t.Fatalf("list passkeys: %v", err)
+	}
+	if len(creds) != 1 || creds[0].ID != id {
+		t.Errorf("passkeys changed: %+v", creds)
 	}
 }

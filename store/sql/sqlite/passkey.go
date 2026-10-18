@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/passkey"
 
@@ -63,7 +64,7 @@ func (s *PasskeyStore) SaveCredential(ctx context.Context, cred *passkey.Credent
 			last_used_at = excluded.last_used_at,
 			created_at = excluded.created_at`
 	_, err = s.db.ExecContext(ctx, q,
-		cred.ID, cred.UserID, cred.CredentialID, cred.PublicKey, cred.AttestationType,
+		idArg(cred.ID), idArg(cred.UserID), cred.CredentialID, cred.PublicKey, cred.AttestationType,
 		nullableBytes(cred.AAGUID), int64(cred.SignCount), cred.Name, transports,
 		boolToInt(cred.BackupEligible), boolToInt(cred.BackupState),
 		boolToInt(cred.Discoverable), nullableTime(cred.LastUsedAt),
@@ -78,10 +79,10 @@ func (s *PasskeyStore) SaveCredential(ctx context.Context, cred *passkey.Credent
 // GetCredentialsByUserID returns every credential owned by userID. A user
 // with no credentials is not an error: it is how a caller learns the user has
 // no passkey enrolled.
-func (s *PasskeyStore) GetCredentialsByUserID(ctx context.Context, userID string) ([]passkey.Credential, error) {
+func (s *PasskeyStore) GetCredentialsByUserID(ctx context.Context, userID uuid.UUID) ([]passkey.Credential, error) {
 	const q = `SELECT ` + credentialColumns + ` FROM passkey_credentials WHERE user_id = ?`
 
-	rows, err := s.db.QueryContext(ctx, q, userID)
+	rows, err := s.db.QueryContext(ctx, q, idArg(userID))
 	if err != nil {
 		return nil, fmt.Errorf("sulis/sqlite: listing a user's passkey credentials: %w", err)
 	}
@@ -154,7 +155,7 @@ func (s *PasskeyStore) UpdateCredentialAfterLogin(ctx context.Context, credentia
 // those are different errors to the caller — passkey.ErrLastCredential versus
 // passkey.ErrPasskeyNotFound — so a follow-up existence check inside the same
 // transaction tells them apart.
-func (s *PasskeyStore) DeleteCredential(ctx context.Context, userID, id string, allowLast bool) error {
+func (s *PasskeyStore) DeleteCredential(ctx context.Context, userID, id uuid.UUID, allowLast bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a passkey credential: %w", err)
@@ -165,7 +166,7 @@ func (s *PasskeyStore) DeleteCredential(ctx context.Context, userID, id string, 
 		WHERE id = ? AND user_id = ?
 		  AND (? = 1 OR (SELECT COUNT(*) FROM passkey_credentials WHERE user_id = ?) > 1)`
 
-	res, err := tx.ExecContext(ctx, del, id, userID, boolToInt(allowLast), userID)
+	res, err := tx.ExecContext(ctx, del, idArg(id), idArg(userID), boolToInt(allowLast), idArg(userID))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a passkey credential: %w", err)
 	}
@@ -176,7 +177,7 @@ func (s *PasskeyStore) DeleteCredential(ctx context.Context, userID, id string, 
 	if n == 0 {
 		var exists int
 		err := tx.QueryRowContext(ctx,
-			`SELECT 1 FROM passkey_credentials WHERE id = ? AND user_id = ?`, id, userID,
+			`SELECT 1 FROM passkey_credentials WHERE id = ? AND user_id = ?`, idArg(id), idArg(userID),
 		).Scan(&exists)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -198,10 +199,10 @@ func (s *PasskeyStore) DeleteCredential(ctx context.Context, userID, id string, 
 // last-credential guard: deleting a whole account is a stronger action the
 // caller has already gated, and leaving one credential behind because it
 // happened to be last would be surprising here.
-func (s *PasskeyStore) DeleteCredentialsByUserID(ctx context.Context, userID string) error {
+func (s *PasskeyStore) DeleteCredentialsByUserID(ctx context.Context, userID uuid.UUID) error {
 	const q = `DELETE FROM passkey_credentials WHERE user_id = ?`
 
-	if _, err := s.db.ExecContext(ctx, q, userID); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, idArg(userID)); err != nil {
 		return fmt.Errorf("sulis/sqlite: deleting a user's passkey credentials: %w", err)
 	}
 	return nil
@@ -210,10 +211,10 @@ func (s *PasskeyStore) DeleteCredentialsByUserID(ctx context.Context, userID str
 // RenameCredential sets a credential's display name, caller-supplied metadata
 // passkey itself never generates or validates. user_id is in the predicate, so
 // another user's credential matches no row: zero rows is passkey.ErrPasskeyNotFound.
-func (s *PasskeyStore) RenameCredential(ctx context.Context, userID, id, name string) error {
+func (s *PasskeyStore) RenameCredential(ctx context.Context, userID, id uuid.UUID, name string) error {
 	const q = `UPDATE passkey_credentials SET name = ? WHERE id = ? AND user_id = ?`
 
-	res, err := s.db.ExecContext(ctx, q, name, id, userID)
+	res, err := s.db.ExecContext(ctx, q, name, idArg(id), idArg(userID))
 	if err != nil {
 		return fmt.Errorf("sulis/sqlite: renaming a passkey credential: %w", err)
 	}
@@ -345,7 +346,7 @@ func scanCredential(row scanner, dst *passkey.Credential) error {
 		createdAt                                 string
 	)
 	err := row.Scan(
-		&dst.ID, &dst.UserID, &dst.CredentialID, &dst.PublicKey, &dst.AttestationType,
+		scanID(&dst.ID), scanID(&dst.UserID), &dst.CredentialID, &dst.PublicKey, &dst.AttestationType,
 		&aaguid, &signCount, &dst.Name, &transports, &backupEligible, &backupState,
 		&discoverable, &lastUsedAt, &createdAt,
 	)

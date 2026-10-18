@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"uuid"
 
 	"github.com/borfast/sulis/passkey"
 )
@@ -37,8 +38,8 @@ func newPasskeySlogSink(logger *slog.Logger) passkey.EventSink {
 func (s passkeySlogSink) Emit(ctx context.Context, e passkey.Event) {
 	attrs := make([]slog.Attr, 0, 5)
 	attrs = append(attrs, slog.String("kind", string(e.Kind)))
-	if e.UserID != "" {
-		attrs = append(attrs, slog.String("user_id", e.UserID))
+	if e.UserID != uuid.Nil() {
+		attrs = append(attrs, slog.String("user_id", e.UserID.String()))
 	}
 	if e.Operation != "" {
 		attrs = append(attrs, slog.String("operation", e.Operation))

@@ -145,8 +145,7 @@ func (a *app) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Request)
 	}
 
 	creation, err := a.passkeys.BeginRegistration(r.Context(), &passkey.User{
-		// transitional: Task 6
-		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
+		ID: user.ID, Name: user.Email, DisplayName: user.Email,
 	})
 	if err != nil {
 		a.log.Error("beginning passkey registration", "user_id", user.ID, "error", err)
@@ -174,8 +173,7 @@ func (a *app) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Request
 	}
 
 	if _, err := a.passkeys.FinishRegistrationResponse(r.Context(), &passkey.User{
-		// transitional: Task 6
-		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
+		ID: user.ID, Name: user.Email, DisplayName: user.Email,
 	}, body); err != nil {
 		a.log.Error("finishing passkey registration", "user_id", user.ID, "error", err)
 		writeJSONError(w, http.StatusBadRequest, "Could not register that passkey. Try again.")
@@ -216,8 +214,7 @@ func (a *app) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	assertion, ceremonyID, err := a.passkeys.BeginLogin(r.Context(), &passkey.User{
-		// transitional: Task 6
-		ID: []byte(user.ID.String()), Name: user.Email, DisplayName: user.Email,
+		ID: user.ID, Name: user.Email, DisplayName: user.Email,
 	})
 	if err != nil {
 		a.log.Error("beginning passkey login", "user_id", user.ID, "error", err)
@@ -226,7 +223,7 @@ func (a *app) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.setPasskeyCookie(w, passkeyLoginUserCookie, user.ID.String())
-	a.setPasskeyCookie(w, passkeyLoginCeremonyCookie, ceremonyID)
+	a.setPasskeyCookie(w, passkeyLoginCeremonyCookie, ceremonyID.String())
 	writeJSON(w, http.StatusOK, assertion)
 }
 
@@ -240,6 +237,13 @@ func (a *app) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	ceremonyCookie, ceremonyErr := r.Cookie(passkeyLoginCeremonyCookie)
 	a.clearPasskeyCookie(w, passkeyLoginUserCookie)
 	a.clearPasskeyCookie(w, passkeyLoginCeremonyCookie)
+	var userID, ceremonyID uuid.UUID
+	if userErr == nil {
+		userID, userErr = uuid.Parse(userCookie.Value)
+	}
+	if ceremonyErr == nil {
+		ceremonyID, ceremonyErr = uuid.Parse(ceremonyCookie.Value)
+	}
 	if userErr != nil || ceremonyErr != nil {
 		writeJSONError(w, http.StatusBadRequest, "Your sign-in attempt expired. Try again.")
 		return
@@ -251,8 +255,8 @@ func (a *app) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, err := a.passkeys.FinishLoginResponse(r.Context(), &passkey.User{ID: []byte(userCookie.Value)},
-		ceremonyCookie.Value, body)
+	cred, err := a.passkeys.FinishLoginResponse(r.Context(), &passkey.User{ID: userID},
+		ceremonyID, body)
 	if err != nil {
 		a.log.Error("finishing passkey login", "error", err)
 		writeJSONError(w, http.StatusBadRequest, "Could not complete sign-in.")
@@ -273,7 +277,7 @@ func (a *app) handlePasskeyDiscoverableBegin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	a.setPasskeyCookie(w, passkeyDiscoverableCeremonyCookie, ceremonyID)
+	a.setPasskeyCookie(w, passkeyDiscoverableCeremonyCookie, ceremonyID.String())
 	writeJSON(w, http.StatusOK, assertion)
 }
 
@@ -283,6 +287,10 @@ func (a *app) handlePasskeyDiscoverableBegin(w http.ResponseWriter, r *http.Requ
 func (a *app) handlePasskeyDiscoverableFinish(w http.ResponseWriter, r *http.Request) {
 	ceremonyCookie, err := r.Cookie(passkeyDiscoverableCeremonyCookie)
 	a.clearPasskeyCookie(w, passkeyDiscoverableCeremonyCookie)
+	var ceremonyID uuid.UUID
+	if err == nil {
+		ceremonyID, err = uuid.Parse(ceremonyCookie.Value)
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "Your sign-in attempt expired. Try again.")
 		return
@@ -294,7 +302,7 @@ func (a *app) handlePasskeyDiscoverableFinish(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cred, err := a.passkeys.FinishDiscoverableLoginResponse(r.Context(), ceremonyCookie.Value, body)
+	cred, err := a.passkeys.FinishDiscoverableLoginResponse(r.Context(), ceremonyID, body)
 	if err != nil {
 		a.log.Error("finishing discoverable passkey login", "error", err)
 		writeJSONError(w, http.StatusBadRequest, "Could not complete sign-in.")
@@ -309,13 +317,7 @@ func (a *app) handlePasskeyDiscoverableFinish(w http.ResponseWriter, r *http.Req
 // ErrUserNotFound/ErrEmailNotVerified gating IssueSession does, so no
 // separate EmailVerifiedAt check is needed here: an unverified account is
 // already rejected by the call below.
-func (a *app) finishPasskeySession(w http.ResponseWriter, r *http.Request, rawUserID string) {
-	userID, err := uuid.Parse(rawUserID) // transitional: Task 6
-	if err != nil {
-		a.log.Error("parsing user ID after passkey login", "error", err)
-		writeJSONError(w, http.StatusBadRequest, "Could not complete sign-in.")
-		return
-	}
+func (a *app) finishPasskeySession(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
 	session, token, err := a.auth.IssueSessionUnchecked(r.Context(), userID, sulis.AuthMethodPasskey)
 	if err != nil {
 		a.log.Error("issuing session after passkey login", "user_id", userID, "error", err)
@@ -348,14 +350,18 @@ func (a *app) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credentialID := r.FormValue("credential_id")
+	credentialID, err := uuid.Parse(r.FormValue("credential_id"))
+	if err != nil {
+		a.render(w, http.StatusBadRequest, "error", "Could not remove that passkey.")
+		return
+	}
 	_, totpErr := a.db.TOTPStore().GetActiveTOTP(r.Context(), user.ID)
 	if totpErr != nil && !errors.Is(totpErr, totp.ErrTOTPNotEnrolled) {
 		a.log.Error("checking TOTP before passkey deletion", "user_id", user.ID, "error", totpErr)
 		a.render(w, http.StatusInternalServerError, "error", "Could not remove that passkey.")
 		return
 	}
-	if err := a.passkeys.DeleteCredential(r.Context(), user.ID.String(), credentialID, passkey.DeleteOptions{AllowLast: totpErr == nil}); err != nil { // transitional: Task 6
+	if err := a.passkeys.DeleteCredential(r.Context(), user.ID, credentialID, passkey.DeleteOptions{AllowLast: totpErr == nil}); err != nil {
 		a.log.Error("deleting passkey", "user_id", user.ID, "error", err)
 		message := "Could not remove that passkey."
 		if errors.Is(err, passkey.ErrLastCredential) {

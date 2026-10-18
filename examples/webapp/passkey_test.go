@@ -378,3 +378,44 @@ func TestReauthWrongPasswordFails(t *testing.T) {
 		t.Errorf("Location = %q, want /reauth again", got)
 	}
 }
+
+// TestPasskeyLoginWithMalformedCookiesIsTreatedAsMissing checks that cookies
+// that are not UUIDs get the same answer as no ceremony cookies at all.
+func TestPasskeyLoginWithMalformedCookiesIsTreatedAsMissing(t *testing.T) {
+	a := newTestApp(t)
+	c := newTestClient(t, a)
+
+	rec := c.get("/login")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /login: status = %d", rec.Code)
+	}
+	csrf := extractCSRFToken(t, rec.Body.String())
+
+	finish := func(extra ...*http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, c.base.String()+"/api/passkeys/login/finish", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(sulis.CSRFHeaderName, csrf)
+		for _, ck := range c.jar.Cookies(c.base) {
+			req.AddCookie(ck)
+		}
+		for _, ck := range extra {
+			req.AddCookie(ck)
+		}
+		rec := httptest.NewRecorder()
+		c.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	missing := finish()
+	malformed := finish(
+		&http.Cookie{Name: passkeyLoginUserCookie, Value: "not-a-uuid"},
+		&http.Cookie{Name: passkeyLoginCeremonyCookie, Value: "not-a-uuid"},
+	)
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing cookies: status = %d, want 400, body = %s", missing.Code, missing.Body.String())
+	}
+	if malformed.Code != missing.Code || malformed.Body.String() != missing.Body.String() {
+		t.Errorf("malformed cookies: status = %d, body = %s; want status = %d, body = %s",
+			malformed.Code, malformed.Body.String(), missing.Code, missing.Body.String())
+	}
+}

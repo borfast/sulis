@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -26,7 +27,7 @@ func TestBeginRegistrationSavesChallenge(t *testing.T) {
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 	user := &User{
-		ID:          []byte("user-1"),
+		ID:          testUser1,
 		Name:        "user@example.com",
 		DisplayName: "User One",
 	}
@@ -39,11 +40,11 @@ func TestBeginRegistrationSavesChallenge(t *testing.T) {
 		t.Fatal("BeginRegistration() returned nil creation")
 	}
 
-	session := mustLoadSavedSession(t, challenges, challengeKey("register", string(user.ID)))
+	session := mustLoadSavedSession(t, challenges, challengeKey("register", user.ID.String()))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
-	if string(session.UserID) != string(user.ID) {
+	if !bytes.Equal(session.UserID, user.ID[:]) {
 		t.Fatalf("saved session user ID = %q, want %q", session.UserID, user.ID)
 	}
 }
@@ -55,15 +56,15 @@ func TestBeginRegistrationSavesChallenge(t *testing.T) {
 func TestBeginRegistrationExcludesExistingCredentials(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
 			{CredentialID: []byte("credential-1")},
 		},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 	user := &User{
-		ID:          []byte("user-1"),
+		ID:          testUser1,
 		Name:        "user@example.com",
 		DisplayName: "User One",
 	}
@@ -85,15 +86,15 @@ func TestBeginRegistrationExcludesExistingCredentials(t *testing.T) {
 func TestBeginLoginSavesChallenge(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
 			{CredentialID: []byte("credential-1")},
 		},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 	user := &User{
-		ID:          []byte("user-1"),
+		ID:          testUser1,
 		Name:        "user@example.com",
 		DisplayName: "User One",
 	}
@@ -105,15 +106,15 @@ func TestBeginLoginSavesChallenge(t *testing.T) {
 	if assertion == nil {
 		t.Fatal("BeginLogin() returned nil assertion")
 	}
-	if ceremonyID == "" {
+	if ceremonyID == uuid.Nil() {
 		t.Fatal("BeginLogin() returned empty ceremony ID")
 	}
 
-	session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID))
+	session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID.String()))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
-	if string(session.UserID) != string(user.ID) {
+	if !bytes.Equal(session.UserID, user.ID[:]) {
 		t.Fatalf("saved session user ID = %q, want %q", session.UserID, user.ID)
 	}
 }
@@ -124,7 +125,7 @@ func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	assertion, ceremonyID, err := service.BeginLogin(context.Background(), user)
 	if !errors.Is(err, ErrPasskeyNotFound) {
@@ -133,7 +134,7 @@ func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.
 	if assertion != nil {
 		t.Fatalf("BeginLogin() assertion = %#v, want nil", assertion)
 	}
-	if ceremonyID != "" {
+	if ceremonyID != uuid.Nil() {
 		t.Fatalf("BeginLogin() ceremony ID = %q, want empty", ceremonyID)
 	}
 	if len(challenges.saved) != 0 {
@@ -142,7 +143,7 @@ func TestBeginLoginReturnsErrPasskeyNotFoundWhenUserHasNoCredentials(t *testing.
 	if store.getCredentialsCalls != 1 {
 		t.Fatalf("GetCredentialsByUserID() calls = %d, want 1", store.getCredentialsCalls)
 	}
-	if got := store.lastUserID; got != string(user.ID) {
+	if got := store.lastUserID; got != user.ID {
 		t.Fatalf("GetCredentialsByUserID() user ID = %q, want %q", got, user.ID)
 	}
 }
@@ -153,7 +154,7 @@ func TestFinishRegistrationReturnsErrChallengeExpiredWhenChallengeMissing(t *tes
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	cred, err := service.FinishRegistration(context.Background(), user, httptestNewRequest(t))
 	if !errors.Is(err, ErrChallengeExpired) {
@@ -167,16 +168,16 @@ func TestFinishRegistrationReturnsErrChallengeExpiredWhenChallengeMissing(t *tes
 func TestFinishLoginReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
 			{CredentialID: []byte("credential-1")},
 		},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
-	cred, err := service.FinishLogin(context.Background(), user, "missing-ceremony-id", httptestNewRequest(t))
+	cred, err := service.FinishLogin(context.Background(), user, missingID, httptestNewRequest(t))
 	if !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("FinishLogin() error = %v, want %v", err, ErrChallengeExpired)
 	}
@@ -191,15 +192,15 @@ func TestFinishLoginReturnsErrChallengeExpiredWhenChallengeMissing(t *testing.T)
 func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
 			{CredentialID: []byte("credential-1")},
 		},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 	user := &User{
-		ID:          []byte("user-1"),
+		ID:          testUser1,
 		Name:        "user@example.com",
 		DisplayName: "User One",
 	}
@@ -212,11 +213,11 @@ func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
 		t.Fatalf("BeginLogin() error = %v", err)
 	}
 
-	registerData, ok := challenges.saved["register:user-1"]
+	registerData, ok := challenges.saved["register:"+testUser1.String()]
 	if !ok || len(registerData) == 0 {
-		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "register:user-1", keysOf(challenges.saved))
+		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", "register:"+testUser1.String(), keysOf(challenges.saved))
 	}
-	loginKey := challengeKey("login", ceremonyID)
+	loginKey := challengeKey("login", ceremonyID.String())
 	loginData, ok := challenges.saved[loginKey]
 	if !ok || len(loginData) == 0 {
 		t.Fatalf("expected non-empty challenge saved under %q, saved keys = %v", loginKey, keysOf(challenges.saved))
@@ -229,14 +230,14 @@ func TestRegistrationAndLoginChallengesDoNotClobber(t *testing.T) {
 func TestFinishLoginWrapsUnderlyingError(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
 			{CredentialID: []byte("credential-1")},
 		},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	_, ceremonyID, err := service.BeginLogin(context.Background(), user)
 	if err != nil {
@@ -278,7 +279,7 @@ func TestFinishLoginRejectsClonedAuthenticator(t *testing.T) {
 		},
 	}
 
-	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
+	cred, err := service.finishLoginCredential(context.Background(), testUser1, waCred)
 	if !errors.Is(err, ErrCloneWarning) {
 		t.Fatalf("finishLoginCredential() error = %v, want %v", err, ErrCloneWarning)
 	}
@@ -304,11 +305,11 @@ func TestBeginDiscoverableLoginSavesChallengeUnderCeremonyID(t *testing.T) {
 	if assertion == nil {
 		t.Fatal("BeginDiscoverableLogin() returned nil assertion")
 	}
-	if ceremonyID == "" {
+	if ceremonyID == uuid.Nil() {
 		t.Fatal("BeginDiscoverableLogin() returned empty ceremony ID")
 	}
 
-	session := mustLoadSavedSession(t, challenges, challengeKey("discover", ceremonyID))
+	session := mustLoadSavedSession(t, challenges, challengeKey("discover", ceremonyID.String()))
 	if session.Challenge == "" {
 		t.Fatal("saved session data has empty challenge")
 	}
@@ -345,7 +346,7 @@ func TestFinishDiscoverableLoginWithoutChallengeReturnsErrChallengeExpired(t *te
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 
-	cred, err := service.FinishDiscoverableLogin(context.Background(), "missing-ceremony-id", httptestNewRequest(t))
+	cred, err := service.FinishDiscoverableLogin(context.Background(), missingID, httptestNewRequest(t))
 	if !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("FinishDiscoverableLogin() error = %v, want %v", err, ErrChallengeExpired)
 	}
@@ -436,11 +437,11 @@ func keysOf(m map[string][]byte) []string {
 type fakeStore struct {
 	mu sync.Mutex
 
-	credentialsByUser     map[string][]Credential
+	credentialsByUser     map[uuid.UUID][]Credential
 	credentialByID        map[string]*Credential
 	getCredentialsCalls   int
 	saveCredentialCalls   int
-	lastUserID            string
+	lastUserID            uuid.UUID
 	updateAfterLoginCalls int
 
 	// Injected failures. Each is returned by the corresponding method
@@ -454,10 +455,10 @@ type fakeStore struct {
 	updateAfterLoginErr  error
 
 	deleteCredentialCalls int
-	deletedCredentialID   string
+	deletedCredentialID   uuid.UUID
 
 	deleteCredentialsByUserIDCalls int
-	deletedUserID                  string
+	deletedUserID                  uuid.UUID
 }
 
 // seed registers cred in both of fakeStore's lookup maps, as a store would
@@ -474,7 +475,7 @@ func (f *fakeStore) seed(cred Credential) {
 // store records cred in both lookup maps. Callers must hold f.mu.
 func (f *fakeStore) store(cred Credential) {
 	if f.credentialsByUser == nil {
-		f.credentialsByUser = make(map[string][]Credential)
+		f.credentialsByUser = make(map[uuid.UUID][]Credential)
 	}
 	if f.credentialByID == nil {
 		f.credentialByID = make(map[string]*Credential)
@@ -500,7 +501,7 @@ func (f *fakeStore) SaveCredential(_ context.Context, cred *Credential) error {
 	return nil
 }
 
-func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID string) ([]Credential, error) {
+func (f *fakeStore) GetCredentialsByUserID(_ context.Context, userID uuid.UUID) ([]Credential, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -576,7 +577,7 @@ func (f *fakeStore) UpdateCredentialAfterLogin(_ context.Context, credentialID [
 // two concurrent calls for two different credentials belonging to the same
 // last-two-credential user cannot both observe count==2 before either
 // removal lands (see TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes).
-func (f *fakeStore) DeleteCredential(_ context.Context, userID, id string, allowLast bool) error {
+func (f *fakeStore) DeleteCredential(_ context.Context, userID, id uuid.UUID, allowLast bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -607,7 +608,7 @@ func (f *fakeStore) DeleteCredential(_ context.Context, userID, id string, allow
 // DeleteCredentialsByUserID removes every credential fakeStore has on record
 // for userID from both of its lookup maps, mirroring what a real store's
 // equivalent bulk delete would do.
-func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) error {
+func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -626,7 +627,7 @@ func (f *fakeStore) DeleteCredentialsByUserID(_ context.Context, userID string) 
 // RenameCredential looks id up in userID's own credential list only and sets
 // Name, or returns ErrPasskeyNotFound if userID has no credential with that
 // ID, matching the contract documented on Store.RenameCredential.
-func (f *fakeStore) RenameCredential(_ context.Context, userID, id, name string) error {
+func (f *fakeStore) RenameCredential(_ context.Context, userID, id uuid.UUID, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -750,13 +751,13 @@ func mustLoadSavedSession(t *testing.T, challenges *fakeChallengeStore, key stri
 // presence-only tap was therefore accepted, reducing a passwordless passkey
 // from two factors to bare possession.
 func TestUserVerificationIsRequiredByDefault(t *testing.T) {
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "c1", UserID: "user-1", CredentialID: []byte("cred-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte(testCred1.String())}},
 	}}
 	challenges := newFakeChallengeStore()
 	svc := newTestService(t, store, challenges)
 	ctx := context.Background()
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 
 	t.Run("registration", func(t *testing.T) {
 		creation, err := svc.BeginRegistration(ctx, user)
@@ -766,7 +767,7 @@ func TestUserVerificationIsRequiredByDefault(t *testing.T) {
 		if got := creation.Response.AuthenticatorSelection.UserVerification; got != protocol.VerificationRequired {
 			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
 		}
-		session := mustLoadSavedSession(t, challenges, "register:user-1")
+		session := mustLoadSavedSession(t, challenges, "register:"+testUser1.String())
 		if session.UserVerification != protocol.VerificationRequired {
 			t.Errorf("session records UV %q, want %q — go-webauthn only enforces the flag when it is %q",
 				session.UserVerification, protocol.VerificationRequired, protocol.VerificationRequired)
@@ -781,7 +782,7 @@ func TestUserVerificationIsRequiredByDefault(t *testing.T) {
 		if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
 			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
 		}
-		session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID))
+		session := mustLoadSavedSession(t, challenges, challengeKey("login", ceremonyID.String()))
 		if session.UserVerification != protocol.VerificationRequired {
 			t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationRequired)
 		}
@@ -795,7 +796,7 @@ func TestUserVerificationIsRequiredByDefault(t *testing.T) {
 		if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
 			t.Errorf("client options request UV %q, want %q", got, protocol.VerificationRequired)
 		}
-		session := mustLoadSavedSession(t, challenges, "discover:"+ceremonyID)
+		session := mustLoadSavedSession(t, challenges, "discover:"+ceremonyID.String())
 		if session.UserVerification != protocol.VerificationRequired {
 			t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationRequired)
 		}
@@ -815,11 +816,11 @@ func TestWithUserVerificationOverridesDefault(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	if _, err := svc.BeginRegistration(context.Background(), user); err != nil {
 		t.Fatalf("BeginRegistration: %v", err)
 	}
-	session := mustLoadSavedSession(t, challenges, "register:user-1")
+	session := mustLoadSavedSession(t, challenges, "register:"+testUser1.String())
 	if session.UserVerification != protocol.VerificationDiscouraged {
 		t.Errorf("session records UV %q, want %q", session.UserVerification, protocol.VerificationDiscouraged)
 	}
@@ -846,7 +847,7 @@ func TestResidentKeyIsRequiredByDefault(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	svc := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 
 	creation, err := svc.BeginRegistration(context.Background(), user)
 	if err != nil {
@@ -873,7 +874,7 @@ func TestBeginRegistrationRequestsCredPropsExtension(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 
 	creation, err := service.BeginRegistration(context.Background(), user)
 	if err != nil {
@@ -899,7 +900,7 @@ func TestWithResidentKeyOverridesDefault(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	creation, err := svc.BeginRegistration(context.Background(), user)
 	if err != nil {
 		t.Fatalf("BeginRegistration: %v", err)
@@ -938,7 +939,7 @@ func TestFinishRegistrationRejectsOversizedBody(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1"), Name: "user@example.com", DisplayName: "User One"}
+	user := &User{ID: testUser1, Name: "user@example.com", DisplayName: "User One"}
 
 	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
 		t.Fatalf("BeginRegistration() error = %v", err)
@@ -962,7 +963,7 @@ func TestFinishRegistrationRejectsOversizedBody(t *testing.T) {
 	// oversized body is rejected before the challenge is consumed, so a
 	// retry with a correctly sized request against the same ceremony can
 	// still succeed.
-	if _, ok := challenges.peekChallenge(challengeKey("register", string(user.ID))); !ok {
+	if _, ok := challenges.peekChallenge(challengeKey("register", user.ID.String())); !ok {
 		t.Fatal("challenge was consumed by a rejected oversized body, want it left intact")
 	}
 }
@@ -1010,7 +1011,7 @@ func TestFinishRegistrationCapsBodyReadRatherThanReadingItAll(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1"), Name: "user@example.com", DisplayName: "User One"}
+	user := &User{ID: testUser1, Name: "user@example.com", DisplayName: "User One"}
 
 	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
 		t.Fatalf("BeginRegistration() error = %v", err)
@@ -1048,7 +1049,7 @@ func TestFinishRegistrationResponseRejectsOversizedBody(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
 	cred, err := service.FinishRegistrationResponse(context.Background(), user, oversized)
@@ -1068,10 +1069,10 @@ func TestFinishLoginResponseRejectsOversizedBody(t *testing.T) {
 	store := &fakeStore{}
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
-	cred, err := service.FinishLoginResponse(context.Background(), user, "missing-ceremony-id", oversized)
+	cred, err := service.FinishLoginResponse(context.Background(), user, missingID, oversized)
 	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
 		t.Fatalf("FinishLoginResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
 	}
@@ -1091,7 +1092,7 @@ func TestFinishDiscoverableLoginResponseRejectsOversizedBody(t *testing.T) {
 	service := newTestService(t, store, challenges)
 
 	oversized := bytes.Repeat([]byte("a"), defaultMaxCeremonyBody+1)
-	cred, err := service.FinishDiscoverableLoginResponse(context.Background(), "missing-ceremony-id", oversized)
+	cred, err := service.FinishDiscoverableLoginResponse(context.Background(), missingID, oversized)
 	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
 		t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
 	}
@@ -1115,7 +1116,7 @@ func TestWithMaxCeremonyBodyOverridesDefault(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 	_, err = svc.FinishRegistrationResponse(context.Background(), user, []byte("12345678901")) // 11 bytes > 10
 	if !errors.Is(err, ErrCeremonyBodyTooLarge) {
 		t.Fatalf("FinishRegistrationResponse() error = %v, want errors.Is(err, ErrCeremonyBodyTooLarge)", err)
@@ -1221,7 +1222,7 @@ func seedRegistrationChallenge(t *testing.T, challenges *fakeChallengeStore, use
 	sessionData := webauthn.SessionData{
 		Challenge:        challenge,
 		RelyingPartyID:   rpID,
-		UserID:           user.ID,
+		UserID:           user.ID[:],
 		UserVerification: protocol.VerificationDiscouraged, // the spec vector's authenticator data has no UV flag set
 		CredParams:       webauthn.CredentialParametersDefault(),
 		// BeginRegistration records what it asked for, and go-webauthn v0.18
@@ -1233,7 +1234,7 @@ func seedRegistrationChallenge(t *testing.T, challenges *fakeChallengeStore, use
 	if err != nil {
 		t.Fatalf("marshal session data: %v", err)
 	}
-	if err := challenges.SaveChallenge(context.Background(), challengeKey("register", string(user.ID)), data); err != nil {
+	if err := challenges.SaveChallenge(context.Background(), challengeKey("register", user.ID.String()), data); err != nil {
 		t.Fatalf("SaveChallenge: %v", err)
 	}
 }
@@ -1259,7 +1260,7 @@ func TestFinishRegistrationRecordsDiscoverableWhenCredPropsSaysResidentKey(t *te
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1298,7 +1299,7 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsAbsent(t *testing.
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1340,7 +1341,7 @@ func TestFinishRegistrationRecordsNotDiscoverableWhenCredPropsRKFalse(t *testing
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1407,7 +1408,7 @@ func TestFinishRegistrationRejectsNonBoolCredPropsRK(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1447,7 +1448,7 @@ func TestFinishRegistrationRecordsBackupFlags(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1486,7 +1487,7 @@ func TestFinishRegistrationRecordsTransports(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1522,7 +1523,7 @@ func TestFinishRegistrationRecordsNoTransportsWhenOmitted(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.org", bytes.NewReader(body))
@@ -1586,7 +1587,7 @@ func TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{credentialByID: map[string]*Credential{
-		"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")},
+		"credential-1": {ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")},
 	}}
 	service := newTestService(t, store, newFakeChallengeStore())
 
@@ -1600,7 +1601,7 @@ func TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState(t *testing.T) {
 	}
 
 	before := time.Now()
-	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
+	cred, err := service.finishLoginCredential(context.Background(), testUser1, waCred)
 	if err != nil {
 		t.Fatalf("finishLoginCredential() error = %v", err)
 	}
@@ -1629,19 +1630,19 @@ func TestFinishLoginCredentialAdvancesLastUsedAtAndBackupState(t *testing.T) {
 func TestDeleteCredentialRejectsLastCredentialWithoutOverride(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 	}}
 	service := newTestService(t, store, newFakeChallengeStore())
 
-	err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{})
+	err := service.DeleteCredential(context.Background(), testUser1, testCred1, DeleteOptions{})
 	if !errors.Is(err, ErrLastCredential) {
 		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrLastCredential)
 	}
-	if store.deletedCredentialID != "" {
+	if store.deletedCredentialID != uuid.Nil() {
 		t.Errorf("deleted credential ID = %q, want none (rejected)", store.deletedCredentialID)
 	}
-	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	remaining, err := store.GetCredentialsByUserID(context.Background(), testUser1)
 	if err != nil {
 		t.Fatalf("GetCredentialsByUserID() error = %v", err)
 	}
@@ -1657,19 +1658,19 @@ func TestDeleteCredentialRejectsLastCredentialWithoutOverride(t *testing.T) {
 func TestDeleteCredentialAllowsLastCredentialWithOverride(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 	}}
 	service := newTestService(t, store, newFakeChallengeStore())
 
-	err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{AllowLast: true})
+	err := service.DeleteCredential(context.Background(), testUser1, testCred1, DeleteOptions{AllowLast: true})
 	if err != nil {
 		t.Fatalf("DeleteCredential() error = %v, want nil", err)
 	}
-	if store.deletedCredentialID != "cred-1" {
-		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
+	if store.deletedCredentialID != testCred1 {
+		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, testCred1)
 	}
-	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	remaining, err := store.GetCredentialsByUserID(context.Background(), testUser1)
 	if err != nil {
 		t.Fatalf("GetCredentialsByUserID() error = %v", err)
 	}
@@ -1683,25 +1684,25 @@ func TestDeleteCredentialAllowsLastCredentialWithOverride(t *testing.T) {
 func TestDeleteCredentialAllowsNonLastCredentialWithoutOverride(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
-			{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")},
-			{ID: "cred-2", UserID: "user-1", CredentialID: []byte("credential-2")},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
+			{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")},
+			{ID: testCred2, UserID: testUser1, CredentialID: []byte("credential-2")},
 		},
 	}}
 	service := newTestService(t, store, newFakeChallengeStore())
 
-	if err := service.DeleteCredential(context.Background(), "user-1", "cred-1", DeleteOptions{}); err != nil {
+	if err := service.DeleteCredential(context.Background(), testUser1, testCred1, DeleteOptions{}); err != nil {
 		t.Fatalf("DeleteCredential() error = %v, want nil", err)
 	}
-	if store.deletedCredentialID != "cred-1" {
-		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, "cred-1")
+	if store.deletedCredentialID != testCred1 {
+		t.Errorf("deleted credential ID = %q, want %q", store.deletedCredentialID, testCred1)
 	}
-	remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+	remaining, err := store.GetCredentialsByUserID(context.Background(), testUser1)
 	if err != nil {
 		t.Fatalf("GetCredentialsByUserID() error = %v", err)
 	}
-	if len(remaining) != 1 || remaining[0].ID != "cred-2" {
+	if len(remaining) != 1 || remaining[0].ID != testCred2 {
 		t.Fatalf("user-1 credentials = %v, want only cred-2 remaining", remaining)
 	}
 }
@@ -1713,16 +1714,16 @@ func TestDeleteCredentialAllowsNonLastCredentialWithoutOverride(t *testing.T) {
 func TestDeleteCredentialReturnsErrPasskeyNotFoundForUnknownCredential(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 	}}
 	service := newTestService(t, store, newFakeChallengeStore())
 
-	err := service.DeleteCredential(context.Background(), "user-1", "does-not-exist", DeleteOptions{AllowLast: true})
+	err := service.DeleteCredential(context.Background(), testUser1, missingID, DeleteOptions{AllowLast: true})
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("DeleteCredential() error = %v, want %v", err, ErrPasskeyNotFound)
 	}
-	if store.deletedCredentialID != "" {
+	if store.deletedCredentialID != uuid.Nil() {
 		t.Errorf("deleted credential ID = %q, want none", store.deletedCredentialID)
 	}
 }
@@ -1749,16 +1750,16 @@ func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
 	const iterations = 200
 
 	for i := 0; i < iterations; i++ {
-		store := &fakeStore{credentialsByUser: map[string][]Credential{
-			"user-1": {
-				{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")},
-				{ID: "cred-2", UserID: "user-1", CredentialID: []byte("credential-2")},
+		store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+			testUser1: {
+				{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")},
+				{ID: testCred2, UserID: testUser1, CredentialID: []byte("credential-2")},
 			},
 		}}
 		service := newTestService(t, store, newFakeChallengeStore())
 
 		const racers = 2
-		ids := [racers]string{"cred-1", "cred-2"}
+		ids := [racers]uuid.UUID{testCred1, testCred2}
 		start := make(chan struct{})
 		errs := make([]error, racers)
 		var wg sync.WaitGroup
@@ -1768,7 +1769,7 @@ func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				errs[g] = service.DeleteCredential(context.Background(), "user-1", ids[g], DeleteOptions{})
+				errs[g] = service.DeleteCredential(context.Background(), testUser1, ids[g], DeleteOptions{})
 			}()
 		}
 		close(start)
@@ -1790,7 +1791,7 @@ func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
 				i, succeeded, rejected, racers)
 		}
 
-		remaining, err := store.GetCredentialsByUserID(context.Background(), "user-1")
+		remaining, err := store.GetCredentialsByUserID(context.Background(), testUser1)
 		if err != nil {
 			t.Fatalf("iteration %d: GetCredentialsByUserID() error = %v", i, err)
 		}
@@ -1808,27 +1809,27 @@ func TestDeleteCredentialGuardIsAtomicUnderConcurrentDeletes(t *testing.T) {
 func TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 	}}
 
-	if err := store.RenameCredential(context.Background(), "user-1", "cred-1", "My YubiKey"); err != nil {
+	if err := store.RenameCredential(context.Background(), testUser1, testCred1, "My YubiKey"); err != nil {
 		t.Fatalf("RenameCredential() error = %v, want nil", err)
 	}
-	if got := store.credentialsByUser["user-1"][0].Name; got != "My YubiKey" {
+	if got := store.credentialsByUser[testUser1][0].Name; got != "My YubiKey" {
 		t.Errorf("Name = %q, want %q", got, "My YubiKey")
 	}
 
-	err := store.RenameCredential(context.Background(), "user-1", "missing-id", "x")
+	err := store.RenameCredential(context.Background(), testUser1, missingID, "x")
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("RenameCredential() error = %v, want %v", err, ErrPasskeyNotFound)
 	}
 
-	err = store.RenameCredential(context.Background(), "user-2", "cred-1", "Owned")
+	err = store.RenameCredential(context.Background(), testUser2, testCred1, "Owned")
 	if !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("cross-user RenameCredential() error = %v, want %v", err, ErrPasskeyNotFound)
 	}
-	if got := store.credentialsByUser["user-1"][0].Name; got != "My YubiKey" {
+	if got := store.credentialsByUser[testUser1][0].Name; got != "My YubiKey" {
 		t.Errorf("Name = %q after another user's rename, want the unchanged %q", got, "My YubiKey")
 	}
 }
@@ -1839,21 +1840,21 @@ func TestFakeStoreRenameCredentialUpdatesNameOrReturnsErrPasskeyNotFound(t *test
 func TestFakeStoreDeleteCredentialsByUserIDRemovesOnlyThatUsersCredentials(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {
-			{ID: "cred-1", CredentialID: []byte("credential-1")},
-			{ID: "cred-2", CredentialID: []byte("credential-2")},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {
+			{ID: testCred1, CredentialID: []byte("credential-1")},
+			{ID: testCred2, CredentialID: []byte("credential-2")},
 		},
-		"user-2": {{ID: "cred-3", CredentialID: []byte("credential-3")}},
+		testUser2: {{ID: testCred3, CredentialID: []byte("credential-3")}},
 	}}
 
-	if err := store.DeleteCredentialsByUserID(context.Background(), "user-1"); err != nil {
+	if err := store.DeleteCredentialsByUserID(context.Background(), testUser1); err != nil {
 		t.Fatalf("DeleteCredentialsByUserID() error = %v, want nil", err)
 	}
-	if got := store.credentialsByUser["user-1"]; len(got) != 0 {
+	if got := store.credentialsByUser[testUser1]; len(got) != 0 {
 		t.Errorf("user-1 credentials = %v, want none", got)
 	}
-	if got := store.credentialsByUser["user-2"]; len(got) != 1 {
+	if got := store.credentialsByUser[testUser2]; len(got) != 1 {
 		t.Errorf("user-2 credentials = %v, want 1 untouched", got)
 	}
 }
@@ -1878,7 +1879,7 @@ func TestBeginRegistrationPropagatesCredentialLookupFailure(t *testing.T) {
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 
-	creation, err := service.BeginRegistration(context.Background(), &User{ID: []byte("user-1")})
+	creation, err := service.BeginRegistration(context.Background(), &User{ID: testUser1})
 	if !errors.Is(err, errStoreFailure) {
 		t.Fatalf("BeginRegistration() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
@@ -1902,14 +1903,14 @@ func TestBeginLoginPropagatesCredentialLookupFailure(t *testing.T) {
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 
-	assertion, ceremonyID, err := service.BeginLogin(context.Background(), &User{ID: []byte("user-1")})
+	assertion, ceremonyID, err := service.BeginLogin(context.Background(), &User{ID: testUser1})
 	if !errors.Is(err, errStoreFailure) {
 		t.Fatalf("BeginLogin() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
 	if errors.Is(err, ErrPasskeyNotFound) {
 		t.Error("BeginLogin() reported ErrPasskeyNotFound for a store failure — a broken store must not look like a user without a passkey")
 	}
-	if assertion != nil || ceremonyID != "" {
+	if assertion != nil || ceremonyID != uuid.Nil() {
 		t.Fatalf("BeginLogin() = (%#v, %q), want (nil, \"\")", assertion, ceremonyID)
 	}
 }
@@ -1923,7 +1924,7 @@ func TestFinishLoginResponsePropagatesCredentialLookupFailure(t *testing.T) {
 	challenges := newFakeChallengeStore()
 	service := newTestService(t, store, challenges)
 
-	_, err := service.FinishLoginResponse(context.Background(), &User{ID: []byte("user-1")}, "ceremony-1", []byte("{}"))
+	_, err := service.FinishLoginResponse(context.Background(), &User{ID: testUser1}, missingID, []byte("{}"))
 	if !errors.Is(err, errStoreFailure) {
 		t.Fatalf("FinishLoginResponse() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
@@ -1940,12 +1941,12 @@ func TestFinishLoginResponsePropagatesCredentialLookupFailure(t *testing.T) {
 func TestBeginCeremoniesPropagateChallengeSaveFailure(t *testing.T) {
 	t.Parallel()
 
-	user := &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 
 	newService := func(t *testing.T) *Service {
 		t.Helper()
-		store := &fakeStore{credentialsByUser: map[string][]Credential{
-			"user-1": {{ID: "cred-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+			testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 		}}
 		return newTestService(t, store, &fakeChallengeStore{saved: map[string][]byte{}, saveErr: errStoreFailure})
 	}
@@ -1992,7 +1993,7 @@ func TestFinishRegistrationResponsePropagatesSaveFailure(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	user := &User{ID: []byte("test-user-id"), Name: "alice", DisplayName: "Alice"}
+	user := &User{ID: testUser1, Name: "alice", DisplayName: "Alice"}
 	seedRegistrationChallenge(t, challenges, user, challenge, "example.org")
 
 	cred, err := service.FinishRegistrationResponse(context.Background(), user, body)
@@ -2014,14 +2015,14 @@ func TestFinishLoginCredentialPropagatesUpdateFailure(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{
-		credentialByID:      map[string]*Credential{"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		credentialByID:      map[string]*Credential{"credential-1": {ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 		updateAfterLoginErr: errStoreFailure,
 	}
 	service := newTestService(t, store, newFakeChallengeStore())
 
 	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
 
-	cred, err := service.finishLoginCredential(context.Background(), "user-1", waCred)
+	cred, err := service.finishLoginCredential(context.Background(), testUser1, waCred)
 	if !errors.Is(err, errStoreFailure) {
 		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
@@ -2038,14 +2039,14 @@ func TestFinishLoginCredentialPropagatesReloadFailure(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{
-		credentialByID:       map[string]*Credential{"credential-1": {ID: "c1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+		credentialByID:       map[string]*Credential{"credential-1": {ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 		getCredentialByIDErr: errStoreFailure,
 	}
 	service := newTestService(t, store, newFakeChallengeStore())
 
 	waCred := &webauthn.Credential{ID: []byte("credential-1"), Authenticator: webauthn.Authenticator{SignCount: 7}}
 
-	if _, err := service.finishLoginCredential(context.Background(), "user-1", waCred); !errors.Is(err, errStoreFailure) {
+	if _, err := service.finishLoginCredential(context.Background(), testUser1, waCred); !errors.Is(err, errStoreFailure) {
 		t.Fatalf("finishLoginCredential() error = %v, want errors.Is(err, errStoreFailure)", err)
 	}
 }
@@ -2060,7 +2061,7 @@ func TestFinishCeremoniesRejectCorruptSessionData(t *testing.T) {
 	t.Parallel()
 
 	const corrupt = "this is not session data"
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 	ctx := context.Background()
 
 	t.Run("registration", func(t *testing.T) {
@@ -2068,7 +2069,7 @@ func TestFinishCeremoniesRejectCorruptSessionData(t *testing.T) {
 
 		challenges := newFakeChallengeStore()
 		service := newTestService(t, &fakeStore{}, challenges)
-		if err := challenges.SaveChallenge(ctx, challengeKey("register", string(user.ID)), []byte(corrupt)); err != nil {
+		if err := challenges.SaveChallenge(ctx, challengeKey("register", user.ID.String()), []byte(corrupt)); err != nil {
 			t.Fatalf("SaveChallenge: %v", err)
 		}
 
@@ -2083,11 +2084,11 @@ func TestFinishCeremoniesRejectCorruptSessionData(t *testing.T) {
 
 		challenges := newFakeChallengeStore()
 		service := newTestService(t, &fakeStore{}, challenges)
-		if err := challenges.SaveChallenge(ctx, challengeKey("login", "ceremony-1"), []byte(corrupt)); err != nil {
+		if err := challenges.SaveChallenge(ctx, challengeKey("login", missingID.String()), []byte(corrupt)); err != nil {
 			t.Fatalf("SaveChallenge: %v", err)
 		}
 
-		_, err := service.FinishLoginResponse(ctx, user, "ceremony-1", []byte("{}"))
+		_, err := service.FinishLoginResponse(ctx, user, missingID, []byte("{}"))
 		if err == nil || !strings.Contains(err.Error(), "unmarshaling session") {
 			t.Fatalf("FinishLoginResponse() error = %v, want it to name the session unmarshal step", err)
 		}
@@ -2098,11 +2099,11 @@ func TestFinishCeremoniesRejectCorruptSessionData(t *testing.T) {
 
 		challenges := newFakeChallengeStore()
 		service := newTestService(t, &fakeStore{}, challenges)
-		if err := challenges.SaveChallenge(ctx, challengeKey("discover", "ceremony-1"), []byte(corrupt)); err != nil {
+		if err := challenges.SaveChallenge(ctx, challengeKey("discover", missingID.String()), []byte(corrupt)); err != nil {
 			t.Fatalf("SaveChallenge: %v", err)
 		}
 
-		_, err := service.FinishDiscoverableLoginResponse(ctx, "ceremony-1", []byte("{}"))
+		_, err := service.FinishDiscoverableLoginResponse(ctx, missingID, []byte("{}"))
 		if err == nil || !strings.Contains(err.Error(), "unmarshaling session") {
 			t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want it to name the session unmarshal step", err)
 		}
@@ -2142,7 +2143,7 @@ func (failingBodyReader) Read([]byte) (int, error) { return 0, errStoreFailure }
 func TestFinishCeremoniesReportBodyReadFailures(t *testing.T) {
 	t.Parallel()
 
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 	ctx := context.Background()
 
 	newFailingRequest := func(t *testing.T) *http.Request {
@@ -2176,13 +2177,13 @@ func TestFinishCeremoniesReportBodyReadFailures(t *testing.T) {
 
 	t.Run("login", func(t *testing.T) {
 		t.Parallel()
-		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishLogin(ctx, user, "ceremony-1", newFailingRequest(t))
+		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishLogin(ctx, user, missingID, newFailingRequest(t))
 		assertReadFailure(t, err)
 	})
 
 	t.Run("discoverable login", func(t *testing.T) {
 		t.Parallel()
-		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishDiscoverableLogin(ctx, "ceremony-1", newFailingRequest(t))
+		_, err := newTestService(t, &fakeStore{}, newFakeChallengeStore()).FinishDiscoverableLogin(ctx, missingID, newFailingRequest(t))
 		assertReadFailure(t, err)
 	})
 }
@@ -2207,7 +2208,7 @@ func TestNewServiceRejectsIncompleteConfiguration(t *testing.T) {
 		RPID:          "example.com",
 		RPOrigins:     []string{"https://example.com"},
 	}
-	newStore := func() Store { return &fakeStore{credentialsByUser: map[string][]Credential{}} }
+	newStore := func() Store { return &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{}} }
 
 	tests := []struct {
 		name       string

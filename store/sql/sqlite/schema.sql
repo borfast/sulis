@@ -20,8 +20,8 @@
 -- is chronological order, which is what the expiry sweeps below compare on,
 -- and nine fractional digits round-trip a time.Time without losing
 -- precision. Booleans are INTEGER 0/1. Metadata and transports are JSON text.
--- The ID columns of users, sessions, tokens and TOTP are 16-byte BLOBs, enforced by
--- a CHECK on length.
+-- The ID columns of users, sessions, tokens, TOTP and passkey credentials are 16-byte BLOBs,
+-- enforced by a CHECK on length.
 --
 -- # No foreign keys
 --
@@ -116,8 +116,8 @@ CREATE INDEX IF NOT EXISTS tokens_expires_at_idx ON tokens (expires_at);
 CREATE TABLE IF NOT EXISTS passkey_credentials (
     -- The store's own opaque ID, which is what DeleteCredential and
     -- RenameCredential address a credential by.
-    id               TEXT    PRIMARY KEY,
-    user_id          TEXT    NOT NULL,
+    id               BLOB    PRIMARY KEY CHECK (length(id) = 16),
+    user_id          BLOB    NOT NULL CHECK (length(user_id) = 16),
     -- The raw WebAuthn credential ID, which is what GetCredentialByID and
     -- UpdateCredentialAfterLogin address it by.
     credential_id    BLOB    NOT NULL UNIQUE,

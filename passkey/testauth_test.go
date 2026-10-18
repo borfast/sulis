@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
@@ -341,9 +343,9 @@ func (a *testAuthenticator) marshalBody(body map[string]any) []byte {
 // count. BackupEligible/BackupState are derived from the flags because
 // go-webauthn re-checks them against every later assertion (see
 // toWebAuthnCreds).
-func (a *testAuthenticator) storedCredential(userID string, flags protocol.AuthenticatorFlags, signCount uint32) Credential {
+func (a *testAuthenticator) storedCredential(userID uuid.UUID, flags protocol.AuthenticatorFlags, signCount uint32) Credential {
 	return Credential{
-		ID:              "cred-" + userID,
+		ID:              uuid.NewV7(),
 		UserID:          userID,
 		CredentialID:    a.credentialID,
 		PublicKey:       a.coseKey(),
@@ -399,7 +401,7 @@ func newForgingFixtureForRP(t *testing.T, rpID, origin string, opts ...Option) *
 		store:      store,
 		challenges: challenges,
 		service:    service,
-		user:       &User{ID: []byte("user-1"), Name: "alice", DisplayName: "Alice"},
+		user:       &User{ID: testUser1, Name: "alice", DisplayName: "Alice"},
 	}
 }
 
@@ -408,7 +410,7 @@ func newForgingFixtureForRP(t *testing.T, rpID, origin string, opts ...Option) *
 func (f *forgingFixture) seedCredential(flags protocol.AuthenticatorFlags, signCount uint32) Credential {
 	f.t.Helper()
 
-	cred := f.auth.storedCredential(string(f.user.ID), flags, signCount)
+	cred := f.auth.storedCredential(f.user.ID, flags, signCount)
 	f.store.seed(cred)
 	return cred
 }
@@ -437,7 +439,7 @@ func (f *forgingFixture) assertionRequest(challenge string) assertionRequest {
 	}
 }
 
-func (f *forgingFixture) beginLogin() (challenge, ceremonyID string) {
+func (f *forgingFixture) beginLogin() (challenge string, ceremonyID uuid.UUID) {
 	f.t.Helper()
 
 	assertion, ceremonyID, err := f.service.BeginLogin(f.t.Context(), f.user)
@@ -447,7 +449,7 @@ func (f *forgingFixture) beginLogin() (challenge, ceremonyID string) {
 	return assertion.Response.Challenge.String(), ceremonyID
 }
 
-func (f *forgingFixture) beginDiscoverableLogin() (challenge, ceremonyID string) {
+func (f *forgingFixture) beginDiscoverableLogin() (challenge string, ceremonyID uuid.UUID) {
 	f.t.Helper()
 
 	assertion, ceremonyID, err := f.service.BeginDiscoverableLogin(f.t.Context())
@@ -608,7 +610,7 @@ func TestFinishDiscoverableLoginRejectsAssertionWithoutUserVerification(t *testi
 		challenge, ceremonyID := f.beginDiscoverableLogin()
 		req := f.assertionRequest(challenge)
 		req.flags = presenceOnly
-		req.userHandle = f.user.ID
+		req.userHandle = f.user.ID[:]
 
 		_, err := f.service.FinishDiscoverableLoginResponse(t.Context(), ceremonyID, f.auth.forgeAssertion(req))
 		if !errors.Is(err, ErrChallengeFailed) {
@@ -628,7 +630,7 @@ func TestFinishDiscoverableLoginRejectsAssertionWithoutUserVerification(t *testi
 		challenge, ceremonyID := f.beginDiscoverableLogin()
 		req := f.assertionRequest(challenge)
 		req.flags = presenceOnly
-		req.userHandle = f.user.ID
+		req.userHandle = f.user.ID[:]
 
 		if _, err := f.service.FinishDiscoverableLoginResponse(t.Context(), ceremonyID, f.auth.forgeAssertion(req)); err != nil {
 			t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want nil — the identical assertion must pass when user verification is not required", err)
@@ -1009,13 +1011,13 @@ func TestFinishDiscoverableLoginSucceeds(t *testing.T) {
 
 	challenge, ceremonyID := f.beginDiscoverableLogin()
 	req := f.assertionRequest(challenge)
-	req.userHandle = f.user.ID
+	req.userHandle = f.user.ID[:]
 
 	cred, err := f.service.FinishDiscoverableLoginResponse(t.Context(), ceremonyID, f.auth.forgeAssertion(req))
 	if err != nil {
 		t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want nil", err)
 	}
-	if cred.UserID != string(f.user.ID) {
+	if cred.UserID != f.user.ID {
 		t.Errorf("UserID = %q, want %q", cred.UserID, f.user.ID)
 	}
 	if cred.LastUsedAt == nil {
@@ -1038,7 +1040,7 @@ func TestFinishDiscoverableLoginRejectsCredentialOwnedByAnotherUser(t *testing.T
 
 	challenge, ceremonyID := f.beginDiscoverableLogin()
 	req := f.assertionRequest(challenge)
-	req.userHandle = []byte("user-2") // the credential belongs to user-1
+	req.userHandle = testUser2[:] // the credential belongs to user-1
 
 	cred, err := f.service.FinishDiscoverableLoginResponse(t.Context(), ceremonyID, f.auth.forgeAssertion(req))
 	if !errors.Is(err, ErrChallengeFailed) {
@@ -1065,7 +1067,7 @@ func TestFinishDiscoverableLoginRejectsUnknownCredential(t *testing.T) {
 
 	challenge, ceremonyID := f.beginDiscoverableLogin()
 	req := f.assertionRequest(challenge)
-	req.userHandle = f.user.ID
+	req.userHandle = f.user.ID[:]
 
 	_, err := f.service.FinishDiscoverableLoginResponse(t.Context(), ceremonyID, f.auth.forgeAssertion(req))
 	if !errors.Is(err, ErrChallengeFailed) {
@@ -1116,7 +1118,7 @@ func TestFinishDiscoverableLoginRejectsReplayOfAConsumedChallenge(t *testing.T) 
 
 	challenge, ceremonyID := f.beginDiscoverableLogin()
 	req := f.assertionRequest(challenge)
-	req.userHandle = f.user.ID
+	req.userHandle = f.user.ID[:]
 	body := f.auth.forgeAssertion(req)
 
 	if _, err := f.service.FinishDiscoverableLoginResponse(ctx, ceremonyID, body); err != nil {
@@ -1340,7 +1342,7 @@ func TestFinishLoginRejectsMalformedCBORPublicKey(t *testing.T) {
 	t.Parallel()
 
 	f := newForgingFixture(t)
-	cred := f.auth.storedCredential(string(f.user.ID), 0, 0)
+	cred := f.auth.storedCredential(f.user.ID, 0, 0)
 	cred.PublicKey = []byte{0xff, 0xff, 0xff, 0xff}
 	f.store.seed(cred)
 
@@ -1465,5 +1467,82 @@ func TestFinishRegistrationConsumesChallengeExactlyOnce(t *testing.T) {
 		if f.store.saveCredentialCalls != 1 {
 			t.Fatalf("iteration %d: SaveCredential() calls = %d, want 1 (one ceremony must enroll exactly one credential)", i, f.store.saveCredentialCalls)
 		}
+	}
+}
+
+// Fixed IDs for the tests below: two users, two credential rows and an ID
+// that names nothing.
+var (
+	testUser1 = uuid.NewV7()
+	testUser2 = uuid.NewV7()
+	testCred1 = uuid.NewV7()
+	testCred2 = uuid.NewV7()
+	testCred3 = uuid.NewV7()
+	missingID = uuid.NewV7()
+)
+
+func TestWebAuthnIDIsTheSixteenUUIDBytes(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.NewV7()
+	got := (&webauthnUser{user: &User{ID: id}}).WebAuthnID()
+	if !bytes.Equal(got, id[:]) || len(got) != 16 {
+		t.Fatalf("WebAuthnID() = %x, want the 16 bytes %x", got, id[:])
+	}
+}
+
+func TestFinishDiscoverableLoginRejectsTextUserHandle(t *testing.T) {
+	t.Parallel()
+
+	f := newForgingFixture(t)
+	ctx := t.Context()
+
+	creation, err := f.service.BeginRegistration(ctx, f.user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+	req := f.registrationRequest(creation.Response.Challenge.String())
+	if _, err := f.service.FinishRegistrationResponse(ctx, f.user, f.auth.forgeRegistration(req)); err != nil {
+		t.Fatalf("FinishRegistrationResponse() error = %v", err)
+	}
+
+	challenge, ceremonyID := f.beginDiscoverableLogin()
+	areq := f.assertionRequest(challenge)
+	areq.userHandle = []byte(f.user.ID.String()) // 36 bytes of text, not the 16 raw bytes
+
+	cred, err := f.service.FinishDiscoverableLoginResponse(ctx, ceremonyID, f.auth.forgeAssertion(areq))
+	if !errors.Is(err, ErrChallengeFailed) {
+		t.Fatalf("FinishDiscoverableLoginResponse() error = %v, want errors.Is(err, ErrChallengeFailed)", err)
+	}
+	if cred != nil {
+		t.Fatalf("FinishDiscoverableLoginResponse() credential = %#v, want nil", cred)
+	}
+}
+
+func TestPasskeyIDsAreVersion7(t *testing.T) {
+	t.Parallel()
+
+	f := newForgingFixture(t)
+	ctx := t.Context()
+
+	creation, err := f.service.BeginRegistration(ctx, f.user)
+	if err != nil {
+		t.Fatalf("BeginRegistration() error = %v", err)
+	}
+	req := f.registrationRequest(creation.Response.Challenge.String())
+	registered, err := f.service.FinishRegistrationResponse(ctx, f.user, f.auth.forgeRegistration(req))
+	if err != nil {
+		t.Fatalf("FinishRegistrationResponse() error = %v", err)
+	}
+	if registered.ID[6]>>4 != 7 {
+		t.Errorf("credential ID %s is not version 7", registered.ID)
+	}
+
+	_, ceremonyID, err := f.service.BeginLogin(ctx, f.user)
+	if err != nil {
+		t.Fatalf("BeginLogin() error = %v", err)
+	}
+	if ceremonyID[6]>>4 != 7 {
+		t.Errorf("ceremony ID %s is not version 7", ceremonyID)
 	}
 }

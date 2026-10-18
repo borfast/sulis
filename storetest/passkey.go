@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/borfast/sulis/passkey"
 
@@ -37,7 +38,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("SaveCredentialRoundTrips", func(t *testing.T) {
 		store := factory()
-		cred := newCredential(uniqueID("user"))
+		cred := newCredential(uuid.NewV7())
 		cred.Name = "Work laptop"
 		cred.SignCount = 7
 		cred.BackupEligible = true
@@ -66,9 +67,9 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("GetCredentialsByUserIDReturnsOnlyThatUsersCredentials", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		mine := []*passkey.Credential{newCredential(userID), newCredential(userID)}
-		theirs := newCredential(uniqueID("user"))
+		theirs := newCredential(uuid.NewV7())
 		for _, cred := range append(append([]*passkey.Credential{}, mine...), theirs) {
 			if err := store.SaveCredential(ctx, cred); err != nil {
 				t.Fatalf("SaveCredential: %v", err)
@@ -91,7 +92,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("GetCredentialsByUserIDForAnUnknownUserReturnsNothing", func(t *testing.T) {
 		store := factory()
-		got, err := store.GetCredentialsByUserID(ctx, uniqueID("absent"))
+		got, err := store.GetCredentialsByUserID(ctx, uuid.NewV7())
 		if err != nil {
 			t.Fatalf("GetCredentialsByUserID for an unknown user: %v — no credentials is not an error", err)
 		}
@@ -113,7 +114,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("UpdateCredentialAfterLoginPersistsAllThreeFields", func(t *testing.T) {
 		store := factory()
-		cred := newCredential(uniqueID("user"))
+		cred := newCredential(uuid.NewV7())
 		cred.SignCount = 3
 		cred.BackupEligible = true
 		cred.BackupState = false
@@ -147,7 +148,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("DeleteCredentialRemovesANonLastCredential", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		first, second := newCredential(userID), newCredential(userID)
 		for _, cred := range []*passkey.Credential{first, second} {
 			if err := store.SaveCredential(ctx, cred); err != nil {
@@ -169,7 +170,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("DeleteCredentialRefusesTheLastCredentialWithoutAllowLast", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		only := newCredential(userID)
 		if err := store.SaveCredential(ctx, only); err != nil {
 			t.Fatalf("SaveCredential: %v", err)
@@ -189,7 +190,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("DeleteCredentialRemovesTheLastCredentialWithAllowLast", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		only := newCredential(userID)
 		if err := store.SaveCredential(ctx, only); err != nil {
 			t.Fatalf("SaveCredential: %v", err)
@@ -209,9 +210,9 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("DeleteCredentialForAnotherUserReturnsErrPasskeyNotFound", func(t *testing.T) {
 		store := factory()
-		ownerID := uniqueID("owner")
+		ownerID := uuid.NewV7()
 		owned := []*passkey.Credential{newCredential(ownerID), newCredential(ownerID)}
-		attackerID := uniqueID("attacker")
+		attackerID := uuid.NewV7()
 		attackerCreds := []*passkey.Credential{newCredential(attackerID), newCredential(attackerID)}
 		for _, cred := range append(append([]*passkey.Credential{}, owned...), attackerCreds...) {
 			if err := store.SaveCredential(ctx, cred); err != nil {
@@ -235,20 +236,20 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("DeleteCredentialUnknownIDReturnsErrPasskeyNotFound", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
+		userID := uuid.NewV7()
 		cred := newCredential(userID)
 		if err := store.SaveCredential(ctx, cred); err != nil {
 			t.Fatalf("SaveCredential: %v", err)
 		}
-		if err := store.DeleteCredential(ctx, userID, uniqueID("absent"), true); !errors.Is(err, passkey.ErrPasskeyNotFound) {
+		if err := store.DeleteCredential(ctx, userID, uuid.NewV7(), true); !errors.Is(err, passkey.ErrPasskeyNotFound) {
 			t.Fatalf("DeleteCredential for an unknown id error = %v, want ErrPasskeyNotFound", err)
 		}
 	})
 
 	t.Run("DeleteCredentialsByUserIDRemovesOnlyThatUsersCredentials", func(t *testing.T) {
 		store := factory()
-		userID := uniqueID("user")
-		otherID := uniqueID("user")
+		userID := uuid.NewV7()
+		otherID := uuid.NewV7()
 		mine := []*passkey.Credential{newCredential(userID), newCredential(userID)}
 		theirs := newCredential(otherID)
 		for _, cred := range append(append([]*passkey.Credential{}, mine...), theirs) {
@@ -283,7 +284,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("RenameCredentialSetsName", func(t *testing.T) {
 		store := factory()
-		cred := newCredential(uniqueID("user"))
+		cred := newCredential(uuid.NewV7())
 		if err := store.SaveCredential(ctx, cred); err != nil {
 			t.Fatalf("SaveCredential: %v", err)
 		}
@@ -309,14 +310,14 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 	t.Run("RenameCredentialUnknownIDReturnsErrPasskeyNotFound", func(t *testing.T) {
 		store := factory()
-		if err := store.RenameCredential(ctx, uniqueID("user"), uniqueID("absent"), "Nowhere"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
+		if err := store.RenameCredential(ctx, uuid.NewV7(), uuid.NewV7(), "Nowhere"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
 			t.Fatalf("RenameCredential for an unknown id error = %v, want ErrPasskeyNotFound", err)
 		}
 	})
 
 	t.Run("RenameCredentialForAnotherUserReturnsErrPasskeyNotFound", func(t *testing.T) {
 		store := factory()
-		owned := newCredential(uniqueID("owner"))
+		owned := newCredential(uuid.NewV7())
 		owned.Name = "Work laptop"
 		if err := store.SaveCredential(ctx, owned); err != nil {
 			t.Fatalf("SaveCredential: %v", err)
@@ -324,7 +325,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 		// A store that matches on id alone lets any signed-in user rename
 		// any other user's passkey by guessing or harvesting its id.
-		if err := store.RenameCredential(ctx, uniqueID("attacker"), owned.ID, "Owned"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
+		if err := store.RenameCredential(ctx, uuid.NewV7(), owned.ID, "Owned"); !errors.Is(err, passkey.ErrPasskeyNotFound) {
 			t.Fatalf("cross-user RenameCredential error = %v, want ErrPasskeyNotFound", err)
 		}
 		got, err := store.GetCredentialByID(ctx, owned.CredentialID)
@@ -341,7 +342,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			creds := []*passkey.Credential{newCredential(userID), newCredential(userID)}
 			for _, cred := range creds {
 				if err := store.SaveCredential(ctx, cred); err != nil {
@@ -375,7 +376,7 @@ func RunPasskeyStore(t *testing.T, factory func() passkey.Store) {
 
 		for i := range raceIterations() {
 			store := factory()
-			userID := uniqueID("user")
+			userID := uuid.NewV7()
 			target := newCredential(userID)
 			spare := newCredential(userID)
 			for _, cred := range []*passkey.Credential{target, spare} {
@@ -456,9 +457,9 @@ func RunPasskeyChallengeStore(t *testing.T, factory func() passkey.ChallengeStor
 		store := factory()
 		// Keys are scoped by ceremony, not by user, precisely so concurrent
 		// ceremonies for one user cannot clobber each other.
-		userID := uniqueID("user")
-		registerKey := "register:" + userID
-		loginKey := "login:" + userID
+		userID := uuid.NewV7()
+		registerKey := "register:" + userID.String()
+		loginKey := "login:" + userID.String()
 		if err := store.SaveChallenge(ctx, registerKey, []byte("registration")); err != nil {
 			t.Fatalf("SaveChallenge: %v", err)
 		}
@@ -561,15 +562,16 @@ func RunPasskeyChallengeStore(t *testing.T, factory func() passkey.ChallengeStor
 }
 
 // newCredential builds a credential for userID with unique identifiers.
-func newCredential(userID string) *passkey.Credential {
-	id := uniqueID("cred")
+func newCredential(userID uuid.UUID) *passkey.Credential {
+	id := uuid.NewV7()
+	text := id.String()
 	return &passkey.Credential{
 		ID:              id,
 		UserID:          userID,
-		CredentialID:    []byte("raw-" + id),
-		PublicKey:       []byte("pubkey-" + id),
+		CredentialID:    []byte("raw-" + text),
+		PublicKey:       []byte("pubkey-" + text),
 		AttestationType: "none",
-		AAGUID:          []byte("aaguid-" + id),
+		AAGUID:          []byte("aaguid-" + text),
 		CreatedAt:       time.Now().UTC().Truncate(time.Second),
 	}
 }

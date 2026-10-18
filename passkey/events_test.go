@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"uuid"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -64,12 +65,12 @@ func TestPasskeyEventsCoverRegistrationAndLoginSuccess(t *testing.T) {
 
 func TestPasskeyEventsCoverRegistrationAndLoginRejection(t *testing.T) {
 	sink := &recordingEventSink{}
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{CredentialID: []byte("credential-1")}},
 	}}
 	challenges := newFakeChallengeStore()
 	service := newTestServiceWithOptions(t, store, challenges, WithEventSink(sink))
-	user := &User{ID: []byte("user-1")}
+	user := &User{ID: testUser1}
 
 	if _, err := service.BeginRegistration(context.Background(), user); err != nil {
 		t.Fatalf("BeginRegistration() error = %v", err)
@@ -111,15 +112,15 @@ func TestPasskeyEventsCoverLoginOutcomesAndStoreFailures(t *testing.T) {
 	sink := &recordingEventSink{}
 	store := &fakeStore{
 		credentialByID: map[string]*Credential{
-			"credential-1": {ID: "credential-row-1", UserID: "user-1", CredentialID: []byte("credential-1")},
+			"credential-1": {ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")},
 		},
 	}
 	service := newTestServiceWithOptions(t, store, newFakeChallengeStore(), WithEventSink(sink))
 
-	if _, err := service.finishLoginCredential(context.Background(), "user-1", &webauthn.Credential{ID: []byte("credential-1")}); err != nil {
+	if _, err := service.finishLoginCredential(context.Background(), testUser1, &webauthn.Credential{ID: []byte("credential-1")}); err != nil {
 		t.Fatalf("successful finishLoginCredential() error = %v", err)
 	}
-	if _, err := service.finishLoginCredential(context.Background(), "user-1", &webauthn.Credential{
+	if _, err := service.finishLoginCredential(context.Background(), testUser1, &webauthn.Credential{
 		ID:            []byte("credential-1"),
 		Authenticator: webauthn.Authenticator{CloneWarning: true},
 	}); !errors.Is(err, ErrCloneWarning) {
@@ -127,7 +128,7 @@ func TestPasskeyEventsCoverLoginOutcomesAndStoreFailures(t *testing.T) {
 	}
 
 	store.updateAfterLoginErr = errStoreFailure
-	if _, err := service.finishLoginCredential(context.Background(), "user-1", &webauthn.Credential{ID: []byte("credential-1")}); !errors.Is(err, errStoreFailure) {
+	if _, err := service.finishLoginCredential(context.Background(), testUser1, &webauthn.Credential{ID: []byte("credential-1")}); !errors.Is(err, errStoreFailure) {
 		t.Fatalf("store-failure finishLoginCredential() error = %v, want errStoreFailure", err)
 	}
 
@@ -148,19 +149,19 @@ func TestPasskeyEventsCoverLoginOutcomesAndStoreFailures(t *testing.T) {
 
 func TestPasskeyEventsCoverDeletionAndChallengeExpiry(t *testing.T) {
 	sink := &recordingEventSink{}
-	store := &fakeStore{credentialsByUser: map[string][]Credential{
-		"user-1": {{ID: "credential-row-1", UserID: "user-1", CredentialID: []byte("credential-1")}},
+	store := &fakeStore{credentialsByUser: map[uuid.UUID][]Credential{
+		testUser1: {{ID: testCred1, UserID: testUser1, CredentialID: []byte("credential-1")}},
 	}}
 	service := newTestServiceWithOptions(t, store, newFakeChallengeStore(), WithEventSink(sink))
 
-	if err := service.DeleteCredential(context.Background(), "user-1", "credential-row-1", DeleteOptions{AllowLast: true}); err != nil {
+	if err := service.DeleteCredential(context.Background(), testUser1, testCred1, DeleteOptions{AllowLast: true}); err != nil {
 		t.Fatalf("DeleteCredential() error = %v", err)
 	}
-	if err := service.DeleteCredential(context.Background(), "user-1", "missing", DeleteOptions{AllowLast: true}); !errors.Is(err, ErrPasskeyNotFound) {
+	if err := service.DeleteCredential(context.Background(), testUser1, missingID, DeleteOptions{AllowLast: true}); !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("missing DeleteCredential() error = %v, want ErrPasskeyNotFound", err)
 	}
 
-	if _, err := service.FinishRegistrationResponse(context.Background(), &User{ID: []byte("user-1")}, []byte("{}")); !errors.Is(err, ErrChallengeExpired) {
+	if _, err := service.FinishRegistrationResponse(context.Background(), &User{ID: testUser1}, []byte("{}")); !errors.Is(err, ErrChallengeExpired) {
 		t.Fatalf("missing registration challenge error = %v, want ErrChallengeExpired", err)
 	}
 
@@ -320,7 +321,7 @@ func TestNilSinkPathAllocatesNothing(t *testing.T) {
 	failureErr := fmt.Errorf("passkey: parsing registration response: %w", underlying)
 
 	allocs := testing.AllocsPerRun(100, func() {
-		service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: "user-123"}, failureErr, diagnosticCategory)
+		service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: testUser1}, failureErr, diagnosticCategory)
 	})
 	if allocs != 0 {
 		t.Fatalf("emitting to a nil sink allocated %v objects per call, want 0 — diagnosticCategory's errors.As walk is running before the nil-sink check", allocs)
@@ -339,7 +340,7 @@ func TestNilSinkAllocationTestIsNotVacuous(t *testing.T) {
 	underlying := protocol.ErrBadRequest.WithInfo("json: unmarshal clientExtensionResults")
 	failureErr := fmt.Errorf("passkey: parsing registration response: %w", underlying)
 
-	service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: "user-123"}, failureErr, diagnosticCategory)
+	service.emitDiag(ctx, Event{Kind: EventRegistrationRejected, UserID: testUser1}, failureErr, diagnosticCategory)
 
 	events := sink.snapshot()
 	if len(events) != 1 {
