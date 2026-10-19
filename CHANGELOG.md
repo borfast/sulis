@@ -7,6 +7,8 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
 ### BREAKING CHANGES
 
 - With `WithFailureLockout` on, `VerifyPassword` and `Login` return the store's
