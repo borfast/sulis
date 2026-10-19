@@ -29,15 +29,8 @@ type Sulis struct {
 // fully-privileged sessions to accounts that expect two-factor authentication.
 // Applications with no second factors pass NoSecondFactors{}.
 func New(users UserStore, sessions SessionStore, tokens TokenStore, factors SecondFactorChecker, opts ...Option) (*Sulis, error) {
-	switch {
-	case users == nil:
-		return nil, fmt.Errorf("sulis: UserStore must not be nil")
-	case sessions == nil:
-		return nil, fmt.Errorf("sulis: SessionStore must not be nil")
-	case tokens == nil:
-		return nil, fmt.Errorf("sulis: TokenStore must not be nil")
-	case factors == nil:
-		return nil, fmt.Errorf("sulis: SecondFactorChecker must not be nil; pass sulis.NoSecondFactors{} if this application has no second factors")
+	if err := checkStores(users, sessions, tokens, factors); err != nil {
+		return nil, err
 	}
 
 	cfg := defaultConfig()
@@ -70,6 +63,31 @@ func New(users UserStore, sessions SessionStore, tokens TokenStore, factors Seco
 	// crypto/rand cannot fail on Go >= 1.24, so ignoring the error here is safe.
 	s.dummyHash, _ = hashPassword("sulis-timing-equalization-dummy", cfg.Argon2, cfg.Pepper)
 	return s, nil
+}
+
+// WithStores returns a copy of s that uses these stores, such as ones bound to
+// a transaction. The copy shares everything else, so it costs no Argon2 hash.
+func (s *Sulis) WithStores(users UserStore, sessions SessionStore, tokens TokenStore, factors SecondFactorChecker) (*Sulis, error) {
+	if err := checkStores(users, sessions, tokens, factors); err != nil {
+		return nil, err
+	}
+	c := *s
+	c.users, c.sessions, c.tokens, c.factors = users, sessions, tokens, factors
+	return &c, nil
+}
+
+func checkStores(users UserStore, sessions SessionStore, tokens TokenStore, factors SecondFactorChecker) error {
+	switch {
+	case users == nil:
+		return fmt.Errorf("sulis: UserStore must not be nil")
+	case sessions == nil:
+		return fmt.Errorf("sulis: SessionStore must not be nil")
+	case tokens == nil:
+		return fmt.Errorf("sulis: TokenStore must not be nil")
+	case factors == nil:
+		return fmt.Errorf("sulis: SecondFactorChecker must not be nil; pass sulis.NoSecondFactors{} if this application has no second factors")
+	}
+	return nil
 }
 
 // Register creates a new user with the given email and password, and returns
@@ -122,7 +140,8 @@ func (s *Sulis) Register(ctx context.Context, email, password string, ri Request
 //
 // Returns ErrInvalidCredentials if the email or password is wrong, and
 // ErrEmailNotVerified if the account is unverified and RequireVerifiedEmail is
-// enabled (the default).
+// enabled (the default). See VerifyPassword for when a storage error replaces
+// ErrInvalidCredentials.
 func (s *Sulis) Login(ctx context.Context, email, password string, ri RequestInfo) (*LoginResult, error) {
 	user, err := s.VerifyPassword(ctx, email, password, ri)
 	if err != nil {
@@ -133,7 +152,8 @@ func (s *Sulis) Login(ctx context.Context, email, password string, ri RequestInf
 
 // VerifyPassword checks an email and password against the stored credentials
 // without creating a session. Returns ErrInvalidCredentials if the email or
-// password is wrong. Like Login, it equalizes response timing for
+// password is wrong, or the storage error if WithFailureLockout's count of the
+// wrong password cannot be saved. Like Login, it equalizes response timing for
 // unknown-user and passwordless-user cases by running the same Argon2 work
 // against a dummy hash.
 //
@@ -187,10 +207,14 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, fmt.Errorf("sulis: verifying password: %w", err)
 	}
 	if !ok {
+		var recordErr error
 		if s.cfg.FailureLockoutThreshold > 0 {
-			s.recordFailedLogin(ctx, user.ID, ri)
+			recordErr = s.recordFailedLogin(ctx, user.ID, ri)
 		}
 		s.emitLoginFailed(ctx, user.ID, ri, ReasonWrongPassword)
+		if recordErr != nil {
+			return nil, recordErr
+		}
 		return nil, ErrInvalidCredentials
 	}
 

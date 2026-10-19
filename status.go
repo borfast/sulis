@@ -2,6 +2,8 @@ package sulis
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 	"uuid"
 )
@@ -106,14 +108,12 @@ func (s *Sulis) accountStatus(user *User) error {
 // continued guessing keeps extending the deadline rather than reaching it
 // once and stopping.
 //
-// Any error is swallowed rather than returned: this is best-effort
-// bookkeeping, and a write failure here must not turn a correctly detected
-// wrong password into a different error for the caller, who is about to
-// receive ErrInvalidCredentials regardless.
+// A storage error is returned, so a caller whose transaction must keep this
+// write learns that it failed. ErrUserNotFound means there is nothing to count.
 //
 // Bounded-retry undercount: updateUserWithRetry gives up after
 // maxUserUpdateAttempts (sulis.go) attempts and returns ErrConcurrentUpdate,
-// which the swallow above then drops silently. Under extreme contention on
+// which is dropped silently, not returned. Under extreme contention on
 // one account — more concurrent failed-login writers than that in flight at
 // once — one of them can exhaust its retries this way and its increment is
 // lost. The direction is safe: an undercount only pushes
@@ -121,8 +121,9 @@ func (s *Sulis) accountStatus(user *User) error {
 // lockout that would otherwise have triggered sooner; it can never trigger
 // one early or falsely. See PROGRESS.md's T502 row — this is a pre-existing
 // property of every updateUserWithRetry caller, not something specific to
-// login failures.
-func (s *Sulis) recordFailedLogin(ctx context.Context, userID uuid.UUID, ri RequestInfo) {
+// login failures. Returning it instead would let an attacker who floods one
+// account learn that the account exists.
+func (s *Sulis) recordFailedLogin(ctx context.Context, userID uuid.UUID, ri RequestInfo) error {
 	now := time.Now()
 	// Set inside the closure and reset on every attempt, so a retry that
 	// re-reads a row someone else has meanwhile unlocked reports what the
@@ -145,9 +146,16 @@ func (s *Sulis) recordFailedLogin(ctx context.Context, userID uuid.UUID, ri Requ
 	// account.locked. A failure below the threshold is already reported as
 	// the EventLoginFailed its caller emits; saying "locked" for it would
 	// make the event mean nothing.
-	if err == nil && locked {
+	if errors.Is(err, ErrConcurrentUpdate) || errors.Is(err, ErrUserNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("sulis: recording a failed login: %w", err)
+	}
+	if locked {
 		s.emit(ctx, Event{Kind: EventAccountLocked, UserID: userID, RequestInfo: ri})
 	}
+	return nil
 }
 
 // clearFailedLogins resets the automatic-lockout bookkeeping after a

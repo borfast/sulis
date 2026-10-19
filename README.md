@@ -18,9 +18,12 @@ type SecondFactorChecker interface {
 
 Implement it against whatever your application counts as a second factor — a verified TOTP enrollment, a registered passkey, or both. Applications with no second factors pass `sulis.NoSecondFactors{}`, which states that in code rather than by omission.
 
+Make one `Sulis` per process. To run a call inside a database transaction, `s.WithStores(users, sessions, tokens, factors)` returns a copy that uses stores bound to that transaction. The copy shares the configuration, rate limiter, password checker and event sink. Calling `New` per transaction instead would compute a new Argon2 hash each time and give each copy its own rate limiter.
+
 The root package owns the auth logic and data types:
 
 - `User`, `Session`, and `Token`
+- `New`, `WithStores`
 - `Register`, `Login`, `VerifyPassword`, `IssueSession`, `IssueSessionUnchecked`, `ChangePassword`, `SetInitialPassword`
 - `ValidateSession`, `RevokeSession`, `RevokeAllSessions`
 - `ListUserSessions`, `RefreshSession`
@@ -282,6 +285,8 @@ Every session-issuance path checks account status: `VerifyPassword` (and so `Log
 `LockedUntil` is the automatic-lockout counterpart to `DisabledAt` (see below) and is checked the same way — after the password verifies — but **`ValidateSession` does not check it**. A temporary lockout throttles new authentication attempts; it does not retroactively invalidate a session issued before the lockout began, since the account owner already proved their identity once to get that session and an automatic, attacker-triggerable mechanism killing it too would make the denial-of-service risk below worse, not better.
 
 **Automatic lockout is off by default.** `WithFailureLockout(threshold, baseBackoff, maxBackoff)` enables it: after `threshold` consecutive wrong passwords, `VerifyPassword` sets `LockedUntil` to `baseBackoff` past the triggering failure, and every further wrong password while still locked pushes it out again, doubling up to `maxBackoff`. It clears itself — both `LockedUntil` and the failure count — the next time a correct password verifies outside the window; there is no explicit unlock call. It is deliberately opt-in: this mechanism locks out the legitimate owner exactly as effectively as it locks out an attacker, so anyone who merely knows (or guesses) an email address can weaponize it as a denial-of-service against that account. The rate limiter (on by default; see [Operational requirements](#operational-requirements)) is the first line of defense against guessing and does not share this failure mode, since it throttles the guesser without touching the account's own ability to log in once its window passes. Enable automatic lockout only if your threat model needs an escalating response beyond rate limiting, and prefer a long `baseBackoff`/`maxBackoff` over a short one.
+
+If the store fails to save the count of a wrong password, `VerifyPassword` and `Login` return that storage error instead of `ErrInvalidCredentials`, so an application can roll back or report the failure instead of losing the count silently. Two cases still return `ErrInvalidCredentials`: the write giving up after repeated `ErrConcurrentUpdate` conflicts, which only undercounts, and the user having been deleted.
 
 `DisableUser`/`EnableUser` are a separate, operator-initiated mechanism from automatic lockout — disabling doesn't touch `LockedUntil`/`FailedLoginAttempts`, and enabling doesn't forgive an in-progress automatic lockout the operator may not know about.
 

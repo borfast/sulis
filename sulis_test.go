@@ -4073,6 +4073,46 @@ func TestWithFailureLockoutLocksAfterThreshold(t *testing.T) {
 	}
 }
 
+// failedLoginEnv returns a Sulis with lockout on, alice registered, and her
+// UserStore ready to fail its writes.
+func failedLoginEnv(t *testing.T) (*Sulis, *failUpdateUserStore) {
+	t.Helper()
+	users := &failUpdateUserStore{memUserStore: newMemUserStore()}
+	s := mustNew(users, newMemSessionStore(), newMemTokenStore(),
+		WithArgon2Params(testArgon2Params), WithoutRateLimiting(), WithFailureLockout(3, time.Minute, time.Hour))
+	if _, _, _, err := s.Register(context.Background(), "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	return s, users
+}
+
+func TestFailedLoginWriteErrorIsReturned(t *testing.T) {
+	s, users := failedLoginEnv(t)
+	storeErr := errors.New("disk full")
+	users.updateErr = storeErr
+
+	_, err := s.Login(context.Background(), "alice@example.com", "wrong-password", RequestInfo{})
+	if !errors.Is(err, storeErr) || errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login = %v, want the storage error and not ErrInvalidCredentials", err)
+	}
+}
+
+// A write lost to conflicting updates is a safe undercount, and a deleted user
+// has nothing to count, so neither replaces ErrInvalidCredentials.
+func TestFailedLoginWriteLostToConflictOrDeletion(t *testing.T) {
+	for name, lost := range map[string]error{"conflict": ErrConcurrentUpdate, "deleted": ErrUserNotFound} {
+		t.Run(name, func(t *testing.T) {
+			s, users := failedLoginEnv(t)
+			users.updateErr = lost
+
+			_, err := s.Login(context.Background(), "alice@example.com", "wrong-password", RequestInfo{})
+			if !errors.Is(err, ErrInvalidCredentials) {
+				t.Fatalf("Login = %v, want ErrInvalidCredentials", err)
+			}
+		})
+	}
+}
+
 // TestLockoutBackoffGrowsExponentiallyAndCaps pins lockoutBackoff's pure
 // math directly: base, doubling per excess failure, capped at max, with no
 // overflow or negative result for an absurdly large excess.

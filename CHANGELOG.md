@@ -7,6 +7,22 @@ does and does not promise.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- With `WithFailureLockout` on, `VerifyPassword` and `Login` return the store's
+  error when saving the count of a wrong password fails, instead of
+  `ErrInvalidCredentials`. A write lost to repeated `ErrConcurrentUpdate`
+  conflicts, or to a deleted user, still gives `ErrInvalidCredentials`.
+  Migration: treat any error other than the documented sentinels as a failure
+  of the request, as for any other store error.
+
+### Added
+
+- `(*Sulis).WithStores` returns a copy of a `Sulis` that uses other stores,
+  such as ones bound to a database transaction. The copy shares the
+  configuration, rate limiter, password checker and event sink, and computes
+  no new Argon2 hash.
+
 ## [0.5.0] - 2026-10-19
 
 ### BREAKING CHANGES
