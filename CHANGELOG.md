@@ -13,12 +13,14 @@ does and does not promise.
 
 - `RequireSameOrigin` (the function and the `*Sulis` method) refuses a
   state-changing request with `Sec-Fetch-Site: same-site` unless its `Origin`
-  is in `allowed`. Only `same-origin` and `none` pass on the header alone.
+  is in `allowed`. Only `same-origin` and `none` pass on the header alone;
+  an unknown `Sec-Fetch-Site` value, which used to pass, is now checked
+  against `allowed` by `Origin` too, and refused if there is no `Origin`.
   `same-site` covers other ports of the same host and sibling subdomains,
-  which can read the CSRF cookie. The method reports the refusal as
-  `EventSameOriginRejected` with `ReasonOriginNotAllowed`. Migration: list
-  in `allowed` every sibling origin that sends state-changing requests to
-  your routes.
+  which can read the CSRF cookie. The method reports a refused same-site
+  request as `EventSameOriginRejected` with `ReasonOriginNotAllowed`.
+  Migration: list in `allowed` every sibling origin that sends
+  state-changing requests to your routes.
 - `Register` can return `ErrRateLimited`. It checks a per-IP bucket,
   `"register:ip:"+ip`, before it validates input or hashes the password, and
   `NewMemoryLimiter` gives that bucket the reset and magic-link IP budget. A
