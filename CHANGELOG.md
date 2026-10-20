@@ -7,6 +7,34 @@ does and does not promise.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
+### BREAKING CHANGES
+
+- `RequireSameOrigin` (the function and the `*Sulis` method) refuses a
+  state-changing request with `Sec-Fetch-Site: same-site` unless its `Origin`
+  is in `allowed`. Only `same-origin` and `none` pass on the header alone.
+  `same-site` covers other ports of the same host and sibling subdomains,
+  which can read the CSRF cookie. The method reports the refusal as
+  `EventSameOriginRejected` with `ReasonOriginNotAllowed`. Migration: list
+  in `allowed` every sibling origin that sends state-changing requests to
+  your routes.
+- `Register` can return `ErrRateLimited`. It checks a per-IP bucket,
+  `"register:ip:"+ip`, before it validates input or hashes the password, and
+  `NewMemoryLimiter` gives that bucket the reset and magic-link IP budget. A
+  call with no IP in its `RequestInfo` is not limited. A custom `Limiter`
+  sees the new key too. Migration: handle `ErrRateLimited` from `Register`
+  as you handle it from `Login`.
+
+### Fixed
+
+- A request refused by its IP bucket no longer spends a token from the
+  account bucket. `VerifyPassword` (and so `Login`), `ChangePassword`,
+  `ReAuthenticate`, `CreatePasswordResetToken`,
+  `CreatePasswordResetTokenStrict` and `CreateMagicLinkToken` now check the
+  IP bucket first, so an attacker over their own IP limit can no longer
+  drain a victim's account budget.
+
 ## [0.6.0] - 2026-10-19
 
 ### BREAKING CHANGES
