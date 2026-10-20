@@ -78,6 +78,11 @@ func withClock(now func() time.Time) MemoryLimiterOption {
 }
 
 // NewMemoryLimiter creates a token-bucket limiter with the default budgets.
+//
+// Register's IP bucket ("register:ip:") uses the reset and magic-link IP
+// budget, the tighter of the two IP budgets. Like those calls, a sign-up
+// writes a row and a real user rarely repeats it, and each one costs an
+// Argon2 hash, so a small burst also bounds how many one address can run.
 func NewMemoryLimiter(opts ...MemoryLimiterOption) *MemoryLimiter {
 	l := &MemoryLimiter{
 		buckets: make(map[string]*bucket),
@@ -88,6 +93,7 @@ func NewMemoryLimiter(opts ...MemoryLimiterOption) *MemoryLimiter {
 			"reset:ip:":    budgetTokenIP,
 			"magic:":       budgetTokenAccount,
 			"magic:ip:":    budgetTokenIP,
+			"register:ip:": budgetTokenIP,
 			"totp:":        budgetPasswordAccount,
 		},
 		fallback: budgetDefault,

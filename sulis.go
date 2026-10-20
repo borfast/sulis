@@ -91,8 +91,14 @@ func checkStores(users UserStore, sessions SessionStore, tokens TokenStore, fact
 }
 
 // Register creates a new user with the given email and password, and returns
-// a new session. Returns ErrUserAlreadyExists if the email is already taken.
+// a new session. Returns ErrUserAlreadyExists if the email is already taken,
+// and ErrRateLimited if ri.IP has used up its registration budget.
 func (s *Sulis) Register(ctx context.Context, email, password string, ri RequestInfo) (*User, *Session, string, error) {
+	// Checked first: each call costs an Argon2 hash, and a refused one must not.
+	if err := s.allowIP(ctx, "register:", ri); err != nil {
+		return nil, nil, "", err
+	}
+
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, nil, "", err

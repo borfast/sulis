@@ -139,6 +139,84 @@ func TestWithoutRateLimitingDisablesThrottling(t *testing.T) {
 	}
 }
 
+// TestRegisterIsRateLimitedPerIP covers Register's IP bucket. Each call costs
+// an Argon2 hash, so a refused call must be refused before any of that work.
+func TestRegisterIsRateLimitedPerIP(t *testing.T) {
+	checker, sink := &recordingChecker{}, &recordingSink{}
+	limiter := NewMemoryLimiter(WithBudget("register:ip:", Budget{Burst: 2, Interval: time.Hour}))
+	s, users, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter),
+		WithPasswordChecker(checker), WithEventSink(sink))
+	ctx := context.Background()
+	ri := RequestInfo{IP: "203.0.113.9"}
+
+	for i := range 2 {
+		if _, _, _, err := s.Register(ctx, fmt.Sprintf("user-%d@example.com", i), "correct-battery-staple", ri); err != nil {
+			t.Fatalf("Register %d within the budget: %v", i, err)
+		}
+	}
+	checks := len(checker.calls())
+
+	if _, _, _, err := s.Register(ctx, "user-2@example.com", "correct-battery-staple", ri); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Register after the budget is spent = %v, want ErrRateLimited", err)
+	}
+	// The IP is checked before the email is even validated.
+	if _, _, _, err := s.Register(ctx, "not-an-email", "correct-battery-staple", ri); !errors.Is(err, ErrRateLimited) {
+		t.Errorf("Register with a bad email after the budget is spent = %v, want ErrRateLimited", err)
+	}
+	// The password policy runs just before the hash, so no check means no hash.
+	if got := len(checker.calls()); got != checks {
+		t.Errorf("refused calls reached the password policy (%d checks, want %d), so they may have hashed", got, checks)
+	}
+	users.mu.Lock()
+	stored := len(users.users)
+	users.mu.Unlock()
+	if stored != 2 {
+		t.Errorf("stored users = %d, want 2: a refused Register wrote a user", stored)
+	}
+	e, ok := sink.first(EventRateLimitTripped)
+	if !ok || e.Metadata[MetaScope] != "register" || e.Metadata[MetaDimension] != DimensionIP {
+		t.Errorf("rate-limit event metadata = %v (found: %v), want scope register and dimension ip", e.Metadata, ok)
+	}
+
+	if _, _, _, err := s.Register(ctx, "user-3@example.com", "correct-battery-staple", RequestInfo{IP: "203.0.113.10"}); err != nil {
+		t.Errorf("Register from a different IP = %v, want success", err)
+	}
+}
+
+// TestRegisterWithoutAnIPIsNotRateLimited matches the other IP buckets: with
+// no address there is nothing to key the bucket on.
+func TestRegisterWithoutAnIPIsNotRateLimited(t *testing.T) {
+	limiter := &fakeLimiter{denied: true}
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(limiter))
+
+	if _, _, _, err := s.Register(context.Background(), "alice@example.com", "correct-battery-staple", RequestInfo{}); err != nil {
+		t.Fatalf("Register with no IP = %v, want success", err)
+	}
+	if len(limiter.keys) != 0 {
+		t.Errorf("Register with no IP consulted the limiter with %v", limiter.keys)
+	}
+}
+
+func TestWithoutRateLimitingDoesNotLimitRegister(t *testing.T) {
+	s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithoutRateLimiting())
+	ri := RequestInfo{IP: "203.0.113.9"}
+
+	// More than the default register:ip: burst.
+	for i := range budgetTokenIP.Burst + 5 {
+		if _, _, _, err := s.Register(context.Background(), fmt.Sprintf("user-%d@example.com", i), "correct-battery-staple", ri); err != nil {
+			t.Fatalf("Register %d with WithoutRateLimiting: %v", i, err)
+		}
+	}
+}
+
+// TestDefaultRegisterBudgetIsTheTokenIPBudget pins the default budget for
+// Register's IP bucket. NewMemoryLimiter's doc comment says why it is this one.
+func TestDefaultRegisterBudgetIsTheTokenIPBudget(t *testing.T) {
+	if got := NewMemoryLimiter().budgetFor("register:ip:203.0.113.9"); got != budgetTokenIP {
+		t.Errorf("default register:ip: budget = %+v, want %+v", got, budgetTokenIP)
+	}
+}
+
 func TestMemoryLimiterRefillsOverTime(t *testing.T) {
 	clock := newFakeClock()
 	l := NewMemoryLimiter(withClock(clock.now), WithBudget("test:", Budget{Burst: 2, Interval: time.Minute}))

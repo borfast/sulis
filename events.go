@@ -162,9 +162,9 @@ const (
 
 	// EventRateLimitTripped reports that the configured Limiter denied a
 	// key. Carries MetaScope (the choke point: "password", "reset",
-	// "magic") and MetaDimension (DimensionAccount or DimensionIP). The
-	// limiter key itself is never in the event — it embeds an email
-	// address.
+	// "magic", "register") and MetaDimension (DimensionAccount or
+	// DimensionIP). The limiter key itself is never in the event — it
+	// embeds an email address.
 	EventRateLimitTripped EventKind = "ratelimit.tripped"
 
 	// EventAccountDisabled reports a successful DisableUser. The
@@ -225,7 +225,7 @@ const (
 	// MetaScope narrows the kind. On EventSessionRevoked it is
 	// ScopeSingleSession or ScopeAllSessions; on EventRateLimitTripped it
 	// is the choke point whose budget was exhausted ("password", "reset",
-	// "magic").
+	// "magic", "register").
 	MetaScope MetadataKey = "scope"
 
 	// MetaDimension is DimensionAccount or DimensionIP, on
