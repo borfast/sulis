@@ -350,3 +350,40 @@ func TestSulisRequireSameOriginReportsARefusedSameSiteRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestRequireSameOriginRefusesAnUnknownSecFetchSite pins the 0.7.0 rule that
+// only same-origin and none pass on the header alone. An unknown value used to
+// pass; now it needs a listed Origin like any other value.
+func TestRequireSameOriginRefusesAnUnknownSecFetchSite(t *testing.T) {
+	for _, tc := range []struct {
+		origin, wantReason string
+	}{
+		{"", ReasonCrossSite},
+		{"https://other.example.com", ReasonOriginNotAllowed},
+	} {
+		t.Run("Origin="+tc.origin, func(t *testing.T) {
+			sink := &recordingSink{}
+			s, _, _, _ := newTestEnv(WithEventSink(sink))
+			called := false
+			handler := s.RequireSameOrigin([]string{"https://app.example.com"})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("Sec-Fetch-Site", "bogus")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden || called {
+				t.Fatalf("status = %d, handler called = %v; want 403 and not called", rec.Code, called)
+			}
+			e, ok := sink.first(EventSameOriginRejected)
+			if !ok || e.Metadata[MetaReason] != tc.wantReason {
+				t.Errorf("event metadata = %v (found: %v), want reason %q", e.Metadata, ok, tc.wantReason)
+			}
+		})
+	}
+}
