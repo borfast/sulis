@@ -269,11 +269,13 @@ everything that mailbox could still reach.
   of the `__Host-` layer for a configured Sulis instance; its security
   trade-off and fixed `Secure`/`Path=/`/no-`Domain` attributes are documented
   in the option's GoDoc and README.
-- **`RequireSameOrigin`** rejects a cross-site, state-changing request
-  using the `Sec-Fetch-Site` header (falling back to `Origin`) — a separate
-  layer alongside the double-submit defense. It deliberately accepts
-  `same-site`, so it does not protect a non-`__Host-` CSRF cookie from a
-  hostile sibling subdomain. When
+- **`RequireSameOrigin`** rejects a same-site or cross-site, state-changing
+  request using the `Sec-Fetch-Site` header (falling back to `Origin`) — a
+  separate layer alongside the double-submit defense. Only `same-origin`
+  and `none` pass on the header alone; a `same-site` request passes only if
+  its `Origin` is in the allow list. So a page on another port of the same
+  host, or on a sibling subdomain, which can read the non-`HttpOnly` CSRF
+  cookie, cannot post on a guarded route unless its origin is listed. When
   both headers are absent, the request is allowed through by design: that
   combination is the signature of a non-browser client (a Bearer-token
   API caller, in particular), which was never CSRF-exploitable to begin
@@ -345,10 +347,11 @@ implementation record rather than invented for this document:
   that they hold any particular session. This is mitigated, but not
   eliminated, by the default `__Host-` prefix (blocking cross-subdomain cookie
   injection) and by `RequireSameOrigin` as a separate, cookie-content-
-  agnostic layer against cross-site requests. The origin middleware accepts
-  same-site requests, so it does not mitigate cookie injection by a hostile
-  sibling subdomain. The two mechanisms are separate defenses, not one
-  defense reinforcing the other cryptographically.
+  agnostic layer against same-site and cross-site requests from origins it
+  does not list. Cookies are not separated by port, so a page on another
+  port of the same host can read the CSRF cookie: a route guarded by the
+  double-submit check alone is open to it. The two mechanisms are separate
+  defenses, not one defense reinforcing the other cryptographically.
   `WithCSRFCookieName` deliberately removes the prefix layer when configured
   with a name without `__Host-` for a concrete naming requirement; it does not
   disable the other fixed cookie attributes or guarantee Secure-cookie

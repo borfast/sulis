@@ -264,3 +264,89 @@ func TestRequireSameOriginRejectsCrossSiteWithNoOrigin(t *testing.T) {
 		t.Fatalf("expected 403, got %d", rec.Code)
 	}
 }
+
+// TestRequireSameOriginSameSiteNeedsTheAllowList covers other ports of the
+// same host and sibling subdomains. The browser calls them same-site, and they
+// can read a non-HttpOnly CSRF cookie, so only a listed Origin passes.
+func TestRequireSameOriginSameSiteNeedsTheAllowList(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		allowed []string
+		origin  string
+		want    int
+	}{
+		{"no allow list", nil, "https://app.example.com:8443", http.StatusForbidden},
+		{"unlisted origin", []string{"https://app.example.com"}, "https://other.example.com", http.StatusForbidden},
+		{"no Origin", []string{"https://app.example.com"}, "", http.StatusForbidden},
+		{"listed origin", []string{"https://app.example.com"}, "https://app.example.com", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := RequireSameOrigin(tc.allowed)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("Sec-Fetch-Site", "same-site")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+// TestRequireSameOriginPassesSameOriginOnTheHeaderAlone: same-origin and none
+// pass with no allow list, whatever the Origin says.
+func TestRequireSameOriginPassesSameOriginOnTheHeaderAlone(t *testing.T) {
+	handler := RequireSameOrigin(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, sfs := range []string{"same-origin", "none"} {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("Sec-Fetch-Site", sfs)
+		req.Header.Set("Origin", "https://app.example.com")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Sec-Fetch-Site=%s: expected 200, got %d", sfs, rec.Code)
+		}
+	}
+}
+
+// TestSulisRequireSameOriginReportsARefusedSameSiteRequest covers the method
+// form: the refusal reaches the sink as an unlisted origin, with or without
+// an Origin header to look up.
+func TestSulisRequireSameOriginReportsARefusedSameSiteRequest(t *testing.T) {
+	for _, origin := range []string{"https://other.example.com", ""} {
+		sink := &recordingSink{}
+		s, _, _, _ := newTestEnv(WithEventSink(sink))
+		called := false
+		handler := s.RequireSameOrigin(nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			called = true
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden || called {
+			t.Fatalf("Origin %q: status = %d, handler called = %v; want 403 and not called", origin, rec.Code, called)
+		}
+		e, ok := sink.first(EventSameOriginRejected)
+		if !ok || e.Metadata[MetaReason] != ReasonOriginNotAllowed {
+			t.Errorf("Origin %q: event metadata = %v (found: %v), want reason %q", origin, e.Metadata, ok, ReasonOriginNotAllowed)
+		}
+	}
+}

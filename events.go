@@ -202,7 +202,8 @@ const (
 	// EventSameOriginRejected reports that (*Sulis).RequireSameOrigin
 	// refused a state-changing request as cross-site (ReasonCrossSite, from
 	// Sec-Fetch-Site) or as carrying an unlisted Origin
-	// (ReasonOriginNotAllowed). Emitted only by the Sulis-bound middleware;
+	// (ReasonOriginNotAllowed, also used for every refused same-site
+	// request). Emitted only by the Sulis-bound middleware;
 	// the package-level RequireSameOrigin has no sink to emit to.
 	EventSameOriginRejected EventKind = "sameorigin.rejected"
 )

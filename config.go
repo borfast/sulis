@@ -485,9 +485,10 @@ func WithCookieName(name string) Option {
 // select its chosen value and echo that value in a form field. Cookie ordering
 // determines which duplicate-name value net/http reads.
 //
-// RequireSameOrigin still blocks cross-site requests, but it deliberately
-// accepts same-site requests and therefore does not stop this sibling-
-// subdomain attack. SameSite does not stop it either. A non-__Host- name must
+// RequireSameOrigin refuses a same-site request whose Origin it does not
+// list, so on a route it guards it stops a sibling subdomain that is not
+// listed. It does nothing for a listed sibling or an unguarded route, and
+// SameSite does not stop this attack at all. A non-__Host- name must
 // therefore be treated as giving up this check's protection against cookie
 // injection, not as a relaxation repaired by the other helpers.
 //

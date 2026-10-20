@@ -88,14 +88,20 @@ func isSafeMethod(method string) bool {
 	}
 }
 
-// RequireSameOrigin returns middleware that rejects a cross-site,
-// state-changing request (any method other than GET/HEAD/OPTIONS) using
-// the Fetch Metadata Sec-Fetch-Site header, falling back to Origin when
+// RequireSameOrigin returns middleware that rejects a cross-site or
+// same-site, state-changing request (any method other than GET/HEAD/OPTIONS)
+// using the Fetch Metadata Sec-Fetch-Site header, falling back to Origin when
 // Sec-Fetch-Site is absent. allowed lists origins — scheme://host[:port],
 // e.g. "https://app.example.com" — that are trusted even when the browser
-// reports (or Origin implies) a cross-site request; include every origin
-// your own frontend is actually served from if it differs from the API's
-// origin.
+// reports (or Origin implies) a same-site or cross-site request; include
+// every origin your own frontend is actually served from if it differs from
+// the API's origin, sibling subdomains and other ports included.
+//
+// Only Sec-Fetch-Site values same-origin and none pass on the header alone.
+// A same-site request (another port of this host, or a sibling subdomain)
+// passes only if its Origin is listed, exactly as a cross-site one does:
+// cookies are not separated by port, so such a page can read the
+// non-HttpOnly CSRF cookie, and the browser sends the session cookie with it.
 //
 // This is a CSRF defense for cookie-authenticated routes; apply it (and/or
 // RequireCSRFToken) to any route reachable via a cookie-sourced session.
@@ -126,7 +132,9 @@ func RequireSameOrigin(allowed []string) func(http.Handler) http.Handler {
 // RequireSameOrigin is the package-level RequireSameOrigin bound to this
 // Sulis, so a rejection reaches the configured EventSink as
 // EventSameOriginRejected — carrying ReasonCrossSite or
-// ReasonOriginNotAllowed, which of the two checks refused. The policy is
+// ReasonOriginNotAllowed, which of the two checks refused. A refused
+// same-site request always carries ReasonOriginNotAllowed: the allow list is
+// what refused it, whether its Origin was unlisted or absent. The policy is
 // identical in every other respect; see the package-level function's doc
 // comment for it, and the T509 Decisions row in PROGRESS.md for why this is
 // a same-named method rather than a rename.
@@ -159,14 +167,17 @@ func requireSameOrigin(s *Sulis, allowed []string) func(http.Handler) http.Handl
 				// Neither header present: not a browser request context
 				// this check can evaluate. See the policy note above.
 				allow = true
-			case secFetchSite != "" && secFetchSite != "cross-site":
-				// same-origin, same-site, or none.
+			case secFetchSite == "same-origin" || secFetchSite == "none":
+				// The only values that pass on the header alone.
 				allow = true
 			case origin != "":
-				// Reached either because Sec-Fetch-Site said cross-site or
-				// because it was absent; either way the verdict now rests
-				// on the allowlist, so that is what a rejection reports.
+				// Reached because Sec-Fetch-Site said same-site or
+				// cross-site, or was absent; either way the verdict now
+				// rests on the allowlist, so that is what a rejection reports.
 				_, allow = allowedSet[origin]
+				reason = ReasonOriginNotAllowed
+			case secFetchSite == "same-site":
+				// Same-site, with no Origin to find on the allowlist.
 				reason = ReasonOriginNotAllowed
 			}
 

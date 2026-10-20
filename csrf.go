@@ -34,8 +34,8 @@ import (
 // of a defense meant to be combined with __Host- and RequireSameOrigin,
 // not as a standalone guarantee. WithCSRFCookieName can replace the name
 // with one that has no __Host- prefix, making the double-submit check
-// vulnerable to cookie injection. RequireSameOrigin does not repair that
-// loss for a hostile sibling subdomain because such requests are same-site;
+// vulnerable to cookie injection. RequireSameOrigin repairs that loss only
+// on the routes it guards, and only for a sibling subdomain it does not list;
 // see the option's own documentation before using it.
 const (
 	// CSRFCookieName is the cookie the package-level IssueCSRFToken sets
