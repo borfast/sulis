@@ -36,6 +36,10 @@ does and does not promise.
   `CreatePasswordResetTokenStrict` and `CreateMagicLinkToken` now check the
   IP bucket first, so an attacker over their own IP limit can no longer
   drain a victim's account budget.
+- The package example in `doc.go`, and the `RequestInfo` step of the
+  migration guide below, passed `r.RemoteAddr` as the IP. That value
+  carries the port, so every connection got its own bucket and no IP limit
+  applied. Both now use the host part from `net.SplitHostPort`.
 
 ## [0.6.0] - 2026-10-19
 
@@ -562,9 +566,12 @@ call `WithPasswordLengthLimits` explicitly if you need a different floor.
 **`RequestInfo` threaded through most flows**
 Was: e.g. `auth.Register(ctx, email, password)`.
 Now: `auth.Register(ctx, email, password, ri)`.
-Do this: pass `sulis.RequestInfo{IP: r.RemoteAddr, UserAgent:
-r.UserAgent()}` (or `sulis.RequestInfo{}` if you have nothing to report) —
-it feeds the IP dimension of rate limiting and is recorded on the session.
+Do this: pass `sulis.RequestInfo{IP: ip, UserAgent: r.UserAgent()}`, where
+`ip` is the host part of `r.RemoteAddr` from `net.SplitHostPort` (or
+`sulis.RequestInfo{}` if you have nothing to report). Do not pass
+`r.RemoteAddr` itself: it carries the port, so every connection would get
+its own bucket. The IP feeds the IP dimension of rate limiting and is
+recorded on the session.
 
 **`User.Version` and store-layer uniqueness/optimistic concurrency**
 Was: `UserStore.UpdateUser` had no concurrency contract, and email

@@ -56,10 +56,16 @@
 //		log.Fatal(err)
 //	}
 //
-//	ri := sulis.RequestInfo{IP: r.RemoteAddr}
+//	// The host only: r.RemoteAddr carries the port, which would give every
+//	// connection its own rate-limit bucket.
+//	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+//	if err != nil {
+//		ip = r.RemoteAddr
+//	}
+//	ri := sulis.RequestInfo{IP: ip}
 //	user, session, rawToken, err := auth.Register(ctx, email, password, ri)
 //	if err != nil {
-//		return err // ErrUserAlreadyExists, ErrInvalidEmail,
+//		return err // ErrRateLimited, ErrUserAlreadyExists, ErrInvalidEmail,
 //		            // ErrPasswordTooShort/TooLong, ErrPasswordCompromised, ...
 //	}
 //	setSessionCookie(auth.SessionCookie(rawToken, session.ExpiresAt))
