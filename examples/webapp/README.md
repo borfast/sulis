@@ -43,7 +43,7 @@ same information gathered in one place.
 | Page | Route | Library calls |
 |---|---|---|
 | Home | `GET /` | none |
-| Register | `GET/POST /register` | `sulis.MemoryLimiter.Allow`, `sulis.Register`, `sulis.IssueCSRFToken`, `sulis.CreateEmailVerificationToken` |
+| Register | `GET/POST /register` | `sulis.Register`, `sulis.IssueCSRFToken`, `sulis.CreateEmailVerificationToken` |
 | Verify email | `GET /verify` | `sulis.VerifyEmail` |
 | Log in | `GET/POST /login` | `sulis.Login`, `sulis.IssueCSRFToken`, `sulis.MemoryLimiter.Allow` (resend), `passkey.Service.BeginLogin`, `passkey.Service.FinishLoginResponse`, `passkey.Service.BeginDiscoverableLogin`, `passkey.Service.FinishDiscoverableLoginResponse`, `sulis.IssueSessionUnchecked` |
 | Second factor | `GET/POST /login/second-factor` | `totp.Service.Validate`, `recovery.Service.Consume`, `sulis.CompleteTwoFactor` |
@@ -112,12 +112,14 @@ not control, which is exactly why it is worth telling.
 
 ## Rate limiting
 
-One `sulis.MemoryLimiter` is shared across the app. sulis's own service
-builds its default limiter for the flows it owns (login, password reset,
-magic link); this second instance is passed to `totp.WithLimiter` and
-`recovery.WithLimiter`, and the register and verification-resend handlers
-call it directly under the `register:` and `resend:` key prefixes, budgeted
-in `newApp`.
+One `sulis.MemoryLimiter` is shared across the app. It is passed to
+`sulis.WithLimiter`, so it throttles the flows sulis owns (login, password
+reset, magic link, and registration by IP), and to `totp.WithLimiter` and
+`recovery.WithLimiter`. The verification-resend handler calls it directly
+under the `resend:` key prefix. `newApp` keeps sulis's default budgets except
+two: registration (`register:ip:`, tighter than sulis's default) and resend.
+A throttled `Register` returns `sulis.ErrRateLimited`, which the handler
+answers with 429.
 
 ## Security events
 

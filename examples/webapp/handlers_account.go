@@ -12,12 +12,12 @@ import (
 	"github.com/borfast/sulis"
 )
 
-// registerLimitPrefix and resendLimitPrefix are the rate-limiter key
-// prefixes this app adds on top of the ones sulis uses for its own flows.
-// newApp gives both an explicit budget; without one they would fall back to
-// the limiter's default budget, which is tuned for something else.
+// registerLimitPrefix is the key prefix sulis uses for Register's per-IP
+// bucket; newApp gives it a tighter budget than sulis's default.
+// resendLimitPrefix is this app's own prefix for the resend endpoint, with
+// an explicit budget so it does not fall back to the limiter's default.
 const (
-	registerLimitPrefix = "register:"
+	registerLimitPrefix = "register:ip:"
 	resendLimitPrefix   = "resend:"
 )
 
@@ -183,19 +183,16 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	email := r.FormValue("email")
 	password := r.FormValue("password")
 
-	// sulis rate-limits the flows it owns (login, reset, magic link), but
-	// Register is not one of them: it is an unauthenticated endpoint that
-	// creates rows and hashes a password on every call, so this app has to
-	// throttle it itself. Keyed by IP, checked before any of that work
-	// happens.
+	// Register throttles itself by ri.IP before it validates or hashes
+	// anything, so a refusal costs no Argon2 hash. It returns
+	// ErrRateLimited then, which gets the same 429 as the app's other limits.
 	ri := requestInfo(r)
-	if err := a.limiter.Allow(r.Context(), registerLimitPrefix+ri.IP); err != nil {
+	user, session, token, err := a.auth.Register(r.Context(), email, password, ri)
+	if errors.Is(err, sulis.ErrRateLimited) {
 		a.log.Error("register rate limited", "ip", ri.IP, "error", err)
 		a.rerenderRegister(w, http.StatusTooManyRequests, email, tooManyAttemptsMessage)
 		return
 	}
-
-	user, session, token, err := a.auth.Register(r.Context(), email, password, ri)
 	if err != nil {
 		a.log.Error("registering user", "email", email, "error", err)
 		a.rerenderRegister(w, http.StatusUnprocessableEntity, email, registerErrorMessage(err))
@@ -342,7 +339,7 @@ func (a *app) handleResendVerification(w http.ResponseWriter, r *http.Request) {
 	csrfToken := r.FormValue(sulis.CSRFFormField)
 
 	// Resending is unauthenticated and sends mail, so it is throttled by IP
-	// before it looks anything up, for the same reason handleRegister is.
+	// before it looks anything up, for the same reason sulis throttles Register.
 	ri := requestInfo(r)
 	if err := a.limiter.Allow(r.Context(), resendLimitPrefix+ri.IP); err != nil {
 		a.log.Error("verification resend rate limited", "ip", ri.IP, "error", err)

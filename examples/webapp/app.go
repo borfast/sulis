@@ -116,24 +116,23 @@ func newApp(ctx context.Context, dsn, baseURL string, logger *slog.Logger) (*app
 
 	factors := secondFactors{totp: db.TOTPStore(), passkeys: db.PasskeyStore()}
 
-	auth, err := sulis.New(db.UserStore(), db.SessionStore(), db.TokenStore(), factors,
-		sulis.WithEventSink(sulis.NewSlogSink(logger)))
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("creating sulis service: %w", err)
-	}
-
-	// One limiter, shared by everything sulis.New's own default limiter
-	// does not already cover. sulis.MemoryLimiter satisfies totp.Limiter
-	// and recovery.Limiter too (all three interfaces are structurally
-	// identical), so this single instance throttles TOTP code checks,
-	// recovery code checks, and the app's own register and resend
-	// endpoints, which call Allow directly with the prefixes budgeted
-	// below.
+	// One limiter for everything. sulis.MemoryLimiter satisfies
+	// totp.Limiter and recovery.Limiter too (all three interfaces are
+	// structurally identical), so this single instance throttles sulis's
+	// own flows (Register included), TOTP code checks, recovery code
+	// checks, and the app's resend endpoint, which calls Allow directly.
+	// It keeps sulis's default budgets except for the two set below.
 	limiter := sulis.NewMemoryLimiter(
 		sulis.WithBudget(registerLimitPrefix, sulis.Budget{Burst: 5, Interval: time.Minute}),
 		sulis.WithBudget(resendLimitPrefix, sulis.Budget{Burst: 5, Interval: time.Minute}),
 	)
+
+	auth, err := sulis.New(db.UserStore(), db.SessionStore(), db.TokenStore(), factors,
+		sulis.WithLimiter(limiter), sulis.WithEventSink(sulis.NewSlogSink(logger)))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("creating sulis service: %w", err)
+	}
 
 	// WithoutSecretEncryption: this demo has no key management story, and
 	// NewService requires an explicit choice either way. A real deployment

@@ -227,8 +227,8 @@ func TestRegisterVerifyLoginRoundtrip(t *testing.T) {
 
 // TestRegisterIsRateLimitedPerIP hammers /register from one address and
 // checks the app stops doing the work rather than creating an account per
-// request. sulis throttles the flows it owns; registration is not one of
-// them, so this is the app's own limiter answering.
+// request. sulis.Register does the throttling, with the budget newApp sets,
+// and the handler turns its ErrRateLimited into a 429.
 func TestRegisterIsRateLimitedPerIP(t *testing.T) {
 	a := newTestApp(t)
 	c := newTestClient(t, a)
@@ -245,6 +245,10 @@ func TestRegisterIsRateLimitedPerIP(t *testing.T) {
 		throttled = true
 		if msg := extractError(rec.Body.String()); msg != tooManyAttemptsMessage {
 			t.Errorf("throttled message = %q, want %q", msg, tooManyAttemptsMessage)
+		}
+		email := fmt.Sprintf("flood-%d@example.com", i)
+		if _, err := a.users.GetUserByEmail(t.Context(), email); err == nil {
+			t.Errorf("a throttled /register still created %s", email)
 		}
 		break
 	}
