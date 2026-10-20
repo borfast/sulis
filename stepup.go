@@ -86,10 +86,11 @@ func (s *Sulis) ReAuthenticate(ctx context.Context, session *Session, password s
 		return err
 	}
 
-	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
+	// IP first: see allowIP.
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
 		return err
 	}
-	if err := s.allowIP(ctx, "password:", ri); err != nil {
+	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
 		return err
 	}
 

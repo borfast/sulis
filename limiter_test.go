@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -206,6 +207,72 @@ func TestWithoutRateLimitingDoesNotLimitRegister(t *testing.T) {
 		if _, _, _, err := s.Register(context.Background(), fmt.Sprintf("user-%d@example.com", i), "correct-battery-staple", ri); err != nil {
 			t.Fatalf("Register %d with WithoutRateLimiting: %v", i, err)
 		}
+	}
+}
+
+// TestIPBucketIsCheckedBeforeTheAccountBucket covers every flow with both
+// buckets. A request its IP refuses must spend no token of the account it
+// names, or an attacker over their own IP limit keeps draining a victim's.
+func TestIPBucketIsCheckedBeforeTheAccountBucket(t *testing.T) {
+	ctx := context.Background()
+	ri := RequestInfo{IP: "203.0.113.5"}
+	const email, password = "alice@example.com", "correct-battery-staple"
+
+	setup := func(t *testing.T, l Limiter) (*Sulis, *User, *Session) {
+		t.Helper()
+		s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithLimiter(l))
+		// No IP, so the setup itself consults no bucket.
+		user, session, _, err := s.Register(ctx, email, password, RequestInfo{})
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		return s, user, session
+	}
+
+	for _, tc := range []struct {
+		name, prefix string
+		run          func(s *Sulis, user *User, session *Session) error
+	}{
+		{"VerifyPassword", "password:", func(s *Sulis, _ *User, _ *Session) error {
+			_, err := s.VerifyPassword(ctx, email, password, ri)
+			return err
+		}},
+		{"ChangePassword", "password:", func(s *Sulis, user *User, _ *Session) error {
+			return s.ChangePassword(ctx, user.ID, password, "another-battery-staple", ri)
+		}},
+		{"ReAuthenticate", "password:", func(s *Sulis, _ *User, session *Session) error {
+			return s.ReAuthenticate(ctx, session, password, ri)
+		}},
+		{"CreatePasswordResetToken", "reset:", func(s *Sulis, _ *User, _ *Session) error {
+			_, err := s.CreatePasswordResetToken(ctx, email, ri)
+			return err
+		}},
+		{"CreateMagicLinkToken", "magic:", func(s *Sulis, _ *User, _ *Session) error {
+			_, _, err := s.CreateMagicLinkToken(ctx, email, ri)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ipKey, accountKey := tc.prefix+"ip:"+ri.IP, tc.prefix+email
+
+			allowing := &fakeLimiter{}
+			s, user, session := setup(t, allowing)
+			if err := tc.run(s, user, session); err != nil {
+				t.Fatalf("%s with both buckets allowing: %v", tc.name, err)
+			}
+			if want := []string{ipKey, accountKey}; !slices.Equal(allowing.keys, want) {
+				t.Errorf("Allow keys = %v, want %v", allowing.keys, want)
+			}
+
+			refusing := &ipOnlyDenyLimiter{}
+			s, user, session = setup(t, refusing)
+			if err := tc.run(s, user, session); !errors.Is(err, ErrRateLimited) {
+				t.Fatalf("%s with the IP refusing = %v, want ErrRateLimited", tc.name, err)
+			}
+			if want := []string{ipKey}; !slices.Equal(refusing.keys, want) {
+				t.Errorf("Allow keys = %v, want %v: the refused request spent an account token", refusing.keys, want)
+			}
+		})
 	}
 }
 

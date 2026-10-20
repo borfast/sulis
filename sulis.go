@@ -178,10 +178,11 @@ func (s *Sulis) VerifyPassword(ctx context.Context, email, password string, ri R
 		return nil, err
 	}
 
-	if err := s.allow(ctx, "password:"+email, ri); err != nil {
+	// IP first: see allowIP.
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
 		return nil, err
 	}
-	if err := s.allowIP(ctx, "password:", ri); err != nil {
+	if err := s.allow(ctx, "password:"+email, ri); err != nil {
 		return nil, err
 	}
 
@@ -391,10 +392,11 @@ func (s *Sulis) ChangePassword(ctx context.Context, userID uuid.UUID, oldPasswor
 		return err
 	}
 
-	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
+	// IP first: see allowIP.
+	if err := s.allowIP(ctx, "password:", ri); err != nil {
 		return err
 	}
-	if err := s.allowIP(ctx, "password:", ri); err != nil {
+	if err := s.allow(ctx, "password:"+user.Email, ri); err != nil {
 		return err
 	}
 
@@ -693,10 +695,11 @@ func (s *Sulis) createPasswordResetToken(ctx context.Context, email string, ri R
 		return "", err
 	}
 
-	if err := s.allow(ctx, "reset:"+email, ri); err != nil {
+	// IP first: see allowIP.
+	if err := s.allowIP(ctx, "reset:", ri); err != nil {
 		return "", err
 	}
-	if err := s.allowIP(ctx, "reset:", ri); err != nil {
+	if err := s.allow(ctx, "reset:"+email, ri); err != nil {
 		return "", err
 	}
 

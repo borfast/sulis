@@ -184,6 +184,9 @@ func (l *MemoryLimiter) evictIfNeededLocked() {
 // address. Keyed separately from the account dimension so one host cannot
 // spread guesses across many accounts unthrottled, and so an attacker cannot
 // lock a victim out by exhausting the victim's own budget.
+//
+// Callers check it before the account bucket, so a request its IP refuses
+// spends no token of the account it names.
 func (s *Sulis) allowIP(ctx context.Context, prefix string, ri RequestInfo) error {
 	if ri.IP == "" {
 		return nil

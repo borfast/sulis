@@ -39,10 +39,11 @@ func (s *Sulis) CreateMagicLinkToken(ctx context.Context, email string, ri Reque
 		return "", "", err
 	}
 
-	if err := s.allow(ctx, "magic:"+email, ri); err != nil {
+	// IP first: see allowIP.
+	if err := s.allowIP(ctx, "magic:", ri); err != nil {
 		return "", "", err
 	}
-	if err := s.allowIP(ctx, "magic:", ri); err != nil {
+	if err := s.allow(ctx, "magic:"+email, ri); err != nil {
 		return "", "", err
 	}
 

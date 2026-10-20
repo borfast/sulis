@@ -512,7 +512,8 @@ func TestEachDecisionPointEmitsItsEventKind(t *testing.T) {
 			wantReason: "",
 			run: func(t *testing.T, sink *recordingSink) {
 				s, _, _, _ := newTestEnv(WithArgon2Params(testArgon2Params), WithEventSink(sink), WithLimiter(&fakeLimiter{denied: true}))
-				_, _ = s.Login(context.Background(), "alice@example.com", "correct-battery-staple", sweepRequestInfo)
+				// No IP, so the account key is the one denied.
+				_, _ = s.Login(context.Background(), "alice@example.com", "correct-battery-staple", RequestInfo{})
 			},
 		},
 		{
@@ -1179,11 +1180,17 @@ func mustLegacyHashUser(t *testing.T, s *Sulis, users *memUserStore, email, pass
 }
 
 // ipOnlyDenyLimiter denies only the IP dimension of the limiter's two keys,
-// so a test can reach allowIP's denial without allow's account-dimension
-// denial short-circuiting the flow first.
-type ipOnlyDenyLimiter struct{}
+// and records every key it is asked about, so a test can see which keys a
+// flow spent before its IP was refused.
+type ipOnlyDenyLimiter struct {
+	mu   sync.Mutex
+	keys []string
+}
 
-func (ipOnlyDenyLimiter) Allow(_ context.Context, key string) error {
+func (l *ipOnlyDenyLimiter) Allow(_ context.Context, key string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keys = append(l.keys, key)
 	if strings.Contains(key, ":ip:") {
 		return ErrRateLimited
 	}
@@ -1544,7 +1551,8 @@ func eventFlowSweepWithSink(t *testing.T, sink *recordingSink) (*recordingSink, 
 		limitedOpts = append(limitedOpts, WithEventSink(sinkOpt))
 	}
 	limited, _, _, _ := newTestEnv(limitedOpts...)
-	if _, err := limited.Login(ctx, aliceEmail, alicePass, sweepRequestInfo); err == nil {
+	// No IP, so the account key, which embeds the email, is the one denied.
+	if _, err := limited.Login(ctx, aliceEmail, alicePass, RequestInfo{}); err == nil {
 		t.Fatal("Login through a denying limiter unexpectedly succeeded")
 	}
 
