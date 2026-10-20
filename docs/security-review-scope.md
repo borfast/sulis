@@ -158,8 +158,9 @@ Check the complete browser behavior, not just the values in an `http.Cookie`:
 drop the `__Host-` prefix. This is a material security tradeoff, not a
 cosmetic rename. In particular, dropping it from the CSRF cookie permits a
 hostile sibling subdomain to inject a cookie and defeat the bare double-submit
-check. `RequireSameOrigin` does not repair that case because the sibling
-request is still same-site. The relevant warning is in [`config.go`](../config.go)
+check. `RequireSameOrigin` repairs that case only on the routes it guards, and
+only for a sibling it does not list: it refuses a same-site request whose
+`Origin` is not in its allow list. The relevant warning is in [`config.go`](../config.go)
 and [`docs/threat-model.md`](threat-model.md); verify that the API, tests, and
 consumer-facing documentation make this consequence hard to miss.
 
